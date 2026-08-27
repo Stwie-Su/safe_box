@@ -8,7 +8,18 @@
  *   底部 Tab 64px：主页 │ 日志 │ 设置。
  */
 #include "ui/ui.h"
-// ... (头文件省略，包含了各子页面和底层核心模块) ...
+#include <time.h>            /* localtime / strftime / struct tm */
+#include "hal/actuator.h"    /* actuator_get_state */
+#include "ui/theme.h"        /* st_screen, theme_init */
+#include "ui/pages/page_monitor.h"
+#include "ui/pages/page_logs.h"
+#include "ui/pages/page_settings.h"
+#include "ui/pages/page_users.h"
+#include "ui/pages/page_network.h"
+#include "ui/pages/page_system.h"
+#include "ui/pages/page_keypad.h"
+#include "core/store.h"      /* store_init */
+#include "core/worker.h"     /* worker_init, worker_poll */
 
 #define TOPBAR_H  48  // 顶部状态栏高度
 #define TABBAR_H  64  // 底部导航栏高度
@@ -199,6 +210,12 @@ static void build_topbar(lv_obj_t * parent)
 static void build_tabbar(lv_obj_t * parent)
 {
 // 将整个底栏设置为水平 Flex 布局
+    lv_obj_t * bar = lv_obj_create(parent);
+    lv_obj_set_size(bar, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_pad_all(bar, 0, 0);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
 
     int i;
