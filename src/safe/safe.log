@@ -1,0 +1,11 @@
+{"ts":"2026-08-24T21:10:00","evt":"unlock","user":"admin","res":1,"detail":"密码开锁成功"}
+{"ts":"2026-08-25T03:53:03","evt":"setting_change","user":"system","res":1,"detail":"bootstrap: default admin created"}
+{"ts":"2026-08-25T08:12:05","evt":"user_add","user":"admin","res":1,"detail":"新增用户 guest"}
+{"ts":"2026-08-25T10:40:11","evt":"unlock_fail","user":"guest","res":0,"detail":"PIN 验证失败，剩余 4 次尝试"}
+{"ts":"2026-08-25T14:22:47","evt":"wifi_change","user":"admin","res":1,"detail":"已连接 HomeWiFi"}
+{"ts":"2026-08-25T18:03:29","evt":"unlock","user":"admin","res":1,"detail":"指纹开锁成功"}
+{"ts":"2026-08-25T10:03:22","evt":"setting_change","user":"admin","res":1,"detail":"admin verify ok"}
+{"ts":"2026-08-25T10:03:42","evt":"setting_change","user":"admin","res":1,"detail":"admin verify ok"}
+{"ts":"2026-08-25T10:03:46","evt":"setting_change","user":"admin","res":1,"detail":"月白"}
+{"ts":"2026-08-25T10:03:48","evt":"setting_change","user":"admin","res":1,"detail":"松石青"}
+{"ts":"2026-08-26T02:46:09","evt":"setting_change","user":"admin","res":1,"detail":"admin verify ok"}

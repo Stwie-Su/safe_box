@@ -1,0 +1,5 @@
+.config 
+.config.old
+build/
+.deps
+env

@@ -1,0 +1,13 @@
+{
+  // 强制使用 VM 上编译安装的高版本 cmake（系统 3.10.2 太老，lvgl v9 要 >=3.19）
+  "cmake.cmakePath": "/home/book/tools/cmake-3.22.1-linux-x86_64/bin/cmake",
+  // Kconfig 生成脚本需要 python>=3.7，系统 python3 是 3.6，用 Buildroot 自带的 3.8.5
+  "cmake.configureArgs": [
+    "-DPython3_EXECUTABLE=/home/book/100ask_imx6ull-sdk/Buildroot_2020.02.x/output/host/bin/python3"
+  ],
+  "cmake.generator": "Unix Makefiles",
+  // 默认走 PC(SDL) 配置；上板时改这里为 build_board 并加 -DLV_PORT_DEFCONFIG=configs/get_started.defconfig
+  "cmake.buildDirectory": "${workspaceFolder}/build_pc",
+  "cmake.configureOnOpen": true,
+  "cmake.statusBarVisibility": "visible"
+}

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "policy": {"pin_min_len": 4, "pin_max_len": 8, "max_failed": 5, "lock_seconds": 60},
+  "users": [
+    {"id":1,"name":"admin","role":"admin","pin_hash":"20bfe5a8f829fc3e56852686a5c9953b769c9ce20b06a42610d71956e3323a66","pin_salt":"9cff2da9414a708e25a008ca9a95a6db","auth_method":"pin","enabled":true,"created_at":"2026-08-25T03:53:03","failed_attempts":0,"lock_until":0},
+    {"id":2,"name":"guest","role":"user","pin_hash":"d9a3f7b1c2e84506a1b3c9d0e4f5a6b7c8d9e0f1a2b3c4d5e6f7081928374655","pin_salt":"7f1c2d3a4b5c6d7e8f9a0b1c2d3e4f5a","auth_method":"pin","enabled":true,"created_at":"2026-08-25T08:12:05","failed_attempts":0,"lock_until":0}
+  ]
+}

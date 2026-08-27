@@ -1,0 +1,41 @@
+# ============================================================
+#  PC（Ubuntu 桌面）验证配置 —— 用 SDL2 弹窗看真实 UI 画面
+#  与开发板 configs/get_started.defconfig 的差异【仅在后端三行】，
+#  其余（标准库/OS/颜色深度/日志/字体）完全相同。
+#  构建：cmake -B build_pc -DLV_PORT_DEFCONFIG=configs/pc.defconfig ...
+# ============================================================
+
+# --- 标准库与 OS（PC 与板子相同）---
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_OS_PTHREAD=y
+
+# --- 显示参数（PC 与板子相同；屏为 RGB565）---
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_DEF_REFR_PERIOD=16
+
+# --- 后端：PC 用 SDL2 窗口；开发板用 FBDEV+EVDEV（下面注释行即板子的，反过来在板子文件里被注释）---
+CONFIG_LV_USE_SDL=y
+# CONFIG_LV_USE_LINUX_FBDEV is not set      # ← 开发板这行改成 =y，本行注释掉
+# CONFIG_LV_USE_LINUX_DRM is not set
+# CONFIG_LV_USE_EVDEV is not set            # ← 开发板这行改成 =y
+
+# --- 日志（串口/终端可见 [ACTUATOR] 等输出）---
+CONFIG_LV_USE_LOG=y
+CONFIG_LV_LOG_PRINTF=y
+
+# --- 默认字体（LVGL 必选一个内置字体作兜底；业务中文字体为独立嵌入源文件）---
+CONFIG_LV_FONT_MONTSERRAT_14=y
+
+# --- FreeType：PC 从系统 Noto CJK 动态渲染中文，彻底避免嵌入位图缺字（DESIGN.md §4）---
+CONFIG_LV_USE_FREETYPE=y
+# FreeType 2.8.1 的 FT_Load_Glyph 轮廓路径栈占用大，32KB 会栈溢出（实测崩溃点 rsp 距栈顶仅 ~31KB）
+CONFIG_LV_DRAW_THREAD_STACK_SIZE=262144
+
+# --- 关闭 examples/demos（模板默认 y，且本移植未带其源码，必须显式关）---
+# CONFIG_LV_BUILD_EXAMPLES is not set
+# CONFIG_LV_BUILD_DEMOS is not set
+
+# SDL backend 在 SW draw 下需用 PARTIAL render mode（flush buffer → SDL texture）
+CONFIG_LV_SDL_RENDER_MODE_PARTIAL=y

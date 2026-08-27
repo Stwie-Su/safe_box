@@ -1,0 +1,33 @@
+# ============================================================
+#  开发板（i.MX6ULL / 100ask）配置 —— 交叉编译用，直接写屏 + 触摸屏
+#  与 PC 的 configs/pc.defconfig 差异【仅在后端三行】，其余完全相同。
+#  构建：cmake -B build -DLV_PORT_DEFCONFIG=configs/get_started.defconfig \
+#          -DCMAKE_TOOLCHAIN_FILE=cmake/user_cross_compile_setup.cmake ...
+# ============================================================
+
+# --- 标准库与 OS（与 PC 相同）---
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_OS_PTHREAD=y
+
+# --- 显示参数（与 PC 相同）---
+CONFIG_LV_COLOR_DEPTH_16=y          # RGB565；若屏为 RGB888 改为 CONFIG_LV_COLOR_DEPTH_32=y
+CONFIG_LV_DEF_REFR_PERIOD=16
+
+# --- 后端：板子用 FBDEV + EVDEV；PC 用 SDL（下面注释行即 PC 的，反过来在 pc.defconfig 里被注释）---
+CONFIG_LV_USE_LINUX_FBDEV=y
+CONFIG_LV_USE_EVDEV=y
+# CONFIG_LV_USE_SDL is not set           # ← PC 这行改成 =y
+# CONFIG_LV_USE_LINUX_DRM is not set
+
+# --- 日志（串口可见 [ACTUATOR] 等输出）---
+CONFIG_LV_USE_LOG=y
+CONFIG_LV_LOG_PRINTF=y
+
+# --- 默认字体（LVGL 必选一个内置字体作兜底；业务中文字体为独立嵌入源文件）---
+CONFIG_LV_FONT_MONTSERRAT_14=y
+
+# --- 关闭 examples/demos（模板默认 y，且本移植未带其源码，必须显式关）---
+# CONFIG_LV_BUILD_EXAMPLES is not set
+# CONFIG_LV_BUILD_DEMOS is not set

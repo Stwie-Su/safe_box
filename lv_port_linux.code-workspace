@@ -1,0 +1,18 @@
+{
+    "folders": [
+        {
+            "path": "."
+        }
+    ],
+    "settings": {
+        "cmake.cmakePath": "/home/book/tools/cmake-3.22.1-linux-x86_64/bin/cmake",
+        "cmake.configureArgs": [
+            "-DPython3_EXECUTABLE=/home/book/100ask_imx6ull-sdk/Buildroot_2020.02.x/output/host/bin/python3",
+			"-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+        ],
+        "cmake.generator": "Unix Makefiles",
+        "cmake.buildDirectory": "${workspaceFolder}/build_pc",
+        "cmake.configureOnOpen": true,
+        "cmake.statusBarVisibility": "visible"
+    }
+}
