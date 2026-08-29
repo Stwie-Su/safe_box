@@ -24,6 +24,7 @@ typedef enum {
     TH_PANEL2,      /* 次面板 */
     TH_TEXT,        /* 正文 */
     TH_TEXT_MUT,    /* 次要文字 */
+    TH_TEXT_PLACEHOLDER, /* 输入框占位/提示文字 */
     TH_BORDER,      /* 描边 */
     TH_ACCENT,      /* 强调 */
     TH_ACCENT_INK,  /* 强调上文字 */
@@ -51,6 +52,7 @@ extern lv_style_t st_panel;         /* 卡片面板 */
 extern lv_style_t st_panel2;        /* 次面板（输入区/列表项） */
 extern lv_style_t st_text;          /* 正文 */
 extern lv_style_t st_text_mut;      /* 次要文字 */
+extern lv_style_t st_text_placeholder; /* 输入框占位/提示文字 */
 extern lv_style_t st_border;        /* 描边/分隔 */
 extern lv_style_t st_accent_btn;    /* 强调按钮 */
 extern lv_style_t st_accent_btn_pr; /* 强调按钮按下 */
@@ -62,11 +64,16 @@ extern lv_style_t st_danger_text;   /* 危险色文字 */
 extern lv_style_t st_tab_btn;       /* 底部 Tab（未选中） */
 extern lv_style_t st_tab_btn_checked; /* 底部 Tab（选中） */
 
-/* 初始化样式并应用默认主题（石墨黑）。app_start 调用一次。 */
+/* 初始化样式并应用默认主题（月白）。app_start 调用一次。 */
 void theme_init(void);
 
-/* 切换到第 idx 套主题（0..THEME_COUNT-1）：更新样式 + 全局重绘 */
+/* 切换到第 idx 套主题（0..THEME_COUNT-1）：更新样式 + 全局重绘 + 通知所有注册回调 */
 void theme_switch(int idx);
+
+/* 注册主题切换回调（用于刷新那些用 lv_obj_set_style_*_color() 设本地颜色覆盖的控件）。
+ * 同一个回调重复注册会被忽略；切换主题时按注册顺序调用，最多 4 个。 */
+typedef void (*theme_change_cb_t)(int idx);
+void theme_register_change_cb(theme_change_cb_t cb);
 
 /* 当前主题索引 / 名称 */
 int theme_idx(void);
@@ -78,3 +85,5 @@ lv_color_t theme_color(theme_role_t role);
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif
+
+

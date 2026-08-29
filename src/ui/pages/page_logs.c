@@ -6,6 +6,7 @@
 #include "page_logs.h"
 #include "ui/ui.h"
 #include "ui/theme.h"
+#include "ui/ui_scale.h"
 #include "core/store.h"
 #include "core/async_store.h"
 #include <string.h>
@@ -57,8 +58,8 @@ lv_obj_t * page_logs_create(lv_obj_t * parent)
     lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(root, 0, 0);
     lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(root, 20, 0);
-    lv_obj_set_style_pad_row(root, 12, 0);
+    lv_obj_set_style_pad_all(root, SX(20), 0);
+    lv_obj_set_style_pad_row(root, SY(12), 0);
 
     /* 标题行 */
     lv_obj_t * head = lv_obj_create(root);
@@ -71,12 +72,12 @@ lv_obj_t * page_logs_create(lv_obj_t * parent)
     lv_obj_t * title = lv_label_create(head);
     lv_label_set_text(title, "日志记录");
     lv_obj_add_style(title, &st_text, 0);
-    lv_obj_set_style_text_font(title, app_font(28), 0);
+    lv_obj_set_style_text_font(title, app_font_scaled(28), 0);
 
     s_summary = lv_label_create(head);
     lv_obj_add_style(s_summary, &st_text_mut, 0);
-    lv_obj_set_style_text_font(s_summary, app_font(14), 0);
-    lv_obj_set_style_pad_left(s_summary, 16, 0);
+    lv_obj_set_style_text_font(s_summary, app_font_scaled(14), 0);
+    lv_obj_set_style_pad_left(s_summary, SX(16), 0);
 
     /* 筛选条 */
     build_filter_bar(root);
@@ -87,7 +88,7 @@ lv_obj_t * page_logs_create(lv_obj_t * parent)
     lv_obj_set_size(s_list, lv_pct(100), lv_pct(100));
     lv_obj_add_style(s_list, &st_panel, 0);
     lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(s_list, 4, 0);
+    lv_obj_set_style_pad_row(s_list, SY(4), 0);
     lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
 
     /* 周期刷新（日志为追加型，轮询开销小） */
@@ -103,24 +104,24 @@ static void build_filter_bar(lv_obj_t * parent)
     lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
-    lv_obj_set_style_pad_column(bar, 8, 0);
+    lv_obj_set_style_pad_column(bar, SX(8), 0);
 
     int i;
     for (i = 0; i < FIL_COUNT; i++) {
         lv_obj_t * btn = lv_button_create(bar);
-        lv_obj_set_height(btn, 36);
-        lv_obj_set_style_pad_left(btn, 14, 0);
-        lv_obj_set_style_pad_right(btn, 14, 0);
+        lv_obj_set_height(btn, SY(36));
+        lv_obj_set_style_pad_left(btn, SX(14), 0);
+        lv_obj_set_style_pad_right(btn, SX(14), 0);
         lv_obj_set_style_pad_top(btn, 0, 0);
         lv_obj_set_style_pad_bottom(btn, 0, 0);
         lv_obj_add_style(btn, &st_ghost_btn, 0);
         lv_obj_add_style(btn, &st_accent_btn, LV_STATE_CHECKED);
-        lv_obj_set_style_radius(btn, 18, 0);
+        lv_obj_set_style_radius(btn, SY(18), 0);
         lv_obj_set_style_border_width(btn, 1, LV_STATE_CHECKED);
 
         lv_obj_t * lbl = lv_label_create(btn);
         lv_label_set_text(lbl, FIL_LABELS[i]);
-        lv_obj_set_style_text_font(lbl, app_font(14), 0);
+        lv_obj_set_style_text_font(lbl, app_font_scaled(14), 0);
         lv_obj_center(lbl);
 
         lv_obj_add_event_cb(btn, filter_click_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
@@ -155,40 +156,40 @@ static void logs_loaded(log_entry_t * all, int n)
         lv_obj_t * row = lv_obj_create(s_list);
         lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
         lv_obj_add_style(row, &st_panel2, 0);
-        lv_obj_set_style_radius(row, 8, 0);
-        lv_obj_set_style_pad_top(row, 6, 0);
-        lv_obj_set_style_pad_bottom(row, 6, 0);
+        lv_obj_set_style_radius(row, SX(8), 0);
+        lv_obj_set_style_pad_top(row, SY(6), 0);
+        lv_obj_set_style_pad_bottom(row, SY(6), 0);
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
         lv_obj_t * ts = lv_label_create(row);
         lv_label_set_text(ts, e->ts);
         lv_obj_add_style(ts, &st_text_mut, 0);
-        lv_obj_set_style_text_font(ts, app_font(14), 0);
+        lv_obj_set_style_text_font(ts, app_font_scaled(14), 0);
 
         lv_obj_t * ev = lv_label_create(row);
         lv_label_set_text(ev, e->evt);
         lv_obj_add_style(ev, &st_text, 0);
-        lv_obj_set_style_text_font(ev, app_font(14), 0);
-        lv_obj_set_style_pad_left(ev, 20, 0);
+        lv_obj_set_style_text_font(ev, app_font_scaled(14), 0);
+        lv_obj_set_style_pad_left(ev, SX(20), 0);
 
         lv_obj_t * us = lv_label_create(row);
         lv_label_set_text(us, e->user);
         lv_obj_add_style(us, &st_text_mut, 0);
-        lv_obj_set_style_text_font(us, app_font(14), 0);
-        lv_obj_set_style_pad_left(us, 20, 0);
+        lv_obj_set_style_text_font(us, app_font_scaled(14), 0);
+        lv_obj_set_style_pad_left(us, SX(20), 0);
 
         lv_obj_t * rs = lv_label_create(row);
         lv_label_set_text(rs, e->res ? "成功" : "失败");
         lv_obj_add_style(rs, e->res ? &st_ok_text : &st_danger_text, 0);
-        lv_obj_set_style_text_font(rs, app_font(14), 0);
-        lv_obj_set_style_pad_left(rs, 20, 0);
+        lv_obj_set_style_text_font(rs, app_font_scaled(14), 0);
+        lv_obj_set_style_pad_left(rs, SX(20), 0);
 
         lv_obj_t * dt = lv_label_create(row);
         lv_label_set_text(dt, e->detail);
         lv_obj_add_style(dt, &st_text_mut, 0);
-        lv_obj_set_style_text_font(dt, app_font(14), 0);
-        lv_obj_set_style_pad_left(dt, 20, 0);
+        lv_obj_set_style_text_font(dt, app_font_scaled(14), 0);
+        lv_obj_set_style_pad_left(dt, SX(20), 0);
         lv_obj_set_flex_grow(dt, 1);
 
         shown++;
@@ -198,7 +199,7 @@ static void logs_loaded(log_entry_t * all, int n)
         lv_obj_t * lbl = lv_label_create(s_list);
         lv_label_set_text(lbl, "没有符合条件的记录");
         lv_obj_add_style(lbl, &st_text_mut, 0);
-        lv_obj_set_style_text_font(lbl, app_font(14), 0);
+        lv_obj_set_style_text_font(lbl, app_font_scaled(14), 0);
     }
     char sum[48];
     snprintf(sum, sizeof(sum), "共 %d 条", shown);

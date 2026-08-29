@@ -6,6 +6,7 @@
 #include "page_keypad.h"
 #include "ui/ui.h"
 #include "ui/theme.h"
+#include "ui/ui_scale.h"
 #include "core/store.h"
 #include "core/unlock_backend.h"
 #include "core/async_store.h"
@@ -36,40 +37,45 @@ lv_obj_t * page_keypad_create(lv_obj_t * parent)
 
     /* 整页一律用 lv_obj_set_pos 显式定位（不用 align / flex）。
      * 原因：页面创建后被隐藏、再显示时，lv_obj_align 会按当时的父尺寸重新应用，
-     * 导致元素渲染位置偏移；set_pos 是绝对坐标，不受重新布局影响。 */
-    int32_t root_w = lv_obj_get_width(root);
-    if (root_w <= 0) root_w = lv_obj_get_width(lv_obj_get_parent(root));
-    const int32_t kx = (root_w - 300) / 2;   /* 键盘列左缘 */
+     * 导致元素渲染位置偏移；set_pos 是绝对坐标，不受重新布局影响。
+     *
+     * ★ 修复：取屏幕水平分辨率（而非 lv_obj_get_width）计算 kx。
+     * 原因：root 一创建完 width 还是 lv_pct(100) 占位，lv_obj_get_width 返回 0；
+     * 退到 parent(s_content) 在 page 还没排版时也不可靠，实测算成 0，
+     * 导致 kx 变成 -150，整块键盘被推到屏幕左侧。直接用屏幕分辨率最稳。 */
+    lv_display_t * disp = lv_display_get_default();
+    const int32_t screen_w = disp ? lv_display_get_horizontal_resolution(disp) : 1024;
+    const int32_t kx = (screen_w - SX(300)) / 2;   /* 键盘列左缘 */
 
     /* 标题：占满宽度 + 文本居中 */
     lv_obj_t * title = lv_label_create(root);
     lv_label_set_text(title, "输入 PIN 开锁");
     lv_obj_add_style(title, &st_text, 0);
-    lv_obj_set_style_text_font(title, app_font(28), 0);
-    lv_obj_set_width(title, root_w);
+    lv_obj_set_style_text_font(title, app_font_scaled(28), 0);
+    lv_obj_set_width(title, screen_w);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(title, 0, 14);
+    lv_obj_set_pos(title, 0, SY(14));
 
     /* 输入显示（掩码）：固定宽居中 */
     s_display = lv_label_create(root);
     lv_label_set_text(s_display, "");
     lv_obj_add_style(s_display, &st_text, 0);
-    lv_obj_set_style_text_font(s_display, app_font(28), 0);
-    lv_obj_set_style_pad_all(s_display, 8, 0);
+    lv_obj_set_style_text_font(s_display, app_font_scaled(28), 0);
+    lv_obj_set_style_pad_all(s_display, SX(8), 0);
     lv_obj_set_style_bg_color(s_display, theme_color(TH_PANEL2), 0);
-    lv_obj_set_style_radius(s_display, 10, 0);
+    lv_obj_set_style_radius(s_display, SX(10), 0);
     lv_obj_set_style_text_align(s_display, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_size(s_display, 240, 54);
-    lv_obj_set_pos(s_display, kx + 30, 66);
+    lv_obj_set_size(s_display, SX(240), SY(54));
+    lv_obj_set_pos(s_display, kx + SX(30), SY(66));
 
     /* 提示：占满宽度居中 */
     s_msg = lv_label_create(root);
     lv_label_set_text(s_msg, "PIN 4-8 位，输错 5 次锁定 60 秒");
     lv_obj_add_style(s_msg, &st_text_mut, 0);
-    lv_obj_set_style_text_font(s_msg, app_font(14), 0);
-    lv_obj_set_width(s_msg, root_w);
+    lv_obj_set_style_text_font(s_msg, app_font_scaled(14), 0);
+    lv_obj_set_width(s_msg, screen_w);
     lv_obj_set_style_text_align(s_msg, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(s_msg, 0, 138);
+    lv_obj_set_pos(s_msg, 0, SY(138));
 
     /* 键盘 3×4：键直接作为 root 的子对象，绝对坐标（不套 row 容器）。
      * 实测：中间再套一层容器会导致按键整体偏移/被压扁；键直接挂父级 + set_pos 才正常。
@@ -80,20 +86,20 @@ lv_obj_t * page_keypad_create(lv_obj_t * parent)
         { "7", "8", "9" },
         { "退格", "0", "清空" },
     };
-    const int ROW_Y[4] = { 190, 246, 302, 358 };
-    const int KEY_X[3]  = { kx, kx + 100, kx + 200 };
+    const int ROW_Y[4] = { SY(190), SY(246), SY(302), SY(358) };
+    const int KEY_X[3]  = { kx, kx + SX(100), kx + SX(200) };
     for (int r = 0; r < 4; r++) {
         for (int c = 0; c < 3; c++) {
             lv_obj_t * k = lv_button_create(root);
-            lv_obj_set_size(k, 93, 46);
+            lv_obj_set_size(k, SX(93), SY(46));
             lv_obj_set_pos(k, KEY_X[c], ROW_Y[r]);
             lv_obj_add_style(k, &st_panel2, 0);
-            lv_obj_set_style_radius(k, 10, 0);
+            lv_obj_set_style_radius(k, SX(10), 0);
 
             lv_obj_t * kl = lv_label_create(k);
             lv_label_set_text(kl, KEYS[r][c]);
             lv_obj_add_style(kl, &st_text, 0);
-            lv_obj_set_style_text_font(kl, app_font(20), 0);
+            lv_obj_set_style_text_font(kl, app_font_scaled(20), 0);
             lv_obj_center(kl);
 
             lv_obj_add_event_cb(k, key_click_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)c);
@@ -103,24 +109,24 @@ lv_obj_t * page_keypad_create(lv_obj_t * parent)
 
     /* 返回 / 确认：同样直接挂 root */
     lv_obj_t * bk = lv_button_create(root);
-    lv_obj_set_size(bk, 145, 46);
-    lv_obj_set_pos(bk, kx, 414);
+    lv_obj_set_size(bk, SX(145), SY(46));
+    lv_obj_set_pos(bk, kx, SY(414));
     lv_obj_add_style(bk, &st_ghost_btn, 0);
     lv_obj_add_event_cb(bk, back_click_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * bkl = lv_label_create(bk);
     lv_label_set_text(bkl, "返回");
-    lv_obj_set_style_text_font(bkl, app_font(16), 0);
+    lv_obj_set_style_text_font(bkl, app_font_scaled(16), 0);
     lv_obj_center(bkl);
 
     lv_obj_t * ok = lv_button_create(root);
-    lv_obj_set_size(ok, 145, 46);
-    lv_obj_set_pos(ok, kx + 155, 414);
+    lv_obj_set_size(ok, SX(145), SY(46));
+    lv_obj_set_pos(ok, kx + SX(155), SY(414));
     lv_obj_add_style(ok, &st_accent_btn, 0);
     lv_obj_add_style(ok, &st_accent_btn_pr, LV_STATE_PRESSED);
     lv_obj_add_event_cb(ok, confirm_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * okl = lv_label_create(ok);
     lv_label_set_text(okl, "确认");
-    lv_obj_set_style_text_font(okl, app_font(16), 0);
+    lv_obj_set_style_text_font(okl, app_font_scaled(16), 0);
     lv_obj_center(okl);
 
     /* 复位输入 */
@@ -247,3 +253,5 @@ static void finish_ok(lv_timer_t * t)
     (void)t;
     ui_switch_page(PAGE_HOME);
 }
+
+

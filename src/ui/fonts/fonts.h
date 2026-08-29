@@ -22,12 +22,18 @@ extern lv_font_t * g_app_font_14;
 extern lv_font_t * g_app_font_16;
 extern lv_font_t * g_app_font_20;
 extern lv_font_t * g_app_font_28;
+extern lv_font_t * g_app_font_36;
+extern lv_font_t * g_app_font_44;
 
 #define app_font(size) g_app_font_##size
 
 #else
 
 /* 开发板：使用预烧录位图字体 */
+LV_FONT_DECLARE(lv_font_cn_14)
+LV_FONT_DECLARE(lv_font_cn_16)
+LV_FONT_DECLARE(lv_font_cn_20)
+LV_FONT_DECLARE(lv_font_cn_28)
 #define app_font(size) (&lv_font_cn_##size)
 
 #endif /* LV_USE_FREETYPE */

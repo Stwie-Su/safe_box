@@ -12,7 +12,7 @@ CONFIG_LV_USE_CLIB_SPRINTF=y
 CONFIG_LV_OS_PTHREAD=y
 
 # --- 显示参数（与 PC 相同）---
-CONFIG_LV_COLOR_DEPTH_16=y          # RGB565；若屏为 RGB888 改为 CONFIG_LV_COLOR_DEPTH_32=y
+CONFIG_LV_COLOR_DEPTH_32=y          # /dev/fb0 实测 32bpp；与帧缓冲同色深，flush 变纯 memcpy，省去每帧 RGB565->RGB888 转换
 CONFIG_LV_DEF_REFR_PERIOD=16
 
 # --- 后端：板子用 FBDEV + EVDEV；PC 用 SDL（下面注释行即 PC 的，反过来在 pc.defconfig 里被注释）---
@@ -28,6 +28,30 @@ CONFIG_LV_LOG_PRINTF=y
 # --- 默认字体（LVGL 必选一个内置字体作兜底；业务中文字体为独立嵌入源文件）---
 CONFIG_LV_FONT_MONTSERRAT_14=y
 
+# --- 键盘（lv_keyboard）按键是 ASCII + LVGL 符号(⌫ ↩ ⏎)，中文字体没这些码位 → 走 Montserrat。
+#     板子 scale 恒为 1.0，只需 32(字母键) / 40(数字键) 两档；其余档位关闭省 Flash。
+CONFIG_LV_FONT_MONTSERRAT_18=y
+CONFIG_LV_FONT_MONTSERRAT_22=y
+CONFIG_LV_FONT_MONTSERRAT_32=y
+CONFIG_LV_FONT_MONTSERRAT_40=y
+
 # --- 关闭 examples/demos（模板默认 y，且本移植未带其源码，必须显式关）---
 # CONFIG_LV_BUILD_EXAMPLES is not set
 # CONFIG_LV_BUILD_DEMOS is not set
+
+# 启用 snapshot API（板子也支持 SAFE_TEST_SHOT 截图验证 UI）
+CONFIG_LV_USE_SNAPSHOT=y
+
+# --- FreeType 中文字体（板子用 NotoSansCJK-Regular.ttc，无需预烧录位图字体子集）---
+CONFIG_LV_USE_FREETYPE=y
+CONFIG_LV_DRAW_THREAD_STACK_SIZE=262144
+
+# 板子只有 1 个 Cortex-A7 核心，多个软件绘制单元只会带来调度开销
+CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=1
+# 放大 FreeType 字形缓存：CJK 界面字形多，256 太小会反复光栅化导致卡顿
+CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=1024
+
+
+
+
+

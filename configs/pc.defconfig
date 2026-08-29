@@ -28,6 +28,20 @@ CONFIG_LV_LOG_PRINTF=y
 # --- 默认字体（LVGL 必选一个内置字体作兜底；业务中文字体为独立嵌入源文件）---
 CONFIG_LV_FONT_MONTSERRAT_14=y
 
+# --- 键盘（lv_keyboard）：按键文本是 ASCII + LVGL 符号(⌫ ↩ ⏎)，
+#     这些码位只有 Montserrat 有（Noto CJK 会变方块）→ 键盘整块走 Montserrat，
+#     字号按 ui_scale 放大。app_montserrat_scaled() 的档位表依赖下面这些字号，
+#     关掉某一档不会编译失败（有 #if 守卫），但会回落到更小的字号。
+CONFIG_LV_FONT_MONTSERRAT_18=y
+CONFIG_LV_FONT_MONTSERRAT_22=y
+CONFIG_LV_FONT_MONTSERRAT_24=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_32=y
+CONFIG_LV_FONT_MONTSERRAT_36=y
+CONFIG_LV_FONT_MONTSERRAT_40=y
+CONFIG_LV_FONT_MONTSERRAT_44=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
+
 # --- FreeType：PC 从系统 Noto CJK 动态渲染中文，彻底避免嵌入位图缺字（DESIGN.md §4）---
 CONFIG_LV_USE_FREETYPE=y
 # FreeType 2.8.1 的 FT_Load_Glyph 轮廓路径栈占用大，32KB 会栈溢出（实测崩溃点 rsp 距栈顶仅 ~31KB）
@@ -39,3 +53,8 @@ CONFIG_LV_DRAW_THREAD_STACK_SIZE=262144
 
 # SDL backend 在 SW draw 下需用 PARTIAL render mode（flush buffer → SDL texture）
 CONFIG_LV_SDL_RENDER_MODE_PARTIAL=y
+
+# --- 启用 snapshot API（PC 测试用：用于 SAFE_TEST_SHOT 模式截图）---
+CONFIG_LV_USE_SNAPSHOT=y
+
+

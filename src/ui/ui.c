@@ -2,7 +2,7 @@
  * @file ui.c
  * UI 外壳框架：顶部状态栏 + 底部 Tab + 内容容器。
  *
- * 布局（1024×600 目标屏）：
+ * 布局（设计基准 1024×600，通过 ui_scale 自适应任意窗口）：
  *   顶部状态栏 48px：左 = 锁状态胶囊；中 = 实时时钟；右 = WiFi 图标。
  *   内容区：h - TOPBAR_H - TABBAR_H，各页面在此创建。
  *   底部 Tab 64px：主页 │ 日志 │ 设置。
@@ -11,6 +11,7 @@
 #include <time.h>            /* localtime / strftime / struct tm */
 #include "hal/actuator.h"    /* actuator_get_state */
 #include "ui/theme.h"        /* st_screen, theme_init */
+#include "ui/ui_scale.h"     /* SX/SY 自适应缩放 */
 #include "ui/pages/page_monitor.h"
 #include "ui/pages/page_logs.h"
 #include "ui/pages/page_settings.h"
@@ -21,8 +22,9 @@
 #include "core/store.h"      /* store_init */
 #include "core/worker.h"     /* worker_init, worker_poll */
 
-#define TOPBAR_H  48  // 顶部状态栏高度
-#define TABBAR_H  64  // 底部导航栏高度
+/* 基准尺寸（设计稿像素，运行时 × scale） */
+#define TOPBAR_BASE  48
+#define TABBAR_BASE  64
 
 /* 页面描述符结构体：将页面 ID 映射到对应的页面创建函数*/
 typedef struct {
@@ -51,6 +53,14 @@ static lv_obj_t * s_page_roots[PAGE_COUNT];  // 存放所有初始化后的页�
 static lv_obj_t * s_tab_btns[3];             // 存放 3 个底部 Tab 按钮的对象指针
 static lv_obj_t * s_clock_label;             // 顶部时钟文本 Label
 static lv_obj_t * s_lock_text;               // 顶部锁状态文本 Label
+/* 主题切换时需刷新的顶栏本地颜色覆盖控件（见 topbar_refresh_theme） */
+static lv_obj_t * s_capsule;                 // 顶部锁状态胶囊
+static lv_obj_t * s_lock_icon;               // 胶囊内"锁"图标
+static lv_obj_t * s_wifi;                    // 顶部 WiFi 图标
+
+/* 运行时缩放后的实际高度 */
+static int32_t s_topbar_h;
+static int32_t s_tabbar_h;
 
 static void build_shell(void);
 static void build_topbar(lv_obj_t * parent);
@@ -59,26 +69,34 @@ static void switch_page(ui_page_t page);
 static void tab_click_cb(lv_event_t * e);
 static void status_timer_cb(lv_timer_t * t);
 static void worker_poll_timer_cb(lv_timer_t * t);
+/* 主题切换回调：刷新顶栏本地颜色覆盖（定义在 build_topbar 之后） */
+static void topbar_refresh_theme(int idx);
 
 /**
  * @brief GUI 启动入口，在 main 函数中被调用
  */
 void app_start(void)
 {
+    // 0. 初始化缩放系统（必须在所有 UI 创建之前）
+    ui_scale_init();
+    s_topbar_h = SY(TOPBAR_BASE);
+    s_tabbar_h = SY(TABBAR_BASE);
+
     // 1. 基础资源初始化
     app_fonts_init();
     theme_init();
     store_init();
-    
+
     // 2. 启动后台异步工作线程（核心架构机制）
-    // 使得 UI 线程即使执行复杂的哈希计算、网络请求也不会卡顿
-    worker_init();          
+    worker_init();
+
+    // 2.5 注册主题切换回调：刷新顶栏胶囊/锁图标/WiFi 本地颜色（须在 build_shell 之前）
+    theme_register_change_cb(topbar_refresh_theme);
 
     // 3. 构建 UI 外壳骨架（顶栏、底栏、中间空白内容区）
     build_shell();
 
     // 4. 一次性实例化所有页面
-    // 遍历 s_pages 数组，调用所有页面的 create 函数，把它们统一挂载到存放页面根节点的数组中。
     int i;
     for (i = 0; i < PAGE_COUNT; i++) {
         s_page_roots[i] = s_pages[i].create(s_content);
@@ -86,10 +104,9 @@ void app_start(void)
 
     // 5. 创建 500ms 定时器：负责定期刷新状态栏上的时间、锁状态
     lv_timer_create(status_timer_cb, 500, NULL);
-    status_timer_cb(NULL); // 立即手动调用一次，防止刚开机时状态栏空置 500ms
+    status_timer_cb(NULL); // 立即手动调用一次
 
-    // 6. 创建 20ms 定时器：这是异步任务的“结果泵”
-    // 它以极高的频率检查后台 worker 是否完成了任务，若完成则触发对应的 UI 回调
+    // 6. 创建 20ms 定时器：异步任务结果泵
     lv_timer_create(worker_poll_timer_cb, 20, NULL);   
 
     // 7. 默认切入主页（PAGE_HOME）
@@ -101,8 +118,8 @@ void app_start(void)
  */
 static void worker_poll_timer_cb(lv_timer_t * t)
 {
-    (void)t; // 抑制未使用参数的编译警告
-    worker_poll(); // 派发后台完成的作业回调到主线程
+    (void)t;
+    worker_poll();
 }
 
 /**
@@ -115,39 +132,36 @@ void ui_switch_page(ui_page_t page)
 
 static void build_shell(void)
 {
-// 1. 获取当前活动屏幕对象，并配置全局背景
+    // 1. 获取当前活动屏幕对象，并配置全局背景
     lv_obj_t * scr = lv_screen_active();
-    lv_obj_add_style(scr, &st_screen, 0);                 // 应用自定义主题样式
-    lv_obj_set_style_pad_all(scr, 0, 0);                  // 去除全屏内边距
-    lv_obj_set_style_bg_color(scr, theme_color(TH_BG), 0);// 设置统一背景色
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);        // 背景完全不透明
+    lv_obj_add_style(scr, &st_screen, 0);
+    lv_obj_set_style_pad_all(scr, 0, 0);
 
-    // 2. 获取屏幕真实分辨率，做自适应（回退值为 1024x600）
+    // 2. 获取屏幕真实分辨率
     lv_display_t * disp = lv_display_get_default();
     int32_t w = disp ? lv_display_get_horizontal_resolution(disp) : 1024;
     int32_t h = disp ? lv_display_get_vertical_resolution(disp) : 600;
 
     // 3. 构建顶部状态栏容器 (TOPBAR)
     lv_obj_t * top = lv_obj_create(scr);
-    lv_obj_set_size(top, w, TOPBAR_H);                    // 宽度满屏，高度 48
-    lv_obj_align(top, LV_ALIGN_TOP_MID, 0, 0);            // 绝对对齐：顶部居中
-    lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0);       // 这里设为透明，样式在 build_topbar 里细化
+    lv_obj_set_size(top, w, s_topbar_h);
+    lv_obj_align(top, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(top, 0, 0);
     lv_obj_set_style_pad_all(top, 0, 0);
 
-    // 4. 构建中部内容区容器 (CONTENT) - 所有子页面的父节点！
+    // 4. 构建中部内容区容器 (CONTENT)
     s_content = lv_obj_create(scr);
-    // 高度 = 总高度 - 顶栏高度 - 底栏高度
-    lv_obj_set_size(s_content, w, h - TOPBAR_H - TABBAR_H); 
-    lv_obj_align(s_content, LV_ALIGN_TOP_MID, 0, TOPBAR_H); // 紧贴着顶栏下方放置
-    lv_obj_set_style_pad_all(s_content, 0, 0);              // 必须清除内边距，否则子页面会缩进
+    lv_obj_set_size(s_content, w, h - s_topbar_h - s_tabbar_h); 
+    lv_obj_align(s_content, LV_ALIGN_TOP_MID, 0, s_topbar_h);
+    lv_obj_set_style_pad_all(s_content, 0, 0);
     lv_obj_set_style_bg_opa(s_content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_content, 0, 0);
 
     // 5. 构建底部导航栏容器 (TABBAR)
     lv_obj_t * tab = lv_obj_create(scr);
-    lv_obj_set_size(tab, w, TABBAR_H);
-    lv_obj_align(tab, LV_ALIGN_BOTTOM_MID, 0, 0);         // 绝对对齐：底部居中
+    lv_obj_set_size(tab, w, s_tabbar_h);
+    lv_obj_align(tab, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_opa(tab, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(tab, 0, 0);
     lv_obj_set_style_pad_all(tab, 0, 0);
@@ -160,56 +174,64 @@ static void build_shell(void)
 static void build_topbar(lv_obj_t * parent)
 {
     lv_obj_t * bar = lv_obj_create(parent);
-    lv_obj_set_size(bar, lv_pct(100), TOPBAR_H);
+    lv_obj_set_size(bar, lv_pct(100), lv_pct(100));
     lv_obj_add_style(bar, &st_panel, 0);
     lv_obj_set_style_radius(bar, 0, 0);
     lv_obj_set_style_pad_all(bar, 0, 0);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
 
-    /* 左侧锁状态胶囊：圆角 + 锁图标 + 状态文字 */
-    lv_obj_t * capsule = lv_obj_create(bar);
-    lv_obj_set_size(capsule, LV_SIZE_CONTENT, 32);
-    lv_obj_align(capsule, LV_ALIGN_LEFT_MID, 16, 0);
-    lv_obj_set_style_bg_color(capsule, theme_color(TH_PANEL2), 0);
-    lv_obj_set_style_bg_opa(capsule, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(capsule, 16, 0);
-    lv_obj_set_style_border_width(capsule, 0, 0);
-    lv_obj_set_style_pad_left(capsule, 10, 0);
-    lv_obj_set_style_pad_right(capsule, 12, 0);
-    lv_obj_set_style_pad_top(capsule, 0, 0);
-    lv_obj_set_style_pad_bottom(capsule, 0, 0);
-    lv_obj_set_flex_flow(capsule, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(capsule, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    /* 左侧锁状态胶囊 */
+    s_capsule = lv_obj_create(bar);
+    lv_obj_set_size(s_capsule, LV_SIZE_CONTENT, SY(32));
+    lv_obj_align(s_capsule, LV_ALIGN_LEFT_MID, SX(16), 0);
+    lv_obj_set_style_bg_color(s_capsule, theme_color(TH_PANEL2), 0);
+    lv_obj_set_style_bg_opa(s_capsule, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_capsule, SX(16), 0);
+    lv_obj_set_style_border_width(s_capsule, 0, 0);
+    lv_obj_set_style_pad_left(s_capsule, SX(10), 0);
+    lv_obj_set_style_pad_right(s_capsule, SX(12), 0);
+    lv_obj_set_style_pad_top(s_capsule, 0, 0);
+    lv_obj_set_style_pad_bottom(s_capsule, 0, 0);
+    lv_obj_set_flex_flow(s_capsule, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_capsule, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    lv_obj_t * lock_icon = lv_label_create(capsule);
-    lv_label_set_text(lock_icon, "锁");
-    lv_obj_set_style_text_font(lock_icon, app_font(16), 0);
-    lv_obj_set_style_text_color(lock_icon, theme_color(TH_ACCENT), 0);
+    s_lock_icon = lv_label_create(s_capsule);
+    lv_label_set_text(s_lock_icon, "锁");
+    lv_obj_set_style_text_font(s_lock_icon, app_font_scaled(16), 0);
+    lv_obj_set_style_text_color(s_lock_icon, theme_color(TH_ACCENT), 0);
 
-    s_lock_text = lv_label_create(capsule);
+    s_lock_text = lv_label_create(s_capsule);
     lv_label_set_text(s_lock_text, "已上锁");
     lv_obj_add_style(s_lock_text, &st_text, 0);
-    lv_obj_set_style_text_font(s_lock_text, app_font(14), 0);
-    lv_obj_set_style_pad_left(s_lock_text, 4, 0);
+    lv_obj_set_style_text_font(s_lock_text, app_font_scaled(14), 0);
+    lv_obj_set_style_pad_left(s_lock_text, SX(4), 0);
 
-    /* 中央实时时钟：绝对居中 */
+    /* 中央实时时钟 */
     s_clock_label = lv_label_create(bar);
     lv_obj_add_style(s_clock_label, &st_text, 0);
-    lv_obj_set_style_text_font(s_clock_label, app_font(20), 0);
+    lv_obj_set_style_text_font(s_clock_label, app_font_scaled(20), 0);
     lv_obj_align(s_clock_label, LV_ALIGN_CENTER, 0, 0);
 
     /* 右侧 WiFi 图标 */
-    lv_obj_t * wifi = lv_label_create(bar);
-    lv_label_set_text(wifi, LV_SYMBOL_WIFI);
-    lv_obj_set_style_text_font(wifi, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(wifi, theme_color(TH_TEXT_MUT), 0);
-    lv_obj_align(wifi, LV_ALIGN_RIGHT_MID, -20, 0);
+    s_wifi = lv_label_create(bar);
+    lv_label_set_text(s_wifi, LV_SYMBOL_WIFI);
+    lv_obj_set_style_text_font(s_wifi, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_wifi, theme_color(TH_TEXT_MUT), 0);
+    lv_obj_align(s_wifi, LV_ALIGN_RIGHT_MID, -SX(20), 0);
+}
+
+/* ★ 主题切换回调：刷新顶栏那几个用了本地颜色覆盖的控件
+ * （胶囊背景/锁图标/WiFi 图标），否则换主题时这三个不会跟着变色。 */
+static void topbar_refresh_theme(int idx)
+{
+    (void)idx;
+    if (s_capsule)  lv_obj_set_style_bg_color(s_capsule, theme_color(TH_PANEL2), 0);
+    if (s_lock_icon) lv_obj_set_style_text_color(s_lock_icon, theme_color(TH_ACCENT), 0);
+    if (s_wifi)     lv_obj_set_style_text_color(s_wifi, theme_color(TH_TEXT_MUT), 0);
 }
 
 static void build_tabbar(lv_obj_t * parent)
 {
-// 将整个底栏设置为水平 Flex 布局
     lv_obj_t * bar = lv_obj_create(parent);
     lv_obj_set_size(bar, lv_pct(100), lv_pct(100));
     lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
@@ -220,70 +242,51 @@ static void build_tabbar(lv_obj_t * parent)
 
     int i;
     for (i = 0; i < 3; i++) {
-        // 创建三个 Tab 按钮
         lv_obj_t * btn = lv_button_create(bar);
-        lv_obj_set_flex_grow(btn, 1);       // 核心：让三个按钮均分宽度 (相当于 flex: 1)
-        lv_obj_set_height(btn, lv_pct(100)); // 高度占满父容器 (100%)
-        lv_obj_add_style(btn, &st_tab_btn, 0); // 添加普通状态样式
-        lv_obj_add_style(btn, &st_tab_btn_checked, LV_STATE_CHECKED); // 添加选中状态样式
+        lv_obj_set_flex_grow(btn, 1);
+        lv_obj_set_height(btn, lv_pct(100));
+        lv_obj_add_style(btn, &st_tab_btn, 0);
+        lv_obj_add_style(btn, &st_tab_btn_checked, LV_STATE_CHECKED);
 
-        /* 
-         * 注意这里的防坑设计注释！
-         * 在 LVGL v9 中，如果不直接把 Label 画在 Button 上，而是中间套一个 Obj 容器，
-         * 那个 Obj 会拦截点击事件，导致 Button 永远触发不了 CLICKED。
-         */
-        lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_COLUMN); // 按钮内部垂直排列（上图标、下文字）
+        lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-        // 创建图标和文字
         lv_obj_t * icon = lv_label_create(btn);
         lv_label_set_text(icon, TAB_ICONS[i]);
+        lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);  /* Montserrat has LVGL symbols */
+
+        /* ★ 修复中文乱码：显式设置中文字体 */
         lv_obj_t * lbl = lv_label_create(btn);
         lv_label_set_text(lbl, TAB_LABELS[i]);
+        lv_obj_set_style_text_font(lbl, app_font_scaled(14), 0);
 
-        // 绑定点击事件，将当前按钮的索引 (i) 作为 user_data 传给回调函数
         lv_obj_add_event_cb(btn, tab_click_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
-        s_tab_btns[i] = btn; // 保存按钮句柄，用于切换页面时改变其高亮状态
+        s_tab_btns[i] = btn;
     }
 }
 
-/**
- * @brief 页面到 Tab 的归属映射器
- * 因为系统有 7 个页面，但只有 3 个底栏按钮，进入子页面时底栏对应的父 Tab 需要保持高亮。
- */
 static ui_page_t tab_of_page(ui_page_t page)
 {
     switch (page) {
-        case PAGE_LOGS:    return PAGE_LOGS; // 映射到 Tab 1
+        case PAGE_LOGS:    return PAGE_LOGS;
         case PAGE_SETTINGS:
         case PAGE_USERS:
         case PAGE_NETWORK:
-        case PAGE_SYSTEM:  return PAGE_SETTINGS; // 这些都属于设置的子页面，映射到 Tab 2
-        default:           return PAGE_HOME; // 默认（包括主页、密码键盘）映射到 Tab 0
+        case PAGE_SYSTEM:  return PAGE_SETTINGS;
+        default:           return PAGE_HOME;
     }
 }
 
-/**
- * @brief 页面切换的核心控制函数（采用“控件显示/隐藏”模式的平铺式路由）
- * @param page 目标切入的页面 ID（枚举类型）
- */
 static void switch_page(ui_page_t page)
 {
     int i;
-    // 1. 防御性安全检查：若传入的页面 ID 超出允许范围，立即退出，防止后续数组越界崩溃
     if (page >= PAGE_COUNT) return;
-    // 2. 映射关联：调用辅助函数，找出当前页面属于 3 个底部 Tab 导航中的哪一个
     ui_page_t tab = tab_of_page(page);
-    // 3. 重置底部导航栏：清除所有 3 个 Tab 按钮的“选中/高亮”状态（LV_STATE_CHECKED）
     for (i = 0; i < 3; i++) {
         lv_obj_remove_state(s_tab_btns[i], LV_STATE_CHECKED);
     }
-    // 4. 激活当前导航：给目标页面所属的 Tab 按钮添加“选中/高亮”状态，更新视觉UI反馈
     lv_obj_add_state(s_tab_btns[(int)tab], LV_STATE_CHECKED);
-    // 5. 批量控制页面显示：遍历所有注册在 s_page_roots 数组中的页面根容器
     for (i = 0; i < PAGE_COUNT; i++) {
-        // 当 i == page 时，表达式 (i != page) 为 false，即不隐藏（显示该页面）
-        // 当 i != page 时，表达式 (i != page) 为 true， 即隐藏该页面
         lv_obj_set_hidden(s_page_roots[i], i != (int)page);
     }
 }
@@ -309,3 +312,7 @@ static void status_timer_cb(lv_timer_t * t)
     bool open = actuator_get_state();
     lv_label_set_text(s_lock_text, open ? "已开锁" : "已上锁");
 }
+
+
+
+

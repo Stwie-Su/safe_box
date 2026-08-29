@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/ioctl.h>
 
 #include <lvgl/lvgl.h>
 
@@ -28,6 +31,10 @@
 
 /* 业务 UI 与硬件执行器（开锁机构） */
 #include "ui/ui.h"
+#include "ui/theme.h"
+#if LV_USE_SNAPSHOT
+#include "lvgl/draw/lv_snapshot.h"
+#endif
 #include "hal/actuator.h"
 #include "core/store.h"
 
@@ -79,8 +86,8 @@ static void __attribute__((unused)) configure_simulator(int argc, char ** argv)
     // 从环境变量取窗口尺寸，没有就用目标硬件默认（1024×600，见 simulator_settings.h）
     const char * env_w = getenv("LV_SIM_WINDOW_WIDTH");
     const char * env_h = getenv("LV_SIM_WINDOW_HEIGHT");
-    settings.window_width  = atoi(env_w ? env_w : LV_SIM_DEFAULT_WIDTH_STR);
-    settings.window_height = atoi(env_h ? env_h : LV_SIM_DEFAULT_HEIGHT_STR);
+    settings.window_width  = atoi(env_w ? env_w : (LV_USE_SDL ? "1843" : "1024"));
+    settings.window_height = atoi(env_h ? env_h : (LV_USE_SDL ? "1080" : "600"));
 
     // 解析命令行参数
     while((opt = getopt(argc, argv, "b:fmW:H:R:BVh")) != -1) {
@@ -133,6 +140,102 @@ static void __attribute__((unused)) configure_simulator(int argc, char ** argv)
     }
 }
 
+
+/* ============================================================
+ * 开发板：防息屏 + 触摸唤醒
+ * ---------------------------------------------------------------------------
+ * 现象：上电后过几分钟屏幕自己黑掉，再点屏幕也点不亮。
+ *
+ * 根因：内核 VT(fbcon) 的 console blanking。本板 /sys/module/kernel/parameters/
+ * consoleblank = 600（10 分钟），到点后 fbcon 会对 /dev/fb0 下发 FB_BLANK_POWERDOWN。
+ * 这条链路完全发生在内核里，应用层毫无感知：
+ *   - LVGL 走 FBDEV 后端直接写 framebuffer，上层照常刷新，但面板已关 -> 黑屏；
+ *   - 触摸事件走 /dev/input/event1（evdev），与 VT 层无关，LVGL 收得到点击，
+ *     但没有任何人去点亮面板 -> “点了没反应”。
+ * 且 consoleblank 是只读内核参数（S_IRUGO），运行时 echo 不进去（Permission denied），
+ * 改 bootargs 又要动 U-Boot，所以最稳妥是在应用层解决。
+ *
+ * 双保险修法：
+ *   1) KDSETMODE KD_GRAPHICS：声明该 VT 归图形程序所有，从源头跳过 VT blank 逻辑
+ *      （X11 / Qt eglfs 接管控制台也是这一步）。
+ *   2) 200ms 轮询兜底：一旦检测到“刚刚发生过输入”，立刻 FBIOBLANK UNBLANK。
+ *      息屏后触摸事件照样能到 LVGL，inactive_time 会归零，
+ *      于是下一拍（<=200ms）必定把屏幕点亮，首次触摸即可唤醒。
+ * ============================================================ */
+#if LV_USE_LINUX_FBDEV
+#include <linux/fb.h>
+#include <linux/kd.h>
+#include <linux/vt.h>
+
+#define KEEPALIVE_POLL_MS   200     /* 轮询周期，决定唤醒延迟上限 */
+#define KEEPALIVE_FRESH_MS  400     /* 多久内有输入算“刚活动过” */
+
+static int s_fb_keepalive_fd = -1;
+
+static void fb_keepalive_init(void)
+{
+    /* 1) 抢占 VT，从源头禁掉 console blanking */
+    int tty = open("/dev/tty1", O_RDWR);
+    if(tty >= 0) {
+        if(ioctl(tty, KDSETMODE, KD_GRAPHICS) == 0) {
+            LV_LOG_USER("keepalive: /dev/tty1 -> KD_GRAPHICS (VT blanking disabled)");
+        }
+        else {
+            LV_LOG_USER("keepalive: KDSETMODE failed: %s", strerror(errno));
+        }
+        close(tty);
+    }
+    else {
+        LV_LOG_USER("keepalive: cannot open /dev/tty1: %s", strerror(errno));
+    }
+
+    /* 2) 留一份 fb0 句柄，必要时强制点亮 */
+    s_fb_keepalive_fd = open("/dev/fb0", O_RDWR);
+    if(s_fb_keepalive_fd < 0) {
+        LV_LOG_USER("keepalive: cannot open /dev/fb0: %s", strerror(errno));
+    }
+}
+
+static void fb_keepalive_cb(lv_timer_t * t)
+{
+    (void)t;
+    if(s_fb_keepalive_fd < 0) return;
+
+    /* 只有“刚刚发生过输入”才下发 ioctl，避免每拍都打驱动 */
+    if(lv_display_get_inactive_time(NULL) > KEEPALIVE_FRESH_MS) return;
+
+    ioctl(s_fb_keepalive_fd, FBIOBLANK, FB_BLANK_UNBLANK);
+}
+#endif /* LV_USE_LINUX_FBDEV */
+
+/* ============================================================
+ * 性能探针（现场排查卡顿用，SAFE_PERF_LOG=1 打开，默认关闭、零开销）
+ * ---------------------------------------------------------------------------
+ * 为什么不用 LV_USE_PERF_MONITOR：它会在屏幕右下角画一个 FPS 覆盖层，
+ * 本身要渲染、还污染画面，不适合量产；而且它只给 FPS，看不出"抖动"。
+ * 这里直接在主循环里测 lv_timer_handler() 的单次耗时并打到日志：
+ *   avg  -> 平均每次刷新循环耗时（稳态开销）
+ *   max  -> 2 秒内的最大单次耗时（卡顿尖峰，最能反映"点下去要等一下"）
+ * 用 LV_LOG_USER 输出，默认日志级别(WARN)即可见，不需要开 TRACE
+ * （实测 TRACE 级日志约 1MB/s，在单核 Cortex-A7 上本身就是卡顿源）。
+ * ============================================================ */
+static bool     s_perf_on     = false;
+static uint32_t s_perf_loops  = 0;
+static uint32_t s_perf_ms_sum = 0;
+static uint32_t s_perf_ms_max = 0;
+
+static void perf_log_cb(lv_timer_t * t)
+{
+    (void)t;
+    if(s_perf_loops == 0) return;
+    LV_LOG_USER("perf: cycles=%u  handler avg=%u ms  max=%u ms",
+                (unsigned)s_perf_loops,
+                (unsigned)(s_perf_ms_sum / s_perf_loops),
+                (unsigned)s_perf_ms_max);
+    s_perf_loops = 0;
+    s_perf_ms_sum = 0;
+    s_perf_ms_max = 0;
+}
 
 int main(int argc, char ** argv)
 {
@@ -201,6 +304,21 @@ int main(int argc, char ** argv)
     }
 #endif
 
+#if LV_USE_LINUX_FBDEV
+    /* 开发板：接管 VT + 挂上防息屏/唤醒定时器（必须在 UI 创建前，避免首帧就被息屏） */
+    fb_keepalive_init();
+    lv_timer_create(fb_keepalive_cb, KEEPALIVE_POLL_MS, NULL);
+#endif
+
+    /* 性能探针：SAFE_PERF_LOG=1 打开，每 2 秒打一行循环耗时 */
+    {
+        const char * pe = getenv("SAFE_PERF_LOG");
+        if(pe && *pe && strcmp(pe, "0") != 0) {
+            s_perf_on = true;
+            lv_timer_create(perf_log_cb, 2000, NULL);
+        }
+    }
+
     // 启动业务应用：初始化开锁执行器 + 创建整套 UI
     actuator_init();
 
@@ -212,9 +330,71 @@ int main(int argc, char ** argv)
 
     app_start();
 
+    /* ============================================================
+     * 测试模式：环境变量控制起始页 / 起始主题（仅 PC 调试用）
+     *   SAFE_TEST_PAGE   = HOME | LOGS | SETTINGS | USERS | NETWORK | SYSTEM | KEYPAD
+     *   SAFE_TEST_THEME  = 0..3   (0=石墨黑 1=月白 2=蓝白 3=松石青)
+     *   SAFE_TEST_DLG    = add_user  在 USERS 页加载后自动打开"添加用户"弹窗
+     *   SAFE_TEST_SHOT   = /tmp/x.png  非空时初始化完截一张图
+     * ============================================================ */
+    {
+        const char * td = getenv("SAFE_TEST_DLG");
+        if (td && *td && (!strcmp(td, "add_user") || !strcmp(td, "auth") || !strcmp(td, "change_pwd"))) {
+            ui_switch_page(PAGE_USERS);
+            extern void page_users_test_open_add_dlg(void);
+            extern void page_users_test_open_auth_dlg(void);
+            extern void page_users_test_open_change_pwd_dlg(void);
+            if (!strcmp(td, "add_user"))      page_users_test_open_add_dlg();
+            else if (!strcmp(td, "auth"))     page_users_test_open_auth_dlg();
+            else                              page_users_test_open_change_pwd_dlg();
+        }
+        const char * tp = getenv("SAFE_TEST_PAGE");
+        const char * tt = getenv("SAFE_TEST_THEME");
+        if (tt && *tt) theme_switch(atoi(tt));
+        if (tp && *tp) {
+            ui_page_t pid = PAGE_HOME;
+            if (!strcmp(tp, "LOGS")) pid = PAGE_LOGS;
+            else if (!strcmp(tp, "SETTINGS")) pid = PAGE_SETTINGS;
+            else if (!strcmp(tp, "USERS")) pid = PAGE_USERS;
+            else if (!strcmp(tp, "NETWORK")) pid = PAGE_NETWORK;
+            else if (!strcmp(tp, "SYSTEM")) pid = PAGE_SYSTEM;
+            else if (!strcmp(tp, "KEYPAD")) pid = PAGE_KEYPAD;
+            ui_switch_page(pid);
+        }
+        const char * sh = getenv("SAFE_TEST_SHOT");
+        if (sh && *sh) {
+            /* 跑 5 帧让布局/字体稳定再截 */
+            for (int i = 0; i < 5; i++) lv_timer_handler();
+            lv_draw_buf_t * s = lv_snapshot_take(lv_screen_active(), LV_COLOR_FORMAT_RGB565);
+            if (s) {
+                /* lvgl 9.2 snapshot 返回 lv_draw_buf_t; data/size 在结构体里 */
+                FILE * fp = fopen(sh, "wb");
+                if (fp) {
+                    uint32_t row_bytes = s->header.stride ? s->header.stride
+                                       : s->header.w * lv_color_format_get_bpp(s->header.cf) / 8;
+                    uint8_t * p8 = (uint8_t *)s->data;
+                    for (uint32_t y = 0; y < s->header.h; y++) {
+                        fwrite(p8 + y * row_bytes, 1, s->header.w * 2, fp);
+                    }
+                    fclose(fp);
+                }
+                lv_draw_buf_destroy(s);
+            }
+            fflush(stdout); fflush(stderr);
+            _exit(0);
+        }
+    }
+
     // 主循环：不断处理 LVGL 定时器与界面刷新
     while(1) {
+        uint32_t t0 = s_perf_on ? lv_tick_get() : 0;
         uint32_t ms = lv_timer_handler();//距离下一次任务还有多久
+        if(s_perf_on) {
+            uint32_t dt = lv_tick_get() - t0;
+            s_perf_loops++;
+            s_perf_ms_sum += dt;
+            if(dt > s_perf_ms_max) s_perf_ms_max = dt;
+        }
         if(ms == LV_NO_TIMER_READY) { // 此时如果没有任务，ms 等于 0xFFFFFFFF
             ms = LV_DEF_REFR_PERIOD;
         }
@@ -223,3 +403,11 @@ int main(int argc, char ** argv)
 
     return 0;
 }
+
+
+
+
+
+
+
+

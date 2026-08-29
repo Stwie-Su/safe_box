@@ -26,6 +26,13 @@ set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
+# FreeType headers live under sysroot/usr/include/freetype2. LVGL's FindFreetype sets cache
+# variables but does not propagate them to the project's lvgl_linux target, causing evdev.c
+# (which includes lvgl_private.h -> lv_freetype_private.h) to fail with ft2build.h not found.
+if(EXISTS ${CMAKE_SYSROOT}/usr/include/freetype2)
+    include_directories(SYSTEM ${CMAKE_SYSROOT}/usr/include/freetype2)
+endif()
+
 # 让 pkg-config 找到交叉 sysroot 里的 libevdev（否则会找到宿主机 x86 版导致链接错误）
 set(ENV{PKG_CONFIG_LIBDIR} "${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig")
 set(ENV{PKG_CONFIG_SYSROOT_DIR} "${SYSROOT}")

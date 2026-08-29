@@ -1,16 +1,22 @@
 /**
  * @file page_monitor.c
- * 主页（目标 UI）：中央锁状态圆环 + 状态文字 + 最后一次开启时间 + 三个等宽信息卡。
+ * 主页（v2 设计）：中央锁状态圆环（缩小到 140px）+ 双开锁方式（密码/人脸）+ 底部紧凑信息条。
  *
- * 从上到下：
- *   1) 大圆环（200px，描边环）：中央锁图标，锁定时强调色、开启时成功色；
- *   2) 状态主标题：保险柜已上锁 / 保险柜已开启；
- *   3) 最后一次开启：MM-DD HH:MM（来自日志最近一条 unlock 成功记录）；
- *   4) 三张等宽信息卡：用户 / 今日事件 / 网络。
+ * 设计目标（DESIGN.md v2）：
+ *   1) 解决原版"开锁按钮被底栏挡住"问题：内容总高必须 < 内容区 (h - top - tab)；
+ *   2) 双开锁方式左右并排：密码（实装） / 人脸（占位，"未配置"灰显）；
+ *   3) 信息条三联横排紧凑显示，节省垂直空间。
+ *
+ * 从上到下布局：
+ *   1) 状态主标题 + 最后一次开启时间（紧凑组合）
+ *   2) 中央锁状态圆环（140px 描边环）
+ *   3) 双开锁方式：密码开锁 / 人脸开锁（占位）
+ *   4) 底部三联信息条：用户 | 今日事件 | 网络
  */
 #include "page_monitor.h"
 #include "ui/ui.h"
 #include "ui/theme.h"
+#include "ui/ui_scale.h"       /* SX/SY 自适应缩放 */
 #include "core/store.h"
 #include "core/worker.h"
 #include "hal/actuator.h"
@@ -20,14 +26,9 @@
 #include <stdlib.h>
 
 /* ================== 全局静态 UI 对象指针 ================== */
-/* 
- * 为什么定义为 static 全局变量？
- * 因为定时器回调函数（monitor_timer_cb）每秒都要刷新这些控件的文字或颜色，
- * 把它们存为文件级全局指针，方便在回调函数中直接调用 lv_label_set_text 等 API 进行修改。
- */
 static lv_obj_t * s_lock_ring;      // 中央的大圆环
-static lv_obj_t * s_lock_icon;      // 圆环中间的字（“锁”/“开”）
-static lv_obj_t * s_status_label;   // 状态主标题（“保险柜已上锁”等）
+static lv_obj_t * s_lock_icon;      // 圆环中间的字（"锁"/"开"）
+static lv_obj_t * s_status_label;   // 状态主标题（"保险柜已上锁"等）
 static lv_obj_t * s_last_label;     // 最后一次开启时间文本
 static lv_obj_t * s_user_count;     // 底部卡片1：用户数量的数值文本
 static lv_obj_t * s_event_count;    // 底部卡片2：今日事件数量的数值文本
@@ -37,136 +38,178 @@ static lv_obj_t * s_net_state;      // 底部卡片3：网络状态的文本
 static void monitor_timer_cb(lv_timer_t * t);
 static void build_info_card(lv_obj_t * parent, const char * title, lv_obj_t ** value_lbl);
 static int count_today_events(void);
+static void unlock_go_cb(lv_event_t * e);   /* 主页"开锁"按钮 → PIN 页 */
+static void face_unlock_cb(lv_event_t * e); /* 主页"人脸开锁"占位按钮 */
+static void face_tip_timer_cb(lv_timer_t * t);  /* 人脸开锁提示自动消失 */
+/* 主题切换回调：定义在文件后半部，需前置声明 */
+static void monitor_refresh_theme(int idx);
 
 /**
  * @brief 创建监控主页面（由 UI 框架调用）
- * @param parent 父容器（通常是主屏幕屏幕对象）
- * @return 创建好的当前页面的根节点 root
  */
 lv_obj_t * page_monitor_create(lv_obj_t * parent)
 {
     /* 1. 创建页面的根容器 root */
     lv_obj_t * root = lv_obj_create(parent);
-    lv_obj_set_size(root, lv_pct(100), lv_pct(100)); // 宽高占满父容器 (100%)
-    lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0); // 背景全透明
-    lv_obj_set_style_border_width(root, 0, 0);       // 取消边框
+    lv_obj_set_size(root, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(root, 0, 0);
     
-    /* 设置内边距 (Padding) */
-    lv_obj_set_style_pad_all(root, 16, 0);           // 四周基础内边距 16px
-    lv_obj_set_style_pad_row(root, 20, 0);           // Flex布局中，每行（每个子元素）之间的垂直间距 20px
+    /* 设置内边距 —— 缩放 */
+    lv_obj_set_style_pad_all(root, SX(16), 0);
+    lv_obj_set_style_pad_row(root, SY(20), 0);
 
-    /* 【核心：弹性盒子布局 Flexbox】 
-     * COLUMN：子元素从上到下垂直排列。
-     * CENTER：子元素在水平方向和垂直方向都居中对齐。
-     */
+    /* 弹性盒子布局 */
     lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN); 
     lv_obj_set_flex_align(root, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    /* 2. 创建子元素 1)：中央锁状态大圆环 */
+    /* 2. 中央锁状态大圆环 —— ★ 修复：原 SX(200) 过大，1.8x 缩放下总内容高度超内容区，
+     *      导致"开锁"按钮被底栏压住。改 SX(140)，描边 SY(5)，字 20pt */
     s_lock_ring = lv_obj_create(root);
-    lv_obj_set_size(s_lock_ring, 200, 200);                    // 强制固定尺寸 200x200
-    lv_obj_set_style_radius(s_lock_ring, LV_RADIUS_CIRCLE, 0); // 圆角半径设为最大，变成纯圆形
-    lv_obj_set_style_bg_opa(s_lock_ring, LV_OPA_TRANSP, 0);    // 环内背景透明
-    lv_obj_set_style_border_width(s_lock_ring, 6, 0);          // 圆环粗细 6px
-    lv_obj_set_style_border_color(s_lock_ring, theme_color(TH_ACCENT), 0); // 默认边框颜色为“强调色”
-    
-    // 让圆环自己也变成一个 Flex 容器，为了把里面的文字彻底居中
+    lv_obj_set_size(s_lock_ring, SX(140), SX(140));
+    lv_obj_set_style_radius(s_lock_ring, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(s_lock_ring, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_lock_ring, SY(5), 0);
+    lv_obj_set_style_border_color(s_lock_ring, theme_color(TH_ACCENT), 0);
+
     lv_obj_set_flex_flow(s_lock_ring, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_lock_ring, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    /* 圆环中间的文字图标 */
     s_lock_icon = lv_label_create(s_lock_ring);
     lv_label_set_text(s_lock_icon, "锁");
     lv_obj_add_style(s_lock_icon, &st_text, 0);
-    lv_obj_set_style_text_font(s_lock_icon, app_font(28), 0);
+    lv_obj_set_style_text_font(s_lock_icon, app_font_scaled(20), 0);
     lv_obj_set_style_text_color(s_lock_icon, theme_color(TH_ACCENT), 0);
 
-    /* 3. 创建子元素 2)：状态主标题文字 */
+    /* 3. 状态主标题 + 最后一次开启时间（紧凑组合，pad_row 减到 12） */
+    lv_obj_set_style_pad_row(root, SY(12), 0);
     s_status_label = lv_label_create(root);
     lv_label_set_text(s_status_label, "保险柜已上锁");
     lv_obj_add_style(s_status_label, &st_text, 0);
-    lv_obj_set_style_text_font(s_status_label, app_font(28), 0);
+    lv_obj_set_style_text_font(s_status_label, app_font_scaled(20), 0);
 
-    /* 4. 创建子元素 3)：最后一次开启时间文字 */
     s_last_label = lv_label_create(root);
     lv_label_set_text(s_last_label, "最后一次开启：--");
-    lv_obj_add_style(s_last_label, &st_text_mut, 0); // 使用 muted（次要/灰暗）文本样式
-    lv_obj_set_style_text_font(s_last_label, app_font(16), 0);
+    lv_obj_add_style(s_last_label, &st_text_mut, 0);
+    lv_obj_set_style_text_font(s_last_label, app_font_scaled(13), 0);
 
-    /* 5. 创建子元素 4)：底部的水平卡片容器 */
+    /* 4. ★ v2 双开锁方式：左 密码开锁（实装）/ 右 人脸开锁（占位） */
+    lv_obj_t * methods = lv_obj_create(root);
+    lv_obj_set_size(methods, lv_pct(100), SY(72));
+    lv_obj_set_style_bg_opa(methods, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(methods, 0, 0);
+    lv_obj_set_style_pad_all(methods, 0, 0);
+    lv_obj_set_style_pad_column(methods, SX(16), 0);
+    lv_obj_set_flex_flow(methods, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(methods, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    /* 密码开锁（accent 色，实装） */
+    lv_obj_t * pin_btn = lv_button_create(methods);
+    lv_obj_set_flex_grow(pin_btn, 1);
+    lv_obj_set_height(pin_btn, lv_pct(100));
+    lv_obj_add_style(pin_btn, &st_accent_btn, 0);
+    lv_obj_add_style(pin_btn, &st_accent_btn_pr, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(pin_btn, SX(12), 0);
+    lv_obj_set_flex_flow(pin_btn, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(pin_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_event_cb(pin_btn, unlock_go_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * pin_icon = lv_label_create(pin_btn);
+    lv_label_set_text(pin_icon, "密");  /* 密（Noto CJK 一定有，emoji 不一定有） */
+    lv_obj_set_style_text_font(pin_icon, app_font_scaled(22), 0);
+    lv_obj_set_style_text_color(pin_icon, theme_color(TH_ACCENT_INK), 0);
+    lv_obj_t * pin_txt = lv_label_create(pin_btn);
+    lv_label_set_text(pin_txt, "密码开锁");
+    lv_obj_set_style_text_font(pin_txt, app_font_scaled(14), 0);
+    lv_obj_set_style_text_color(pin_txt, theme_color(TH_ACCENT_INK), 0);
+    lv_obj_set_style_pad_top(pin_txt, SY(4), 0);
+
+    /* 人脸开锁（ghost 灰显，DESIGN.md 预留 / TODO：接人脸识别后端） */
+    lv_obj_t * face_btn = lv_button_create(methods);
+    lv_obj_set_flex_grow(face_btn, 1);
+    lv_obj_set_height(face_btn, lv_pct(100));
+    lv_obj_add_style(face_btn, &st_ghost_btn, 0);
+    lv_obj_set_style_radius(face_btn, SX(12), 0);
+    lv_obj_set_flex_flow(face_btn, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(face_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_event_cb(face_btn, face_unlock_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * face_icon = lv_label_create(face_btn);
+    lv_label_set_text(face_icon, "脸");  /* 脸 */
+    lv_obj_set_style_text_font(face_icon, app_font_scaled(22), 0);
+    lv_obj_t * face_txt = lv_label_create(face_btn);
+    lv_label_set_text(face_txt, "人脸开锁");
+    lv_obj_set_style_text_font(face_txt, app_font_scaled(14), 0);
+    lv_obj_set_style_pad_top(face_txt, SY(4), 0);
+    /* "未配置" 角标 */
+    lv_obj_t * face_tag = lv_label_create(face_btn);
+    lv_label_set_text(face_tag, "未配置");
+    lv_obj_set_style_text_font(face_tag, app_font_scaled(10), 0);
+    lv_obj_set_style_text_color(face_tag, theme_color(TH_TEXT_MUT), 0);
+    lv_obj_align(face_tag, LV_ALIGN_TOP_RIGHT, -SX(6), SY(4));
+
+    /* 5. 底部三联信息条（紧凑横排） */
     lv_obj_t * cards = lv_obj_create(root);
-    lv_obj_set_size(cards, lv_pct(100), LV_SIZE_CONTENT); // 宽度100%，高度根据内容自适应（包裹内容）
+    /* 卡片内部高度 SY(96)+padding，容器高度必须 ≥ 子卡片高度，否则标题会被裁剪 */
+    lv_obj_set_size(cards, lv_pct(100), SY(120));
     lv_obj_set_style_bg_opa(cards, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(cards, 0, 0);
     lv_obj_set_style_pad_all(cards, 0, 0);
-    lv_obj_set_style_pad_column(cards, 16, 0); // Flex布局中，水平排列的子元素之间的间距设为 16px
-    lv_obj_set_style_pad_top(cards, 12, 0);    // 距离上方元素稍微拉开12px
-    
-    // 这个容器是 ROW 横向排列的 Flex 盒子
+    lv_obj_set_style_pad_column(cards, SX(12), 0);
+
     lv_obj_set_flex_flow(cards, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(cards, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    /* 调用封装好的函数，连续创建3个相同的卡片结构。
-     * 注意这里传递了 &s_user_count 等指针的地址（二级指针），
-     * 这样子函数创建好动态文本控件后，能把地址赋值给这个全局变量。 */
     build_info_card(cards, "用户", &s_user_count);
     build_info_card(cards, "今日事件", &s_event_count);
     build_info_card(cards, "网络", &s_net_state);
 
-    /* 6. 创建一个定时器：每隔 1000 毫秒（1秒）触发一次 monitor_timer_cb */
+    /* 7. 定时器 */
     lv_timer_create(monitor_timer_cb, 1000, root);
-    
-    /* 手动触发一次定时器回调，让页面刚创建时立马就有数据显示，而不是干等1秒 */
     monitor_timer_cb(NULL);
-    
+
+    /* 8. 注册主题切换回调：让主页大圆环/锁字/开锁按钮的本地颜色覆盖也随主题刷新 */
+    theme_register_change_cb(monitor_refresh_theme);
+
     return root;
 }
 
 /**
- * @brief 辅助函数：构造一个数据信息卡片
- * @param parent 父容器（cards）
- * @param title 卡片顶部的标题（如 "用户"）
- * @param value_lbl [输出参数] 用来接收生成的数值Label对象指针，方便日后修改它的值
+ * @brief 辅助函数：构造一个数据信息卡片（尺寸全部缩放）
  */
 static void build_info_card(lv_obj_t * parent, const char * title, lv_obj_t ** value_lbl)
 {
     lv_obj_t * card = lv_obj_create(parent);
-    lv_obj_set_size(card, 160, 96);
+    lv_obj_set_size(card, SX(160), SY(96));           /* 卡片尺寸缩放 */
     
-    /* 【排版技巧】flex_grow(1) 表示如果父容器有多余宽度，这几个卡片会按 1:1:1 的比例均分剩余空间，实现绝对等宽 */
     lv_obj_set_flex_grow(card, 1); 
-    lv_obj_add_style(card, &st_panel, 0); // 应用全局统一的“面板”样式（可能包含圆角、阴影、深色背景等）
-    lv_obj_set_style_pad_all(card, 14, 0);
+    lv_obj_add_style(card, &st_panel, 0);
+    lv_obj_set_style_pad_all(card, SX(14), 0);         /* 内边距缩放 */
     
-    // 卡片内部也是一个上下垂直排列的弹性盒子
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    // 顶部小字标题
+    // 标题
     lv_obj_t * t = lv_label_create(card);
     lv_label_set_text(t, title);
     lv_obj_add_style(t, &st_text_mut, 0);
-    lv_obj_set_style_text_font(t, app_font(14), 0);
+    lv_obj_set_style_text_font(t, app_font_scaled(14), 0);
 
-    // 底部大字数值
-    *value_lbl = lv_label_create(card); // 通过二级指针把生成的 Label 实体传递出去
+    // 数值
+    *value_lbl = lv_label_create(card);
     lv_label_set_text(*value_lbl, "--");
     lv_obj_add_style(*value_lbl, &st_text, 0);
-    lv_obj_set_style_text_font(*value_lbl, app_font(28), 0);
-    lv_obj_set_style_pad_top(*value_lbl, 6, 0);
+    lv_obj_set_style_text_font(*value_lbl, app_font_scaled(28), 0);
+    lv_obj_set_style_pad_top(*value_lbl, SY(6), 0);    /* 间距缩放 */
 }
 
 /**
- * @brief 业务函数：统计今天的日志事件数量 (涉及本地文件系统查询，比较耗时)
+ * @brief 业务函数：统计今天的日志事件数量
  */
 static int count_today_events(void)
 {
     log_entry_t * entries = NULL;
     int n = 0;
-    // 获取全部日志。如果失败直接返回 0
     if (log_query(NULL, -1, &entries, &n) != 0) return 0;
 
-    // 获取当前的系统时间，并格式化为 "YYYY-MM-DD" 的字符串（如 "2026-08-27"）
     time_t now = time(NULL);
     struct tm tm_now;
     localtime_r(&now, &tm_now);
@@ -174,81 +217,55 @@ static int count_today_events(void)
     strftime(today, sizeof(today), "%Y-%m-%d", &tm_now);
 
     int cnt = 0;
-    // 遍历所有日志
     for (int i = 0; i < n; i++) {
-        // 取日志时间戳的前10个字符跟今天的日期比较，如果相等，计数+1
         if (strncmp(entries[i].ts, today, 10) == 0) cnt++;
     }
-    free(entries); // 释放通过查询申请的堆内存
+    free(entries);
     return cnt;
 }
 
 /* =========================================================================
- * 异步后台统计逻辑（核心难点）
- * 定时器只做极其快速的内存查询和UI刷新（不卡顿）。
- * 复杂的读文件、JSON解析、日志检索统统打包交给后台 Worker 线程。
+ * 异步后台统计逻辑
  * ========================================================================= */
 
-/* 线程间传递数据的“快递盒”结构体 */
 typedef struct {
-    int  user_count;     // 保存后台查出来的用户数
-    int  event_count;    // 保存后台查出来的今日事件数
-    char last_open[48];  // 保存后台查出来的最后开启时间字符串
+    int  user_count;
+    int  event_count;
+    char last_open[48];
 } monitor_stats_t;
 
-/* 
- * 节流阀 / 防重叠标志位：
- * 因为读写 U盘/Flash 可能很慢。假如定时器1秒触发一次，而后台查日志需要2秒。
- * 如果没有这个标志位，定时器就会疯狂向后台投递任务，导致任务队列大爆炸。
- */
 static bool s_stats_busy = false;   
 
-/**
- * @brief 【在后台线程中执行】的耗时函数。
- * 绝对不能在这里直接修改任何 LVGL UI 控件，会引发崩溃！
- */
 static void stats_worker(void * p)
 {
     monitor_stats_t * a = (monitor_stats_t *)p;
     
-    /* 1. 耗时操作：从文件读取所有用户 JSON 并解析，获取用户数 */
     safe_user_t * us = NULL;
     int uc = 0;
     if (user_load_all(&us, &uc) == 0) { 
         a->user_count = uc; 
-        user_list_free(us); // 拿到数量后，链表实体没用了，释放掉
+        user_list_free(us);
     }
 
-    /* 2. 耗时操作：检索文件日志，计算今日事件数 */
     a->event_count = count_today_events();
 
-    /* 3. 耗时操作：再次检索日志，找出最近 1 条（数量为1）包含 "unlock" 的记录 */
     log_entry_t * entries = NULL;
     int n = 0;
     if (log_query("unlock", 1, &entries, &n) == 0 && n > 0) {
-        // 提取 "YYYY-MM-DD HH:MM:SS" 中的 "MM-DD HH:MM" 
-        // entries[0].ts + 5 代表跳过 "YYYY-"
         snprintf(a->last_open, sizeof(a->last_open), "最后一次开启：%.5s %.5s",
                  entries[0].ts + 5, entries[0].ts + 11);
         free(entries);
     } else {
         snprintf(a->last_open, sizeof(a->last_open), "最后一次开启：--");
     }
-    // 执行到这里，后台计算全部完成。数据已经填满了包裹（包裹指针 a）。
 }
 
-/**
- * @brief 【在主线程（UI线程）中执行】的回调函数。
- * 当 Worker 线程完成上面的任务后，主线程（通过 worker_poll）会调用这里。
- */
 static void stats_done(void * p)
 {
     monitor_stats_t * a = (monitor_stats_t *)p;
     
-    // 任务完成，解除节流锁，允许定时器投递下一轮后台任务
     s_stats_busy = false;
 
-    // 因为当前运行在主线程，可以极其安全地更新 LVGL 的各种标签控件了
     char buf[16];
     
     snprintf(buf, sizeof(buf), "%d", a->user_count);
@@ -261,46 +278,89 @@ static void stats_done(void * p)
     
     lv_label_set_text(s_last_label, a->last_open);
 
-    // 释放那个装满数据的包裹（包裹是在定时器里 malloc 的）
     free(a);
 }
 
-/**
- * @brief 周期定时器回调 (1000ms触发一次)
- * 运行在主线程。要求：内部代码执行必须快如闪电，绝对不能有阻塞等待。
- */
+/* 把"根据锁状态刷新控件颜色"独立出来：既被 timer 调用，也被主题切换回调调用 */
+static void monitor_refresh_state_colors(void)
+{
+    bool open = actuator_get_state();
+    if (s_lock_ring) lv_obj_set_style_border_color(s_lock_ring, open ? theme_color(TH_OK) : theme_color(TH_ACCENT), 0);
+    if (s_lock_icon) {
+        lv_obj_set_style_text_color(s_lock_icon, open ? theme_color(TH_OK) : theme_color(TH_ACCENT), 0);
+        lv_label_set_text(s_lock_icon, open ? "开" : "锁");
+    }
+    if (s_status_label) lv_label_set_text(s_status_label, open ? "保险柜已开启" : "保险柜已上锁");
+}
+
+/* 主题切换回调：让主页大圆环/锁字/开锁按钮的本地颜色覆盖也随主题刷新 */
+static void monitor_refresh_theme(int idx)
+{
+    (void)idx;
+    monitor_refresh_state_colors();
+}
+
 static void monitor_timer_cb(lv_timer_t * t)
 {
     (void)t;
+    monitor_refresh_state_colors();
 
-    /* 第一部分：纯内存级极速判断与 UI 刷新 */
-    // actuator_get_state() 通常只是读取一个 GPIO 电平或一个内存变量，耗时纳秒级
-    bool open = actuator_get_state();
-    
-    // 根据状态修改大圆环的边框颜色、文字颜色、文字内容和主标题
-    lv_obj_set_style_border_color(s_lock_ring, open ? theme_color(TH_OK) : theme_color(TH_ACCENT), 0);
-    lv_obj_set_style_text_color(s_lock_icon, open ? theme_color(TH_OK) : theme_color(TH_ACCENT), 0);
-    lv_label_set_text(s_lock_icon, open ? "开" : "锁");
-    lv_label_set_text(s_status_label, open ? "保险柜已开启" : "保险柜已上锁");
-
-    /* 第二部分：投递复杂的统计逻辑给后台线程 */
-    
-    // 如果上一轮后台任务还没做完（可能是 Flash 正在被大量写入导致读取慢），直接返回，不堆积任务
     if (s_stats_busy) return;
     
-    // 给接下来的任务上锁
     s_stats_busy = true;
     
-    // 动态申请一个“快递盒”内存，用于给后台送数据、接收结果
     monitor_stats_t * a = (monitor_stats_t *)malloc(sizeof(*a));
     if (!a) { 
-        // 内存不足时，解锁并退出，等下一秒再试
         s_stats_busy = false; 
         return; 
     }
-    memset(a, 0, sizeof(*a)); // 清空包裹
+    memset(a, 0, sizeof(*a));
     
-    // 把任务放进 Worker 队列
-    // 参数1：后台任务(耗时)；参数2：包裹指针；参数3：主线程结束回调(安全刷新UI)
     worker_post(stats_worker, a, stats_done);
 }
+
+/* 主页"开锁"按钮回调：跳转到 PIN 键盘（解锁）页 */
+static void unlock_go_cb(lv_event_t * e)
+{
+    (void)e;
+    ui_switch_page(PAGE_KEYPAD);
+}
+
+/* ★ v2：人脸开锁占位回调（DESIGN.md 预留，PC 端 mock） */
+static lv_obj_t * s_face_tip = NULL;
+static void face_tip_timer_cb(lv_timer_t * t)
+{
+    (void)t;
+    if (s_face_tip) {
+        lv_obj_delete(s_face_tip);
+        s_face_tip = NULL;
+    }
+}
+static void face_unlock_cb(lv_event_t * e)
+{
+    (void)e;
+    if (s_face_tip) return;  /* 已有提示就不重复弹 */
+    /* 屏幕中央 warn 色提示：人脸开锁功能开发中 */
+    s_face_tip = lv_label_create(lv_screen_active());
+    lv_label_set_text(s_face_tip, "人脸开锁：功能开发中");
+    lv_obj_add_style(s_face_tip, &st_warn_text, 0);
+    lv_obj_set_style_text_font(s_face_tip, app_font_scaled(16), 0);
+    lv_obj_set_style_bg_color(s_face_tip, theme_color(TH_PANEL), 0);
+    lv_obj_set_style_bg_opa(s_face_tip, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_face_tip, SX(16), 0);
+    lv_obj_set_style_radius(s_face_tip, SX(8), 0);
+    lv_obj_align(s_face_tip, LV_ALIGN_CENTER, 0, 0);
+    lv_timer_t * t = lv_timer_create(face_tip_timer_cb, 1500, NULL);
+    lv_timer_set_repeat_count(t, 1);
+}
+
+
+
+
+
+
+
+
+
+
+

@@ -21,6 +21,8 @@ lv_font_t * g_app_font_14 = NULL;
 lv_font_t * g_app_font_16 = NULL;
 lv_font_t * g_app_font_20 = NULL;
 lv_font_t * g_app_font_28 = NULL;
+lv_font_t * g_app_font_36 = NULL;
+lv_font_t * g_app_font_44 = NULL;
 
 void app_fonts_init(void)
 {
@@ -49,6 +51,14 @@ void app_fonts_init(void)
                                             LV_FREETYPE_FONT_STYLE_NORMAL);
     g_app_font_28 = lv_freetype_font_create(FONT_PATH,
                                             LV_FREETYPE_FONT_RENDER_MODE_BITMAP, 28,
+                                            LV_FREETYPE_FONT_STYLE_NORMAL);
+
+    g_app_font_36 = lv_freetype_font_create(FONT_PATH,
+                                            LV_FREETYPE_FONT_RENDER_MODE_BITMAP, 36,
+                                            LV_FREETYPE_FONT_STYLE_NORMAL);
+
+    g_app_font_44 = lv_freetype_font_create(FONT_PATH,
+                                            LV_FREETYPE_FONT_RENDER_MODE_BITMAP, 44,
                                             LV_FREETYPE_FONT_STYLE_NORMAL);
 
     fprintf(stderr, "[fonts_ft] font ptrs: 14=%p 16=%p 20=%p 28=%p\n",

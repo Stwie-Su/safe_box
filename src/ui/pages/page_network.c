@@ -6,6 +6,7 @@
 #include "page_network.h"
 #include "ui/ui.h"
 #include "ui/theme.h"
+#include "ui/ui_scale.h"
 #include "core/store.h"
 #include "core/async_store.h"
 #include "core/worker.h"
@@ -47,8 +48,8 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
     lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(root, 0, 0);
     lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(root, 20, 0);
-    lv_obj_set_style_pad_row(root, 12, 0);
+    lv_obj_set_style_pad_all(root, SX(20), 0);
+    lv_obj_set_style_pad_row(root, SY(12), 0);
 
     /* 标题行 */
     lv_obj_t * head = lv_obj_create(root);
@@ -59,23 +60,24 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
     lv_obj_set_flex_align(head, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     lv_obj_t * back = lv_button_create(head);
-    lv_obj_set_size(back, 72, 40);
+    lv_obj_set_size(back, SX(72), SY(40));
     lv_obj_add_style(back, &st_ghost_btn, 0);
     lv_obj_add_event_cb(back, go_back_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * bl = lv_label_create(back);
     lv_label_set_text(bl, "‹ 返回");
-    lv_obj_set_style_text_font(bl, app_font(14), 0);
+    lv_obj_set_style_text_font(bl, app_font_scaled(14), 0);
     lv_obj_center(bl);
 
     lv_obj_t * title = lv_label_create(head);
     lv_label_set_text(title, "网络");
     lv_obj_add_style(title, &st_text, 0);
-    lv_obj_set_style_text_font(title, app_font(28), 0);
+    lv_obj_set_style_text_font(title, app_font_scaled(28), 0);
     lv_obj_set_style_pad_left(title, 16, 0);
 
     s_status = lv_label_create(head);
+    lv_label_set_text(s_status, "已连接");  /* 初始状态，避免显示默认 "Text" */
     lv_obj_add_style(s_status, &st_ok_text, 0);
-    lv_obj_set_style_text_font(s_status, app_font(14), 0);
+    lv_obj_set_style_text_font(s_status, app_font_scaled(14), 0);
     lv_obj_set_style_pad_left(s_status, 20, 0);
 
     /* 主体：左可用 + 右已存 */
@@ -85,7 +87,7 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
     lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(body, 0, 0);
     lv_obj_set_flex_flow(body, LV_FLEX_FLOW_ROW);
-    lv_obj_set_style_pad_column(body, 16, 0);
+    lv_obj_set_style_pad_column(body, SX(16), 0);
 
     /* 左：可用网络 */
     lv_obj_t * avail = lv_obj_create(body);
@@ -97,7 +99,7 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
     lv_obj_t * at = lv_label_create(avail);
     lv_label_set_text(at, "可用网络（扫描）");
     lv_obj_add_style(at, &st_text, 0);
-    lv_obj_set_style_text_font(at, app_font(20), 0);
+    lv_obj_set_style_text_font(at, app_font_scaled(20), 0);
 
     s_avail_list = lv_obj_create(avail);
     lv_obj_set_flex_grow(s_avail_list, 1);
@@ -109,7 +111,7 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
 
     for (int i = 0; i < MOCK_N; i++) {
         lv_obj_t * item = lv_button_create(s_avail_list);
-        lv_obj_set_size(item, lv_pct(100), 48);
+        lv_obj_set_size(item, lv_pct(100), SY(48));
         lv_obj_add_style(item, &st_panel2, 0);
         lv_obj_set_style_radius(item, 8, 0);
         lv_obj_add_event_cb(item, wifi_click_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
@@ -117,13 +119,13 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
         lv_obj_t * nm = lv_label_create(item);
         lv_label_set_text(nm, MOCK_SSIDS[i]);
         lv_obj_add_style(nm, &st_text, 0);
-        lv_obj_set_style_text_font(nm, app_font(16), 0);
+        lv_obj_set_style_text_font(nm, app_font_scaled(16), 0);
         lv_obj_align(nm, LV_ALIGN_LEFT_MID, 14, 0);
 
         lv_obj_t * sig = lv_label_create(item);
         lv_label_set_text(sig, "▂▄▆█");
         lv_obj_add_style(sig, &st_ok_text, 0);
-        lv_obj_set_style_text_font(sig, app_font(14), 0);
+        lv_obj_set_style_text_font(sig, app_font_scaled(14), 0);
         lv_obj_align(sig, LV_ALIGN_RIGHT_MID, -14, 0);
     }
 
@@ -137,7 +139,7 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
     lv_obj_t * st = lv_label_create(saved);
     lv_label_set_text(st, "已存网络");
     lv_obj_add_style(st, &st_text, 0);
-    lv_obj_set_style_text_font(st, app_font(20), 0);
+    lv_obj_set_style_text_font(st, app_font_scaled(20), 0);
 
     s_saved_list = lv_obj_create(saved);
     lv_obj_set_flex_grow(s_saved_list, 1);
@@ -191,20 +193,20 @@ static void net_saved_done(void * p)
         lv_obj_t * nm = lv_label_create(item);
         lv_label_set_text(nm, a->saved[i]);
         lv_obj_add_style(nm, &st_text, 0);
-        lv_obj_set_style_text_font(nm, app_font(14), 0);
+        lv_obj_set_style_text_font(nm, app_font_scaled(14), 0);
         lv_obj_align(nm, LV_ALIGN_LEFT_MID, 14, 0);
 
         lv_obj_t * ok = lv_label_create(item);
         lv_label_set_text(ok, "已保存");
         lv_obj_add_style(ok, &st_ok_text, 0);
-        lv_obj_set_style_text_font(ok, app_font(14), 0);
+        lv_obj_set_style_text_font(ok, app_font_scaled(14), 0);
         lv_obj_align(ok, LV_ALIGN_RIGHT_MID, -14, 0);
     }
     if (a->count == 0) {
         lv_obj_t * tip = lv_label_create(s_saved_list);
         lv_label_set_text(tip, "暂无已存网络");
         lv_obj_add_style(tip, &st_text_mut, 0);
-        lv_obj_set_style_text_font(tip, app_font(14), 0);
+        lv_obj_set_style_text_font(tip, app_font_scaled(14), 0);
     }
     free(a);
 }
@@ -263,21 +265,24 @@ static void dlg_psk(void)
     lv_obj_t * t = lv_label_create(s_win);
     lv_label_set_text(t, tbuf);
     lv_obj_add_style(t, &st_text, 0);
-    lv_obj_set_style_text_font(t, app_font(20), 0);
+    lv_obj_set_style_text_font(t, app_font_scaled(20), 0);
 
     s_msg = lv_label_create(s_win);
     lv_label_set_text(s_msg, " ");
     lv_obj_add_style(s_msg, &st_warn_text, 0);
-    lv_obj_set_style_text_font(s_msg, app_font(14), 0);
+    lv_obj_set_style_text_font(s_msg, app_font_scaled(14), 0);
 
     lv_obj_t * ta = lv_textarea_create(s_win);
-    lv_obj_set_size(ta, 300, 40);
+    lv_obj_set_size(ta, SX(300), SY(40));
     lv_obj_add_style(ta, &st_panel2, 0);
     lv_obj_set_style_radius(ta, 6, 0);
     lv_textarea_set_one_line(ta, true);
     lv_textarea_set_password_mode(ta, true);
     lv_textarea_set_max_length(ta, 32);
     lv_textarea_set_placeholder_text(ta, "WiFi 密码");
+    lv_obj_set_style_text_color(ta, theme_color(TH_TEXT_PLACEHOLDER), LV_PART_TEXTAREA_PLACEHOLDER);
+    lv_obj_set_style_text_font(ta, app_font_scaled(14), LV_PART_TEXTAREA_PLACEHOLDER);
+    lv_obj_set_style_text_color(ta, theme_color(TH_TEXT), 0);
     lv_obj_add_event_cb(ta, kb_focus_cb, LV_EVENT_FOCUSED, NULL);
 
     /* 底部操作按钮：FLOATING 脱离 flex 布局 + 绝对定位（见 page_users 同样注释） */
@@ -292,7 +297,7 @@ static void dlg_psk(void)
     lv_obj_add_event_cb(cc, dlg_cancel_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * ccl = lv_label_create(cc);
     lv_label_set_text(ccl, "取消");
-    lv_obj_set_style_text_font(ccl, app_font(14), 0);
+    lv_obj_set_style_text_font(ccl, app_font_scaled(14), 0);
     lv_obj_center(ccl);
 
     lv_obj_t * ok = lv_button_create(s_win);
@@ -304,13 +309,16 @@ static void dlg_psk(void)
     lv_obj_add_event_cb(ok, psk_save_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * okl = lv_label_create(ok);
     lv_label_set_text(okl, "连接");
-    lv_obj_set_style_text_font(okl, app_font(14), 0);
+    lv_obj_set_style_text_font(okl, app_font_scaled(14), 0);
     lv_obj_center(okl);
 
     s_kb = lv_keyboard_create(s_ov);
-    lv_obj_set_size(s_kb, lv_pct(100), 210);
+    lv_obj_set_size(s_kb, lv_pct(100), SY(210));   /* ★ 随窗口比例缩放 */
     lv_obj_align(s_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_color(s_kb, theme_color(TH_PANEL), 0);
+    /* ★ 按键文本属于 LV_PART_ITEMS；且必须走 Montserrat —— 键盘上的 ⌫ ↩ ⏎ 是
+     * LVGL 符号码位，中文字体里没有，套上去会渲染成方块。 */
+    lv_obj_set_style_text_font(s_kb, app_montserrat_scaled(32), LV_PART_ITEMS);
     lv_keyboard_set_textarea(s_kb, ta);
 }
 
@@ -361,3 +369,6 @@ static void net_add_done(int result)
         lv_label_set_text(s_msg, "保存失败");
     }
 }
+
+
+

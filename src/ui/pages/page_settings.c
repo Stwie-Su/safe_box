@@ -6,6 +6,7 @@
 #include "page_settings.h"
 #include "ui/ui.h"
 #include "ui/theme.h"
+#include "ui/ui_scale.h"
 #include "core/store.h"
 #include "core/async_store.h"
 #include <string.h>
@@ -51,12 +52,12 @@ lv_obj_t * page_settings_create(lv_obj_t * parent)
     lv_obj_t * title = lv_label_create(root);
     lv_label_set_text(title, "设置");
     lv_obj_add_style(title, &st_text, 0);
-    lv_obj_set_style_text_font(title, app_font(28), 0);
+    lv_obj_set_style_text_font(title, app_font_scaled(28), 0);
 
     lv_obj_t * sub = lv_label_create(root);
     lv_label_set_text(sub, "以下操作需要管理员验证");
     lv_obj_add_style(sub, &st_text_mut, 0);
-    lv_obj_set_style_text_font(sub, app_font(14), 0);
+    lv_obj_set_style_text_font(sub, app_font_scaled(14), 0);
 
     for (int i = 0; i < 3; i++) {
         lv_obj_t * card = lv_button_create(root);
@@ -77,27 +78,27 @@ lv_obj_t * page_settings_create(lv_obj_t * parent)
         lv_obj_t * icl = lv_label_create(icon);
         lv_label_set_text(icl, ENTRIES[i].icon);
         lv_obj_set_style_text_color(icl, theme_color(TH_ACCENT_INK), 0);
-        lv_obj_set_style_text_font(icl, app_font(20), 0);
+        lv_obj_set_style_text_font(icl, app_font_scaled(20), 0);
         lv_obj_center(icl);
 
         /* 名称 + 描述 */
         lv_obj_t * nm = lv_label_create(card);
         lv_label_set_text(nm, ENTRIES[i].name);
         lv_obj_add_style(nm, &st_text, 0);
-        lv_obj_set_style_text_font(nm, app_font(20), 0);
+        lv_obj_set_style_text_font(nm, app_font_scaled(20), 0);
         lv_obj_align(nm, LV_ALIGN_LEFT_MID, 92, -14);
 
         lv_obj_t * ds = lv_label_create(card);
         lv_label_set_text(ds, ENTRIES[i].desc);
         lv_obj_add_style(ds, &st_text_mut, 0);
-        lv_obj_set_style_text_font(ds, app_font(14), 0);
+        lv_obj_set_style_text_font(ds, app_font_scaled(14), 0);
         lv_obj_align(ds, LV_ALIGN_LEFT_MID, 92, 20);
 
         /* 右箭头 */
         lv_obj_t * ar = lv_label_create(card);
         lv_label_set_text(ar, "›");
         lv_obj_add_style(ar, &st_text_mut, 0);
-        lv_obj_set_style_text_font(ar, app_font(28), 0);
+        lv_obj_set_style_text_font(ar, app_font_scaled(28), 0);
         lv_obj_align(ar, LV_ALIGN_RIGHT_MID, -24, 0);
     }
     return root;
@@ -124,7 +125,7 @@ static void show_verify(ui_page_t target)
     lv_obj_t * win = lv_obj_create(s_overlay);
     lv_obj_set_size(win, 380, 460);
     lv_obj_add_style(win, &st_panel, 0);
-    lv_obj_set_style_radius(win, 16, 0);
+    lv_obj_set_style_radius(win, SX(16), 0);
     lv_obj_set_style_pad_all(win, 0, 0);   /* 手动画绝对定位，去掉 st_panel 的 16px padding */
     lv_obj_center(win);
 
@@ -132,7 +133,7 @@ static void show_verify(ui_page_t target)
     lv_obj_t * t = lv_label_create(win);
     lv_label_set_text(t, "管理员验证");
     lv_obj_add_style(t, &st_text, 0);
-    lv_obj_set_style_text_font(t, app_font(20), 0);
+    lv_obj_set_style_text_font(t, app_font_scaled(20), 0);
     lv_obj_set_width(t, 380);
     lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(t, 0, 14);
@@ -140,7 +141,7 @@ static void show_verify(ui_page_t target)
     s_vpin_disp = lv_label_create(win);
     lv_label_set_text(s_vpin_disp, "——");
     lv_obj_add_style(s_vpin_disp, &st_text, 0);
-    lv_obj_set_style_text_font(s_vpin_disp, app_font(28), 0);
+    lv_obj_set_style_text_font(s_vpin_disp, app_font_scaled(28), 0);
     lv_obj_set_style_pad_all(s_vpin_disp, 0, 0);
     lv_obj_set_style_text_align(s_vpin_disp, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_bg_color(s_vpin_disp, theme_color(TH_PANEL2), 0);
@@ -151,7 +152,7 @@ static void show_verify(ui_page_t target)
     s_vmsg = lv_label_create(win);
     lv_label_set_text(s_vmsg, "请输入管理员 PIN");
     lv_obj_add_style(s_vmsg, &st_text_mut, 0);
-    lv_obj_set_style_text_font(s_vmsg, app_font(14), 0);
+    lv_obj_set_style_text_font(s_vmsg, app_font_scaled(14), 0);
     lv_obj_set_width(s_vmsg, 380);
     lv_obj_set_style_text_align(s_vmsg, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(s_vmsg, 0, 116);
@@ -173,7 +174,7 @@ static void show_verify(ui_page_t target)
             lv_obj_t * kl = lv_label_create(k);
             lv_label_set_text(kl, KEYS[r][c]);
             lv_obj_add_style(kl, &st_text, 0);
-            lv_obj_set_style_text_font(kl, app_font(16), 0);
+            lv_obj_set_style_text_font(kl, app_font_scaled(16), 0);
             lv_obj_center(kl);
             lv_obj_add_event_cb(k, vkey_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)(r * 3 + c));
         }
@@ -187,7 +188,7 @@ static void show_verify(ui_page_t target)
     lv_obj_add_event_cb(cancel, vcancel_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * cl = lv_label_create(cancel);
     lv_label_set_text(cl, "取消");
-    lv_obj_set_style_text_font(cl, app_font(16), 0);
+    lv_obj_set_style_text_font(cl, app_font_scaled(16), 0);
     lv_obj_center(cl);
 
     lv_obj_t * ok = lv_button_create(win);
@@ -198,7 +199,7 @@ static void show_verify(ui_page_t target)
     lv_obj_add_event_cb(ok, vok_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * ol = lv_label_create(ok);
     lv_label_set_text(ol, "确认");
-    lv_obj_set_style_text_font(ol, app_font(16), 0);
+    lv_obj_set_style_text_font(ol, app_font_scaled(16), 0);
     lv_obj_center(ol);
 
     s_vpin[0] = '\0';

@@ -112,6 +112,16 @@ list(APPEND LIBS lvgl::examples)
 endif()
 
 target_link_libraries(lvgl_linux PUBLIC ${LIBS})
+
+# LVGL 的 Freetype include 没有自动传播到 lvgl_linux 目标（交叉编译时），
+# 这里显式补上，否则 evdev.c 等包含 lv_freetype_private.h 的文件编译报 ft2build.h 找不到。
+if(LV_USE_FREETYPE)
+    # find_package 在 lvgl/ 子目录执行，FREETYPE_INCLUDE_DIRS 未传播到父目录；
+    # 直接用 FindFreetype 写入 cache 的 ft2build / freetype2 头文件路径。
+    target_include_directories(lvgl_linux PRIVATE
+        ${FREETYPE_INCLUDE_DIR_ft2build}
+        ${FREETYPE_INCLUDE_DIR_freetype2})
+endif()
 # —— 最终可执行文件 lvglsim：main.c + 业务 app 源码，链接 lvgl_linux + pthread ——
 add_executable(lvglsim src/main.c ${APP_SOURCES})
 target_include_directories(lvglsim PRIVATE
