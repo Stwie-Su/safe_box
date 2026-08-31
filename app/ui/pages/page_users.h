@@ -16,6 +16,7 @@ lv_obj_t * page_users_create(lv_obj_t * parent);
 void page_users_test_open_add_dlg(void);
 void page_users_test_open_auth_dlg(void);
 void page_users_test_open_change_pwd_dlg(void);
+void page_users_test_open_otp_dlg(void);
 
 #ifdef __cplusplus
 } /*extern "C"*/

@@ -21,14 +21,18 @@
         LV_COLOR_MAKE((danger>>16)&0xFF,(danger>>8)&0xFF,danger&0xFF) } }
 
 const app_theme_t THEMES[THEME_COUNT] = {
-    { "石墨黑", TH_COL(0x14161A, 0x1E2127, 0x262A31, 0xE9EBEE, 0x9AA0A8, 0x6E757F,
-                       0x33383F, 0xC8A45C, 0x1A1407, 0x5FB37A, 0xD9A441, 0xD2584F) },
-    { "月白",   TH_COL(0xF3F0EA, 0xFFFFFF, 0xEDE9E1, 0x1B1D21, 0x6E6A62, 0xA8A39A,
-                       0xDED8CD, 0xB08D3E, 0xFFFFFF, 0x3F8F5C, 0xB5862C, 0xB23A33) },
-    { "蓝白",   TH_COL(0xF2F6FB, 0xFFFFFF, 0xE9F0F8, 0x16222E, 0x6B7B8C, 0x9BABB8,
-                       0xD5DEE8, 0x2D6FB3, 0xFFFFFF, 0x3F8F5C, 0xC0882A, 0xC0493F) },
-    { "松石青", TH_COL(0x0F1719, 0x16242A, 0x1E3036, 0xE2EEF0, 0x8AA0A4, 0x5A757A,
-                       0x2A3D43, 0x3FB6A8, 0x06201D, 0x5FB37A, 0xD9A441, 0xD2584F) },
+    /* 石墨黑（深色默认）: bg/panel/elevated/text/text2/dim/border/accent/ink/ok/warn/danger */
+    { "石墨黑", TH_COL(0x0D1117, 0x161B22, 0x1C2330, 0xE6EDF3, 0x8B98A5, 0x5B6671,
+                       0x30363D, 0x0091FF, 0xFFFFFF, 0x31A24C, 0xF2A918, 0xE41E3F) },
+    /* 月白（暖光浅色） */
+    { "月白",   TH_COL(0xF5F3EF, 0xFFFAF7, 0xECE8E1, 0x2B2722, 0x6B6358, 0x9A9186,
+                       0xDCD6CC, 0xC0892D, 0xFFFFFF, 0x2E7D4F, 0xC8860A, 0xC0392B) },
+    /* 蓝白（冷色浅色） */
+    { "蓝白",   TH_COL(0xEEF4FB, 0xFFFFFF, 0xDDE8F5, 0x1A2B45, 0x5A6B85, 0x8A99B0,
+                       0xD5DEE8, 0x1565D8, 0xFFFFFF, 0x1F9254, 0xD98A00, 0xD32F2F) },
+    /* 松石青（深色青绿） */
+    { "松石青", TH_COL(0x0A1F1C, 0x102A26, 0x163A34, 0xE3F2EE, 0x8FB3AB, 0x5F8079,
+                       0x1A3D3A, 0x1BB3A0, 0xFFFFFF, 0x2FAE8A, 0xE0A52E, 0xE5533D) },
 };
 
 /* ---------------- 全局样式 ---------------- */
@@ -49,7 +53,7 @@ lv_style_t st_danger_text;
 lv_style_t st_tab_btn;
 lv_style_t st_tab_btn_checked;
 
-static int g_idx = 0;
+static int g_idx = 1;   /* 默认主题索引：0 石墨黑 / 1 月白 / 2 蓝白 / 3 松石青 */
 
 /* 依据当前主题刷新全部样式内容 */
 static void apply_theme(void)
@@ -63,12 +67,12 @@ static void apply_theme(void)
     lv_style_set_bg_opa(&st_panel, LV_OPA_COVER);
     lv_style_set_border_color(&st_panel, p->c[TH_BORDER]);
     lv_style_set_border_width(&st_panel, 1);
-    lv_style_set_radius(&st_panel, 12);
+    lv_style_set_radius(&st_panel, 16);
     lv_style_set_pad_all(&st_panel, 16);
 
     lv_style_set_bg_color(&st_panel2, p->c[TH_PANEL2]);
     lv_style_set_bg_opa(&st_panel2, LV_OPA_COVER);
-    lv_style_set_radius(&st_panel2, 8);
+    lv_style_set_radius(&st_panel2, 12);
     lv_style_set_pad_all(&st_panel2, 10);
 
     lv_style_set_text_color(&st_text, p->c[TH_TEXT]);
@@ -113,15 +117,15 @@ static void apply_theme(void)
     lv_style_set_text_color(&st_warn_text, p->c[TH_WARN]);
     lv_style_set_text_color(&st_danger_text, p->c[TH_DANGER]);
 
-    /* 底部 Tab：未选中 = 透明底 + 次要文字 */
-    lv_style_set_bg_color(&st_tab_btn, p->c[TH_PANEL]);
-    lv_style_set_bg_opa(&st_tab_btn, LV_OPA_COVER);
+    /* 底部 Tab：未选中 = 透明底 + 次要文字（胶囊页签底） */
+    lv_style_set_bg_opa(&st_tab_btn, LV_OPA_TRANSP);
     lv_style_set_text_color(&st_tab_btn, p->c[TH_TEXT_MUT]);
     lv_style_set_border_width(&st_tab_btn, 0);
     lv_style_set_pad_all(&st_tab_btn, 8);
-    /* 选中 = 强调色文字 + 顶部细条 */
-    lv_style_set_text_color(&st_tab_btn_checked, p->c[TH_ACCENT]);
-    lv_style_set_bg_color(&st_tab_btn_checked, p->c[TH_PANEL]);
+    /* 选中 = 强调色实心胶囊 + 反白文字（设计稿 4 胶囊页签） */
+    lv_style_set_text_color(&st_tab_btn_checked, p->c[TH_ACCENT_INK]);
+    lv_style_set_bg_color(&st_tab_btn_checked, p->c[TH_ACCENT]);
+    lv_style_set_bg_opa(&st_tab_btn_checked, LV_OPA_COVER);
     lv_style_set_border_width(&st_tab_btn_checked, 0);
     lv_style_set_pad_all(&st_tab_btn_checked, 8);
 }
@@ -145,7 +149,7 @@ void theme_init(void)
     lv_style_init(&st_danger_text);
     lv_style_init(&st_tab_btn);
     lv_style_init(&st_tab_btn_checked);
-    g_idx = 1;          /* 默认主题：月白 */
+    g_idx = 1;          /* 默认主题：月白（浅色暖色，默认进入更友好） */
     apply_theme();
 }
 

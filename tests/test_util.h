@@ -22,7 +22,7 @@ static int g_check_fail = 0;
 } while(0)
 
 /* 把 pin_hash 生成的 16 字节随机盐转成 hex（与 users.json 的 pin_salt 字段对齐） */
-static void test_salt_to_hex(const unsigned char * salt, char * out)
+static inline void test_salt_to_hex(const unsigned char * salt, char * out)
 {
     for(int i = 0; i < 16; i++) sprintf(out + 2 * i, "%02x", salt[i]);
     out[32] = '\0';

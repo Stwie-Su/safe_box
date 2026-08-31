@@ -28,6 +28,7 @@
 extern void page_users_test_open_add_dlg(void);
 extern void page_users_test_open_auth_dlg(void);
 extern void page_users_test_open_change_pwd_dlg(void);
+extern void page_users_test_open_otp_dlg(void);
 
 static ui_page_t page_from_name(const char * name)
 {
@@ -69,10 +70,12 @@ void debug_hooks_apply(void)
     const char * dlg = getenv("SAFE_TEST_DLG");
     if(dlg && *dlg && (strcmp(dlg, "add_user") == 0 ||
                        strcmp(dlg, "auth")     == 0 ||
-                       strcmp(dlg, "change_pwd") == 0)) {
+                       strcmp(dlg, "change_pwd") == 0 ||
+                       strcmp(dlg, "otp")     == 0)) {
         ui_switch_page(PAGE_USERS);
         if(strcmp(dlg, "add_user") == 0)        page_users_test_open_add_dlg();
         else if(strcmp(dlg, "auth") == 0)       page_users_test_open_auth_dlg();
+        else if(strcmp(dlg, "otp") == 0)        page_users_test_open_otp_dlg();
         else                                    page_users_test_open_change_pwd_dlg();
     }
 

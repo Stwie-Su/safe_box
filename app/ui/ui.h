@@ -2,10 +2,11 @@
  * @file ui.h
  * 视图层对外接口（前端外壳）—— 智能保险柜（DESIGN.md §5）。
  *
- * 信息架构：
- *   主界面（锁状态 · 时钟 · 开锁占位）
- *    ├─ 日志 · 记录（独立一级页，随时审计）
- *    └─ 设置（进前二次验证 admin PIN）
+ * 信息架构（底部四胶囊页签：主页 / 用户 / 日志 / 设置）：
+ *   主页（锁状态 · 时钟 · 开锁占位）
+ *   用户（用户管理一级页，敏感操作仍需 admin PIN）
+ *   日志（记录一级页，随时审计）
+ *   设置（进前二次验证 admin PIN）
  *         ├─ 用户管理 / 网络 / 系统
  *
  * 分层约定：ui/ 只做「界面渲染 + 事件绑定」；业务判定一律走 src/core/；
@@ -22,17 +23,17 @@ extern "C" {
 #endif
 
 /* 嵌入中文字体声明（开发板阶段使用；PC 阶段由 fonts.h 的 app_font() 切换到 FreeType） */
-LV_FONT_DECLARE(lv_font_cn_14);
-LV_FONT_DECLARE(lv_font_cn_16);
-LV_FONT_DECLARE(lv_font_cn_20);
-LV_FONT_DECLARE(lv_font_cn_28);
+LV_FONT_DECLARE(lv_font_cn_14)
+LV_FONT_DECLARE(lv_font_cn_16)
+LV_FONT_DECLARE(lv_font_cn_20)
+LV_FONT_DECLARE(lv_font_cn_28)
 
 /* 页面 ID：底部 Tab 为前三个，其余为设置子页 / 全屏层 */
 typedef enum {
     PAGE_HOME     = 0,   /* 主页（锁状态 + 时钟 + 开锁占位） */
     PAGE_LOGS,           /* 日志（独立一级页） */
     PAGE_SETTINGS,       /* 设置中枢（二次验证 admin PIN） */
-    PAGE_USERS,          /* 用户管理（设置子页） */
+    PAGE_USERS,          /* 用户管理（底部「用户」一级页签） */
     PAGE_NETWORK,        /* 网络（设置子页） */
     PAGE_SYSTEM,         /* 系统（设置子页） */
     PAGE_KEYPAD,         /* 开锁 PIN 键盘（主页全屏层） */

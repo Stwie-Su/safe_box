@@ -4,6 +4,7 @@
  */
 #include "test_util.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "core/auth/totp.h"
@@ -14,7 +15,6 @@ static const char * SECRET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 int main(void)
 {
-    char code[8] = {0};
     int64_t used = 0;
 
     /* Base32 解码基本功能 */

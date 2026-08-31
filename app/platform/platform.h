@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-/* lv_init 之前：解析命令行参数并注册所有已编译的显示/输入后端。 */
+/* lv_init 之前：解析命令行参数并注册所有已编译的显示与输入后端。 */
 void platform_bootstrap(int argc, char ** argv);
 
 /* lv_init 之后：初始化显示与输入设备。返回 0 成功。 */

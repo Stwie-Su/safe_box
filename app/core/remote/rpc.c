@@ -223,6 +223,23 @@ static void dispatch(const char *payload)
         return;
     }
 
+    /* ---- submit_otp（调试用，受 WAIT_OTP 门控） ----
+     * 验收 FR-3 用户动态码二次确认路径：仅在状态机处于 WAIT_OTP 时生效，
+     * 校验「待确认用户自身」的 TOTP（backend_verify_totp 内部 ±1 窗口 + 一码一用防重放）。
+     * 非 WAIT_OTP 态调用会被 FSM 直接忽略（不触发迁移），属于安全可控的调试指令。 */
+    if (strcmp(c, "submit_otp") == 0) {
+        cJSON *otp = params ? cJSON_GetObjectItem(params, "otp") : NULL;
+        if (!(cJSON_IsString(otp) && otp->valuestring && *otp->valuestring)) {
+            ack(req_id, 2001, "需要动态码");
+            cJSON_Delete(root);
+            return;
+        }
+        auth_fsm_submit_otp(otp->valuestring);
+        ack(req_id, 0, "submitted");
+        cJSON_Delete(root);
+        return;
+    }
+
     /* ---- inject_score（调试用，无需 otp） ---- */
     if (strcmp(c, "inject_score") == 0) {
         int score = params && cJSON_GetObjectItem(params, "score") ? cJSON_GetObjectItem(params, "score")->valueint : 0;

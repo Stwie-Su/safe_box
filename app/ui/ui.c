@@ -3,13 +3,14 @@
  * UI 外壳框架：顶部状态栏 + 底部 Tab + 内容容器。
  *
  * 布局（设计基准 1024×600，通过 ui_scale 自适应任意窗口）：
- *   顶部状态栏 48px：左 = 锁状态胶囊；中 = 实时时钟；右 = WiFi 图标。
+ *   顶部状态栏 56px：左 = 锁状态点 + 文本；中 = 实时时钟；右 = MQTT 连接状态点 + WiFi。
  *   内容区：h - TOPBAR_H - TABBAR_H，各页面在此创建。
- *   底部 Tab 64px：主页 │ 日志 │ 设置。
+ *   底部 Tab 72px：四枚等宽胶囊页签 主页 │ 用户 │ 日志 │ 设置。
  */
 #include "ui/ui.h"
 #include <time.h>            /* localtime / strftime / struct tm */
 #include "hal/hal_actuator.h"    /* actuator_get_state */
+#include "core/remote/mqtt_client.h" /* mqtt_is_connected：顶栏连接状态点 */
 #include "ui/theme.h"        /* st_screen, theme_init */
 #include "ui/ui_scale.h"     /* SX/SY 自适应缩放 */
 #include "ui/pages/page_monitor.h"
@@ -26,8 +27,8 @@
 #include "core/remote/rpc.h"        /* 阶段 1：RPC 指令泵 + 状态上报 */
 
 /* 基准尺寸（设计稿像素，运行时 × scale） */
-#define TOPBAR_BASE  48
-#define TABBAR_BASE  64
+#define TOPBAR_BASE  56
+#define TABBAR_BASE  72
 
 /* 页面描述符结构体：将页面 ID 映射到对应的页面创建函数*/
 typedef struct {
@@ -35,9 +36,12 @@ typedef struct {
     lv_obj_t * (*create)(lv_obj_t * parent);   // 函数指针，指向该页面的初始化函数
 } page_desc_t;
 
-/* 底部 Tab 导航栏的文本和图标数组（对应 0:主页, 1:日志, 2:设置） */
-static const char * const TAB_LABELS[3] = { "主页", "日志", "设置" };
-static const char * const TAB_ICONS[3]  = { LV_SYMBOL_HOME, LV_SYMBOL_LIST, LV_SYMBOL_SETTINGS };
+/* 底部 Tab 导航栏的文本和图标数组（0:主页, 1:用户, 2:日志, 3:设置） */
+static const char * const TAB_LABELS[4] = { "主页", "用户", "日志", "设置" };
+/* 注意：LV_SYMBOL_USER 在本版 LVGL 不存在，索引 1 的图标在 build_tabbar 中用中文「用」字替代 */
+static const char * const TAB_ICONS[4]  = { LV_SYMBOL_HOME, LV_SYMBOL_HOME, LV_SYMBOL_LIST, LV_SYMBOL_SETTINGS };
+/* 点击页签时跳转到的页面 */
+static const ui_page_t TAB_PAGES[4] = { PAGE_HOME, PAGE_USERS, PAGE_LOGS, PAGE_SETTINGS };
 
 /* 注册路由表：所有需要被管理的页面都在这里注册 */
 static const page_desc_t s_pages[PAGE_COUNT] = {
@@ -54,12 +58,13 @@ static const page_desc_t s_pages[PAGE_COUNT] = {
 /* --- 全局 UI 控件句柄 --- */
 static lv_obj_t * s_content;                 // 中间内容区的根容器
 static lv_obj_t * s_page_roots[PAGE_COUNT];  // 存放所有初始化后的页面根节点（为了实现显隐切换）
-static lv_obj_t * s_tab_btns[3];             // 存放 3 个底部 Tab 按钮的对象指针
+static lv_obj_t * s_tab_btns[4];             // 存放 4 个底部 Tab 按钮的对象指针
 static lv_obj_t * s_clock_label;             // 顶部时钟文本 Label
 static lv_obj_t * s_lock_text;               // 顶部锁状态文本 Label
+static lv_obj_t * s_lock_dot;                // 顶部锁状态点（绿=开 / 蓝=锁）
 /* 主题切换时需刷新的顶栏本地颜色覆盖控件（见 topbar_refresh_theme） */
 static lv_obj_t * s_capsule;                 // 顶部锁状态胶囊
-static lv_obj_t * s_lock_icon;               // 胶囊内"锁"图标
+static lv_obj_t * s_mqtt_dot;                // 顶部 MQTT 连接状态点（绿=在线 / 红=离线）
 static lv_obj_t * s_wifi;                    // 顶部 WiFi 图标
 
 /* 运行时缩放后的实际高度 */
@@ -187,7 +192,7 @@ static void build_topbar(lv_obj_t * parent)
     lv_obj_set_style_pad_all(bar, 0, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
 
-    /* 左侧锁状态胶囊 */
+    /* 左侧锁状态胶囊：状态点 + 文本 */
     s_capsule = lv_obj_create(bar);
     lv_obj_set_size(s_capsule, LV_SIZE_CONTENT, SY(32));
     lv_obj_align(s_capsule, LV_ALIGN_LEFT_MID, SX(16), 0);
@@ -195,23 +200,25 @@ static void build_topbar(lv_obj_t * parent)
     lv_obj_set_style_bg_opa(s_capsule, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(s_capsule, SX(16), 0);
     lv_obj_set_style_border_width(s_capsule, 0, 0);
-    lv_obj_set_style_pad_left(s_capsule, SX(10), 0);
-    lv_obj_set_style_pad_right(s_capsule, SX(12), 0);
+    lv_obj_set_style_pad_left(s_capsule, SX(12), 0);
+    lv_obj_set_style_pad_right(s_capsule, SX(14), 0);
     lv_obj_set_style_pad_top(s_capsule, 0, 0);
     lv_obj_set_style_pad_bottom(s_capsule, 0, 0);
     lv_obj_set_flex_flow(s_capsule, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(s_capsule, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    s_lock_icon = lv_label_create(s_capsule);
-    lv_label_set_text(s_lock_icon, "锁");
-    lv_obj_set_style_text_font(s_lock_icon, app_font_scaled(16), 0);
-    lv_obj_set_style_text_color(s_lock_icon, theme_color(TH_ACCENT), 0);
+    s_lock_dot = lv_obj_create(s_capsule);
+    lv_obj_set_size(s_lock_dot, SX(10), SX(10));
+    lv_obj_set_style_radius(s_lock_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(s_lock_dot, theme_color(TH_ACCENT), 0);
+    lv_obj_set_style_bg_opa(s_lock_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_lock_dot, 0, 0);
 
     s_lock_text = lv_label_create(s_capsule);
     lv_label_set_text(s_lock_text, "已上锁");
     lv_obj_add_style(s_lock_text, &st_text, 0);
     lv_obj_set_style_text_font(s_lock_text, app_font_scaled(14), 0);
-    lv_obj_set_style_pad_left(s_lock_text, SX(4), 0);
+    lv_obj_set_style_pad_left(s_lock_text, SX(6), 0);
 
     /* 中央实时时钟 */
     s_clock_label = lv_label_create(bar);
@@ -219,21 +226,40 @@ static void build_topbar(lv_obj_t * parent)
     lv_obj_set_style_text_font(s_clock_label, app_font_scaled(20), 0);
     lv_obj_align(s_clock_label, LV_ALIGN_CENTER, 0, 0);
 
-    /* 右侧 WiFi 图标 */
-    s_wifi = lv_label_create(bar);
+    /* 右侧 MQTT 连接状态点 + WiFi 图标 */
+    lv_obj_t * conn = lv_obj_create(bar);
+    lv_obj_set_size(conn, LV_SIZE_CONTENT, SY(32));
+    lv_obj_align(conn, LV_ALIGN_RIGHT_MID, -SX(16), 0);
+    lv_obj_set_style_bg_opa(conn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(conn, 0, 0);
+    lv_obj_set_style_pad_left(conn, 0, 0);
+    lv_obj_set_style_pad_right(conn, SX(8), 0);
+    lv_obj_set_flex_flow(conn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(conn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    s_mqtt_dot = lv_obj_create(conn);
+    lv_obj_set_size(s_mqtt_dot, SX(10), SX(10));
+    lv_obj_set_style_radius(s_mqtt_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(s_mqtt_dot, theme_color(TH_OK), 0);
+    lv_obj_set_style_bg_opa(s_mqtt_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_mqtt_dot, 0, 0);
+
+    s_wifi = lv_label_create(conn);
     lv_label_set_text(s_wifi, LV_SYMBOL_WIFI);
     lv_obj_set_style_text_font(s_wifi, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_wifi, theme_color(TH_TEXT_MUT), 0);
-    lv_obj_align(s_wifi, LV_ALIGN_RIGHT_MID, -SX(20), 0);
+    lv_obj_set_style_pad_left(s_wifi, SX(2), 0);
 }
 
 /* ★ 主题切换回调：刷新顶栏那几个用了本地颜色覆盖的控件
- * （胶囊背景/锁图标/WiFi 图标），否则换主题时这三个不会跟着变色。 */
+ * （锁点/MQTT 点/WiFi 图标），否则换主题时这几个不会跟着变色。 */
 static void topbar_refresh_theme(int idx)
 {
     (void)idx;
+    bool open = hal_actuator_state();
     if (s_capsule)  lv_obj_set_style_bg_color(s_capsule, theme_color(TH_PANEL2), 0);
-    if (s_lock_icon) lv_obj_set_style_text_color(s_lock_icon, theme_color(TH_ACCENT), 0);
+    if (s_lock_dot) lv_obj_set_style_bg_color(s_lock_dot, open ? theme_color(TH_OK) : theme_color(TH_ACCENT), 0);
+    if (s_mqtt_dot) lv_obj_set_style_bg_color(s_mqtt_dot, mqtt_is_connected() ? theme_color(TH_OK) : theme_color(TH_DANGER), 0);
     if (s_wifi)     lv_obj_set_style_text_color(s_wifi, theme_color(TH_TEXT_MUT), 0);
 }
 
@@ -243,24 +269,35 @@ static void build_tabbar(lv_obj_t * parent)
     lv_obj_set_size(bar, lv_pct(100), lv_pct(100));
     lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
-    lv_obj_set_style_pad_all(bar, 0, 0);
+    lv_obj_set_style_pad_left(bar, SX(12), 0);
+    lv_obj_set_style_pad_right(bar, SX(12), 0);
+    lv_obj_set_style_pad_top(bar, SY(10), 0);
+    lv_obj_set_style_pad_bottom(bar, SY(10), 0);
+    lv_obj_set_style_pad_column(bar, SX(8), 0);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
 
     int i;
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < 4; i++) {
         lv_obj_t * btn = lv_button_create(bar);
         lv_obj_set_flex_grow(btn, 1);
         lv_obj_set_height(btn, lv_pct(100));
         lv_obj_add_style(btn, &st_tab_btn, 0);
         lv_obj_add_style(btn, &st_tab_btn_checked, LV_STATE_CHECKED);
+        lv_obj_set_style_radius(btn, SX(24), 0);   /* 胶囊页签 */
 
         lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
         lv_obj_t * icon = lv_label_create(btn);
-        lv_label_set_text(icon, TAB_ICONS[i]);
-        lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);  /* Montserrat has LVGL symbols */
+        if (i == 1) {
+            /* 本版 LVGL 无 LV_SYMBOL_USER，用中文「用」字作图标（CJK 字体渲染） */
+            lv_label_set_text(icon, "用");
+            lv_obj_set_style_text_font(icon, app_font_scaled(14), 0);
+        } else {
+            lv_label_set_text(icon, TAB_ICONS[i]);
+            lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);  /* Montserrat has LVGL symbols */
+        }
 
         /* ★ 修复中文乱码：显式设置中文字体 */
         lv_obj_t * lbl = lv_label_create(btn);
@@ -272,15 +309,17 @@ static void build_tabbar(lv_obj_t * parent)
     }
 }
 
-static ui_page_t tab_of_page(ui_page_t page)
+/* 返回页面所属的底部页签索引；全屏覆盖层（PIN 键盘 / 动态码）返回 -1，表示不切换高亮 */
+static int tab_index_of(ui_page_t page)
 {
     switch (page) {
-        case PAGE_LOGS:    return PAGE_LOGS;
+        case PAGE_HOME:        return 0;
+        case PAGE_USERS:       return 1;
+        case PAGE_LOGS:        return 2;
         case PAGE_SETTINGS:
-        case PAGE_USERS:
         case PAGE_NETWORK:
-        case PAGE_SYSTEM:  return PAGE_SETTINGS;
-        default:           return PAGE_HOME;
+        case PAGE_SYSTEM:      return 3;
+        default:               return -1;   /* PAGE_KEYPAD / PAGE_OTP */
     }
 }
 
@@ -288,11 +327,13 @@ static void switch_page(ui_page_t page)
 {
     int i;
     if (page >= PAGE_COUNT) return;
-    ui_page_t tab = tab_of_page(page);
-    for (i = 0; i < 3; i++) {
-        lv_obj_remove_state(s_tab_btns[i], LV_STATE_CHECKED);
+    int ti = tab_index_of(page);
+    if (ti >= 0) {
+        for (i = 0; i < 4; i++) {
+            lv_obj_remove_state(s_tab_btns[i], LV_STATE_CHECKED);
+        }
+        lv_obj_add_state(s_tab_btns[ti], LV_STATE_CHECKED);
     }
-    lv_obj_add_state(s_tab_btns[(int)tab], LV_STATE_CHECKED);
     for (i = 0; i < PAGE_COUNT; i++) {
         lv_obj_set_hidden(s_page_roots[i], i != (int)page);
     }
@@ -301,7 +342,7 @@ static void switch_page(ui_page_t page)
 static void tab_click_cb(lv_event_t * e)
 {
     int idx = (int)(uintptr_t)lv_event_get_user_data(e);
-    switch_page((ui_page_t)idx);
+    switch_page(TAB_PAGES[idx]);
 }
 
 static void status_timer_cb(lv_timer_t * t)
@@ -318,6 +359,8 @@ static void status_timer_cb(lv_timer_t * t)
 
     bool open = hal_actuator_state();
     lv_label_set_text(s_lock_text, open ? "已开锁" : "已上锁");
+    if (s_lock_dot) lv_obj_set_style_bg_color(s_lock_dot, open ? theme_color(TH_OK) : theme_color(TH_ACCENT), 0);
+    if (s_mqtt_dot) lv_obj_set_style_bg_color(s_mqtt_dot, mqtt_is_connected() ? theme_color(TH_OK) : theme_color(TH_DANGER), 0);
 }
 
 

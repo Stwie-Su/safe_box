@@ -98,6 +98,7 @@ void platform_bootstrap(int argc, char ** argv)
                 die("Option -%c requires an argument.\n", optopt);
             case '?':
             default:
+                /* 未知或错误选项：打印用法后退出 */
                 print_usage();
                 die("Unknown option -%c.\n", optopt);
         }

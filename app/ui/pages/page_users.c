@@ -12,6 +12,7 @@
 #include "core/store/store.h"
 #include "core/support/async_store.h"
 #include "core/support/worker.h"
+#include "core/auth/unlock_backend.h"   /* backend_admin_verify_totp：改管理员密码动态码二次确认 */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +41,15 @@ static lv_obj_t * s_auth_ov   = NULL;
 static lv_obj_t * s_auth_disp = NULL;
 static lv_obj_t * s_auth_msg  = NULL;
 static char s_auth_pin[16]    = {0};
+
+/* 修改管理员密码 — 动态码二次确认（FR-3 敏感操作）状态 */
+static bool s_pwd_is_admin    = false;   /* 当前改密目标是否为管理员 */
+static char s_pending_old[16] = {0};     /* 暂存：管理员改密跨弹窗的 旧PIN */
+static char s_pending_new[16] = {0};     /* 暂存：管理员改密跨弹窗的 新PIN */
+static lv_obj_t * s_otp_ov    = NULL;
+static lv_obj_t * s_otp_disp  = NULL;
+static lv_obj_t * s_otp_msg   = NULL;
+static char s_otp_pin[8]      = {0};
 
 /* 键盘字号基准（实际字号 = base × ui_scale，见 ui_scale.c app_montserrat_scaled）
  * lv_keyboard 是 lv_buttonmatrix 子类，按键文本属于 LV_PART_ITEMS。
@@ -81,6 +91,16 @@ static void auth_key_cb(lv_event_t * e);
 static void auth_cancel_cb(lv_event_t * e);
 static void auth_ok_cb(lv_event_t * e);
 static void auth_result(int r);
+
+/* 修改管理员密码 — 动态码二次确认（FR-3 敏感操作） */
+static void pwd_otp_show(void);
+static void pwd_otp_close(void);
+static void pwd_otp_update_disp(void);
+static void pwd_otp_key_cb(lv_event_t * e);
+static void pwd_otp_ok_cb(lv_event_t * e);
+static void pwd_otp_cancel_cb(lv_event_t * e);
+static bool user_is_admin(int id);
+static void post_chg_pwd(int id, const char *oldp, const char *newp);
 
 /* 后台 worker 类型 */
 typedef struct { char name[32]; char pin[16]; int result; } add_user_job_t;
@@ -236,7 +256,8 @@ lv_obj_t * page_users_create(lv_obj_t * parent)
 static void go_back_cb(lv_event_t * e)
 {
     (void)e;
-    ui_switch_page(PAGE_SETTINGS);
+    /* 用户管理现为底部「用户」页签（一级页），返回主页即可 */
+    ui_switch_page(PAGE_HOME);
 }
 
 /* ================================================================
@@ -693,6 +714,8 @@ static void pwd_btn_cb(lv_event_t * e)
 
 static void dlg_change_pwd(void)
 {
+    /* 改的是管理员吗？是则保存前强制走动态码二次确认 */
+    s_pwd_is_admin = user_is_admin(s_sel_id);
     lv_obj_t * win = dlg_open("修改密码", SX(380), SY(420));  /* 修改密码 */
     (void)win;
     dlg_textarea("旧 PIN",         true, true, 0);
@@ -769,12 +792,40 @@ static void save_pwd_cb(lv_event_t * e)
         return;
     }
 
+    /* ★ 敏感操作（管理员改密）：先过动态码二次确认，通过后才提交改密 */
+    if (s_pwd_is_admin) {
+        strncpy(s_pending_old, oldp, sizeof(s_pending_old) - 1);
+        strncpy(s_pending_new, newp, sizeof(s_pending_new) - 1);
+        close_dlg();          /* 收起 PIN 弹窗 */
+        pwd_otp_show();       /* 弹动态码键盘 */
+        return;
+    }
+    post_chg_pwd(s_sel_id, oldp, newp);
+}
+
+/* 提交改密（管理员已通过动态码，或非管理员直接走这里） */
+static void post_chg_pwd(int id, const char *oldp, const char *newp)
+{
     chg_pwd_job_t * a = (chg_pwd_job_t *)calloc(1, sizeof(*a));
     if (!a) return;
-    a->id = s_sel_id;
+    a->id = id;
     strncpy(a->oldpin, oldp, sizeof(a->oldpin) - 1);
     strncpy(a->newpin, newp, sizeof(a->newpin) - 1);
     worker_post(chg_pwd_worker, a, chg_pwd_done);
+}
+
+/* 目标用户是否为管理员（同步读 users.json，文件小、无阻塞感） */
+static bool user_is_admin(int id)
+{
+    safe_user_t * us = NULL;
+    int n = 0;
+    if (user_load_all(&us, &n) != 0) { user_list_free(us); return false; }
+    bool r = false;
+    for (int i = 0; i < n; i++) {
+        if (us[i].id == id) { r = (strcmp(us[i].role, "admin") == 0); break; }
+    }
+    user_list_free(us);
+    return r;
 }
 
 /* ================================================================
@@ -1118,6 +1169,171 @@ static void do_del_cb(lv_event_t * e)
 
 
 
+/* ================================================================
+ *  修改管理员密码 — 动态码二次确认（FR-3 敏感操作）
+ *  —— 自绘 6 位动态码键盘，复用 auth_show 的视觉范式；
+ *     校验走 backend_admin_verify_totp（任一启用且开 TOTP 的管理员）。
+ * ================================================================ */
+static void pwd_otp_update_disp(void)
+{
+    if (!s_otp_disp) return;
+    size_t len = strlen(s_otp_pin);
+    char masked[8];
+    for (size_t i = 0; i < len; i++) masked[i] = s_otp_pin[i];
+    masked[len] = '\0';
+    lv_label_set_text(s_otp_disp, len ? masked : "------");
+}
+
+static void pwd_otp_close(void)
+{
+    if (s_otp_ov) lv_obj_delete(s_otp_ov);
+    s_otp_ov = NULL; s_otp_disp = NULL; s_otp_msg = NULL;
+    s_otp_pin[0] = '\0';
+}
+
+static void pwd_otp_key_cb(lv_event_t * e)
+{
+    int idx = (int)(uintptr_t)lv_event_get_user_data(e);
+    static const char * KEYS[12] = {
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "退格", "0", "清空",
+    };
+    const char * key = KEYS[idx];
+    if (strcmp(key, "清空") == 0) {
+        s_otp_pin[0] = '\0';
+    } else if (strcmp(key, "退格") == 0) {
+        size_t len = strlen(s_otp_pin);
+        if (len > 0) s_otp_pin[len - 1] = '\0';
+    } else {
+        size_t len = strlen(s_otp_pin);
+        if (len < 6) { s_otp_pin[len] = key[0]; s_otp_pin[len + 1] = '\0'; }
+    }
+    pwd_otp_update_disp();
+}
+
+static void pwd_otp_cancel_cb(lv_event_t * e)
+{
+    (void)e;
+    pwd_otp_close();
+}
+
+static void pwd_otp_ok_cb(lv_event_t * e)
+{
+    (void)e;
+    if (strlen(s_otp_pin) != 6) {
+        if (s_otp_msg) lv_label_set_text(s_otp_msg, "动态码为 6 位");
+        return;
+    }
+    auth_result_t r = backend_admin_verify_totp(s_otp_pin);
+    if (r == AUTH_OK) {
+        pwd_otp_close();
+        post_chg_pwd(s_sel_id, s_pending_old, s_pending_new);
+    } else {
+        s_otp_pin[0] = '\0';
+        pwd_otp_update_disp();
+        if (s_otp_msg) {
+            lv_label_set_text(s_otp_msg,
+                (r == AUTH_REPLAY) ? "该动态码已使用，请等下一周期" : "动态码错误，请重试");
+        }
+    }
+}
+
+static void pwd_otp_show(void)
+{
+    pwd_otp_close();
+    lv_obj_t * scr = lv_screen_active();
+
+    s_otp_ov = lv_obj_create(scr);
+    lv_obj_set_size(s_otp_ov, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_bg_color(s_otp_ov, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_otp_ov, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_otp_ov, 0, 0);
+    lv_obj_add_event_cb(s_otp_ov, pwd_otp_cancel_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * win = lv_obj_create(s_otp_ov);
+    lv_obj_set_size(win, SX(380), SY(430));
+    lv_obj_add_style(win, &st_panel, 0);
+    lv_obj_set_style_radius(win, SX(16), 0);
+    lv_obj_set_style_pad_all(win, 0, 0);       /* 下面全用绝对坐标，去掉默认 padding */
+    lv_obj_center(win);
+
+    lv_obj_t * t = lv_label_create(win);
+    lv_label_set_text(t, "管理员验证");
+    lv_obj_add_style(t, &st_text, 0);
+    lv_obj_set_style_text_font(t, app_font_scaled(20), 0);
+    lv_obj_set_width(t, SX(380));
+    lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(t, 0, SY(14));
+
+    lv_obj_t * sub = lv_label_create(win);
+    lv_label_set_text(sub, "修改管理员密码需验证动态码");
+    lv_obj_set_style_text_font(sub, app_font_scaled(12), 0);
+    lv_obj_set_style_text_color(sub, theme_color(TH_TEXT_MUT), 0);
+    lv_obj_set_width(sub, SX(380));
+    lv_obj_set_style_text_align(sub, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(sub, 0, SY(44));
+
+    s_otp_disp = lv_label_create(win);
+    lv_label_set_text(s_otp_disp, "------");
+    lv_obj_add_style(s_otp_disp, &st_text, 0);
+    lv_obj_set_style_text_font(s_otp_disp, app_font_scaled(28), 0);
+    lv_obj_set_style_text_align(s_otp_disp, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_bg_color(s_otp_disp, theme_color(TH_PANEL2), 0);
+    lv_obj_set_style_radius(s_otp_disp, SX(8), 0);
+    lv_obj_set_size(s_otp_disp, SX(240), SY(50));
+    lv_obj_set_pos(s_otp_disp, SX(70), SY(70));
+
+    s_otp_msg = lv_label_create(win);
+    lv_label_set_text(s_otp_msg, "请输入 6 位动态码");
+    lv_obj_set_style_text_font(s_otp_msg, app_font_scaled(13), 0);
+    lv_obj_set_style_text_color(s_otp_msg, theme_color(TH_TEXT_MUT), 0);
+    lv_obj_set_width(s_otp_msg, SX(380));
+    lv_obj_set_style_text_align(s_otp_msg, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_otp_msg, 0, SY(128));
+
+    /* 3×4 数字键盘：键宽 100、列距 120、行距 55 */
+    static const char * KEYS[4][3] = {
+        { "1", "2", "3" }, { "4", "5", "6" }, { "7", "8", "9" }, { "退格", "0", "清空" },
+    };
+    const int32_t ROW_Y[4] = { 160, 215, 270, 325 };
+    const int32_t KEY_X[3] = { 20, 140, 260 };
+    for (int r = 0; r < 4; r++) {
+        for (int c = 0; c < 3; c++) {
+            lv_obj_t * k = lv_button_create(win);
+            lv_obj_set_size(k, SX(100), SY(46));
+            lv_obj_set_pos(k, SX(KEY_X[c]), SY(ROW_Y[r]));
+            lv_obj_add_style(k, &st_panel2, 0);
+            lv_obj_set_style_radius(k, SX(8), 0);
+            lv_obj_t * kl = lv_label_create(k);
+            lv_label_set_text(kl, KEYS[r][c]);
+            lv_obj_add_style(kl, &st_text, 0);
+            lv_obj_set_style_text_font(kl, app_font_scaled(22), 0);
+            lv_obj_center(kl);
+            lv_obj_add_event_cb(k, pwd_otp_key_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)(r * 3 + c));
+        }
+    }
+
+    lv_obj_t * canc = lv_button_create(win);
+    lv_obj_set_size(canc, SX(160), SY(44));
+    lv_obj_set_pos(canc, SX(20), SY(376));
+    lv_obj_add_style(canc, &st_ghost_btn, 0);
+    lv_obj_add_event_cb(canc, pwd_otp_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * cl = lv_label_create(canc);
+    lv_label_set_text(cl, "取消");
+    lv_obj_set_style_text_font(cl, app_font_scaled(16), 0);
+    lv_obj_center(cl);
+
+    lv_obj_t * ok = lv_button_create(win);
+    lv_obj_set_size(ok, SX(160), SY(44));
+    lv_obj_set_pos(ok, SX(200), SY(376));
+    lv_obj_add_style(ok, &st_accent_btn, 0);
+    lv_obj_add_style(ok, &st_accent_btn_pr, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(ok, pwd_otp_ok_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * ol = lv_label_create(ok);
+    lv_label_set_text(ol, "验证");
+    lv_obj_set_style_text_font(ol, app_font_scaled(16), 0);
+    lv_obj_center(ol);
+}
+
 /* ★ 测试钩子：让 main.c 的 SAFE_TEST_DLG=add_user 能直接打开"添加用户"弹窗（无需点击） */
 void page_users_test_open_add_dlg(void)
 {
@@ -1136,6 +1352,14 @@ void page_users_test_open_change_pwd_dlg(void)
 {
     s_sel_id = 0;
     dlg_change_pwd();
+}
+
+/* ★ 测试钩子：SAFE_TEST_DLG=otp 直接打开"管理员动态码"弹窗（验证 FR-3 敏感操作） */
+void page_users_test_open_otp_dlg(void)
+{
+    s_sel_id = 0;
+    s_pwd_is_admin = true;
+    pwd_otp_show();
 }
 
 

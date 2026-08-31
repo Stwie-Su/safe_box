@@ -2,7 +2,24 @@
     "configurations": [
         {
             "name": "Linux",
-            "compileCommands": "${workspaceFolder}/build_pc/compile_commands.json"
+            "compilerPath": "/usr/bin/cc",
+            "compileCommands": "${workspaceFolder}/build_pc/compile_commands.json",
+            "includePath": [
+                "${workspaceFolder}/app",
+                "${workspaceFolder}/lvgl",
+                "${workspaceFolder}/lvgl/include",
+                "${workspaceFolder}/lvgl/include/lvgl",
+                "${workspaceFolder}/build_pc/lvgl",
+                "/usr/local/include/SDL2",
+                "/usr/include/freetype2"
+            ],
+            "defines": [
+                "LV_CONF_SKIP",
+                "LV_CONF_KCONFIG_EXTERNAL_INCLUDE=<${workspaceFolder}/build_pc/lvgl/autoconf.h>"
+            ],
+            "intelliSenseMode": "linux-gcc-x64",
+            "cStandard": "gnu99",
+            "cppStandard": "gnu++17"
         }
     ],
     "version": 4

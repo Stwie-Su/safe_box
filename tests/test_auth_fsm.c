@@ -7,6 +7,7 @@
 #include "test_util.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "core/auth/auth_fsm.h"

@@ -49,35 +49,6 @@ static safe_policy_t g_policy = { 4, 8, 5, 30, 85, 60 };  /* pin_min/max/max_fai
  * 交叉访问，加一把小锁；文件读写仍由 worker 单线程持有，无需全局锁。 */
 static pthread_mutex_t g_policy_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* ==================================================================
- * 目录定位与文件读写
- * ================================================================== */
-
-/* 可执行文件所在目录（不含结尾分隔符）。失败返回 NULL。 */
-static const char *get_exe_dir(char *buf, size_t bufsz)
-{
-#if defined(_WIN32)
-    DWORD n = GetModuleFileNameA(NULL, buf, (DWORD)bufsz);
-    if (n == 0 || n >= bufsz) return NULL;
-    buf[n] = '\0';
-    char *p = buf + n;
-    while (p > buf && p[-1] != '\\' && p[-1] != '/') p--;
-    *p = '\0';
-    return buf;
-#else
-    char link[PATH_MAX];
-    ssize_t n = readlink("/proc/self/exe", link, sizeof(link) - 1);
-    if (n <= 0) return NULL;
-    link[n] = '\0';
-    char *p = link + n;
-    while (p > link && p[-1] != '/') p--;
-    *p = '\0';
-    if ((size_t)(p - link) + 1 > bufsz) return NULL;
-    memcpy(buf, link, (size_t)(p - link) + 1);
-    return buf;
-#endif
-}
-
 /* 默认数据目录：
  *   编译期由 SAFE_DATA_DIR 决定（PC = 工程内 data/，板子 = /var/lib/safe），
  *   运行时可用环境变量 SAFE_DATA_DIR 覆盖。
@@ -253,7 +224,6 @@ static const char *js_skip(const char *p)
 static const char *js_get(const char *obj, const char *key)
 {
     const char *p = obj;
-    size_t klen = strlen(key);
     while (p && *p) {
         p = js_ws(p);
         if (*p != '"') { p++; continue; }

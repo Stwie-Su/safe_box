@@ -63,16 +63,16 @@ static void do_subscribe(void)
     MQTTAsync_subscribe(g_cli, "safe/cmd", 1, &ro);
 }
 
-static int on_connect(void *context, char *cause)
+static void on_connect(void *context, MQTTAsync_successData * data)
 {
-    (void)context; (void)cause;
+    (void)context;
+    (void)data;
     g_conn = 1;
     do_subscribe();
     printf("[MQTT] connected to %s\n", g_address);
-    return 1;   /* 返回 1 表示已处理 */
 }
 
-static int on_connect_failure(void *context, MQTTAsync_failureData *data)
+static void on_connect_failure(void *context, MQTTAsync_failureData *data)
 {
     (void)context;
     g_conn = 0;
@@ -86,10 +86,10 @@ static int on_connect_failure(void *context, MQTTAsync_failureData *data)
     co.onSuccess = on_connect;
     co.onFailure = on_connect_failure;
     MQTTAsync_connect(g_cli, &co);
-    return 1;
+    return;
 }
 
-static int on_connection_lost(void *context, char *cause)
+static void on_connection_lost(void *context, char *cause)
 {
     (void)context;
     g_conn = 0;
@@ -101,7 +101,7 @@ static int on_connection_lost(void *context, char *cause)
     co.onSuccess = on_connect;
     co.onFailure = on_connect_failure;
     MQTTAsync_connect(g_cli, &co);
-    return 1;
+    return;
 }
 
 static int on_message(void *context, char *topic, int topicLen, MQTTAsync_message *msg)
@@ -116,7 +116,7 @@ static int on_message(void *context, char *topic, int topicLen, MQTTAsync_messag
     else push_msg(topic, payload);
     MQTTAsync_freeMessage(&msg);
     MQTTAsync_free(topic);
-    return 1;
+    return 1;   /* 1 表示消息已处理，Paho 会释放 topic 与 message */
 }
 
 int mqtt_start(const char *host, int port, const char *client_id, mqtt_msg_cb_t cb)
@@ -141,6 +141,7 @@ int mqtt_start(const char *host, int port, const char *client_id, mqtt_msg_cb_t 
     rc = MQTTAsync_connect(g_cli, &co);
     if (rc != MQTTASYNC_SUCCESS) {
         printf("[MQTT] connect() returned %d (will retry via onFailure)\n", rc);
+        return -1;
     }
     return 0;
 }
