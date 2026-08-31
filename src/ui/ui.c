@@ -19,8 +19,11 @@
 #include "ui/pages/page_network.h"
 #include "ui/pages/page_system.h"
 #include "ui/pages/page_keypad.h"
+#include "ui/pages/page_otp.h"
 #include "core/store.h"      /* store_init */
 #include "core/worker.h"     /* worker_init, worker_poll */
+#include "core/auth_fsm.h"   /* 阶段 1：置信度状态机 + UI hook */
+#include "core/rpc.h"        /* 阶段 1：RPC 指令泵 + 状态上报 */
 
 /* 基准尺寸（设计稿像素，运行时 × scale） */
 #define TOPBAR_BASE  48
@@ -45,6 +48,7 @@ static const page_desc_t s_pages[PAGE_COUNT] = {
     { PAGE_NETWORK,  page_network_create  }, // 4: 网络设置子页
     { PAGE_SYSTEM,   page_system_create   }, // 5: 系统设置子页
     { PAGE_KEYPAD,   page_keypad_create   }, // 6: 密码键盘子页
+    { PAGE_OTP,      page_otp_create      }, // 7: 动态密码子页
 };
 
 /* --- 全局 UI 控件句柄 --- */
@@ -69,6 +73,11 @@ static void switch_page(ui_page_t page);
 static void tab_click_cb(lv_event_t * e);
 static void status_timer_cb(lv_timer_t * t);
 static void worker_poll_timer_cb(lv_timer_t * t);
+/* 阶段 1：状态机心跳 / RPC 指令泵 / 状态周期上报 + FSM→UI 桥接 */
+static void fsm_tick_timer_cb(lv_timer_t * t);
+static void rpc_poll_timer_cb(lv_timer_t * t);
+static void status_pub_timer_cb(lv_timer_t * t);
+static void fsm_ui_hook(fsm_state_t st, const char *user, const char *detail);
 /* 主题切换回调：刷新顶栏本地颜色覆盖（定义在 build_topbar 之后） */
 static void topbar_refresh_theme(int idx);
 
@@ -109,6 +118,13 @@ void app_start(void)
     // 6. 创建 20ms 定时器：异步任务结果泵
     lv_timer_create(worker_poll_timer_cb, 20, NULL);   
 
+    // 6.5 阶段 1：FSM 心跳（100ms 轮询人脸 + 状态超时）/ RPC 指令泵（20ms）/
+    //           状态周期上报（5s）；并桥接 FSM→UI（切页/弹窗）。
+    lv_timer_create(fsm_tick_timer_cb, 100, NULL);
+    lv_timer_create(rpc_poll_timer_cb, 20, NULL);
+    lv_timer_create(status_pub_timer_cb, 5000, NULL);
+    auth_fsm_set_ui_hook(fsm_ui_hook);
+
     // 7. 默认切入主页（PAGE_HOME）
     switch_page(PAGE_HOME);
 }
@@ -120,6 +136,40 @@ static void worker_poll_timer_cb(lv_timer_t * t)
 {
     (void)t;
     worker_poll();
+}
+
+/* 阶段 1：状态机心跳 —— 主线程 100ms 驱动（轮询 fake FM225 + 状态超时推进） */
+static void fsm_tick_timer_cb(lv_timer_t * t)
+{
+    (void)t;
+    auth_fsm_tick();
+}
+
+/* 阶段 1：RPC 指令泵 —— 主线程取走 MQTT 线程入队的 safe/cmd 并分发 */
+static void rpc_poll_timer_cb(lv_timer_t * t)
+{
+    (void)t;
+    rpc_poll();
+}
+
+/* 阶段 1：状态周期上报（safe/status，5s） */
+static void status_pub_timer_cb(lv_timer_t * t)
+{
+    (void)t;
+    rpc_publish_status_now();
+}
+
+/* FSM 状态变化 → UI 切换（业务层不直接碰 LVGL，由本 hook 桥接，NFR-5）。
+ * UNLOCKED/LOCKOUT 回到主页；WAIT_OTP 弹动态码页；DENY/IDLE 不强制切页。 */
+static void fsm_ui_hook(fsm_state_t st, const char *user, const char *detail)
+{
+    (void)user; (void)detail;
+    switch (st) {
+        case FSM_WAIT_OTP: ui_switch_page(PAGE_OTP);  break;
+        case FSM_UNLOCKED: ui_switch_page(PAGE_HOME); break;
+        case FSM_LOCKOUT:  ui_switch_page(PAGE_HOME); break;
+        default: break;
+    }
 }
 
 /**

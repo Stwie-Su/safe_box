@@ -1,5 +1,26 @@
-.config 
-.config.old
+# 构建产物
 build/
-.deps
-env
+build_pc/
+build_board/
+.build_bak/
+.cache/
+compile_commands.json
+cmake-build-*/
+
+# Kconfig 生成物
+.config
+.config.old
+
+# 运行时数据（不入库：含 PIN 哈希与审计日志）
+data/
+*.log
+
+# 备份与临时文件
+*.bak
+*.bak_*
+*.orig
+*.rej
+
+# 编辑器
+.vscode/
+.DS_Store

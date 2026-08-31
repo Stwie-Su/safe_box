@@ -7,11 +7,7 @@
 #include "ui/ui.h"
 #include "ui/theme.h"
 #include "ui/ui_scale.h"
-#include "core/store.h"
-#include "core/unlock_backend.h"
-#include "core/async_store.h"
-#include "core/worker.h"
-#include "hal/actuator.h"
+#include "core/auth_fsm.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -182,54 +178,8 @@ static void back_click_cb(lv_event_t * e)
     ui_switch_page(PAGE_HOME);
 }
 
-/* DESIGN.md §9：开锁校验（对每个启用用户做 PBKDF2）放到后台 worker，
- * UI 不冻结；按钮用 busy 标志防重复提交。 */
-typedef struct {
-    char pin[16];
-    int  result;          /* unlock_result_t */
-    char user[32];
-} unlock_job_t;
-
-static bool s_verify_busy = false;
-
-static void unlock_worker(void * p)
-{
-    unlock_job_t * a = (unlock_job_t *)p;
-    a->user[0] = '\0';
-    a->result = (int)backend_verify_pin(a->pin, a->user, sizeof(a->user));
-}
-
-static void unlock_done(void * p)
-{
-    unlock_job_t * a = (unlock_job_t *)p;
-    s_verify_busy = false;
-
-    switch (a->result) {
-        case UNLOCK_OK:
-            astore_append_log("unlock", a->user[0] ? a->user : "-", 1, "pin ok");
-            actuator_drive(true);                 /* PC mock：置开锁状态 */
-            set_msg("开锁成功", false);
-            lv_label_set_text(s_display, "✓");
-            s_pin[0] = '\0';
-            lv_timer_t * tm = lv_timer_create(finish_ok, 1200, NULL);
-            lv_timer_set_repeat_count(tm, 1);
-            break;
-        case UNLOCK_LOCKED:
-            astore_append_log("unlock_fail", "-", 0, "locked");
-            set_msg("已被锁定，请稍后再试", true);
-            s_pin[0] = '\0';
-            update_display();
-            break;
-        default:
-            astore_append_log("unlock_fail", "-", 0, "pin wrong");
-            set_msg("PIN 错误，请重试", true);
-            s_pin[0] = '\0';
-            update_display();
-            break;
-    }
-    free(a);
-}
-
+/* 阶段 1：PIN 校验统一走 auth_fsm（FSM 负责判定 + 执行器脉冲 + 审计日志 + MQTT 事件，
+ * 避免 PIN / 人脸 / 动态码三套逻辑重复）。主线程直接提交（FSM 同步判定，无冻结）。 */
 static void confirm_cb(lv_event_t * e)
 {
     (void)e;
@@ -238,20 +188,17 @@ static void confirm_cb(lv_event_t * e)
         set_msg("PIN 至少 4 位", true);
         return;
     }
-    if (s_verify_busy) return;   /* 防重复提交 */
+    auth_fsm_submit_pin(s_pin);
+    s_pin[0] = '\0';
+    update_display();
 
-    s_verify_busy = true;
-    unlock_job_t * a = (unlock_job_t *)calloc(1, sizeof(*a));
-    if (!a) { s_verify_busy = false; return; }
-    strncpy(a->pin, s_pin, sizeof(a->pin) - 1);
-    worker_post(unlock_worker, a, unlock_done);
-}
-
-/* 开锁成功后回主页（一次性定时器回调） */
-static void finish_ok(lv_timer_t * t)
-{
-    (void)t;
-    ui_switch_page(PAGE_HOME);
+    /* 同步反馈：成功由 FSM UI hook 切回主页；失败留在本页提示以便重试。 */
+    fsm_state_t st = auth_fsm_state();
+    if (st == FSM_DENY) {
+        set_msg("PIN 错误，请重试", true);
+    } else if (st == FSM_LOCKOUT) {
+        set_msg("设备已锁定，请稍后再试", true);
+    }
 }
 
 

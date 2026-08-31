@@ -19,6 +19,7 @@
 #include "ui/ui_scale.h"       /* SX/SY 自适应缩放 */
 #include "core/store.h"
 #include "core/worker.h"
+#include "core/auth_fsm.h"
 #include "hal/actuator.h"
 #include <time.h>
 #include <string.h>
@@ -39,8 +40,7 @@ static void monitor_timer_cb(lv_timer_t * t);
 static void build_info_card(lv_obj_t * parent, const char * title, lv_obj_t ** value_lbl);
 static int count_today_events(void);
 static void unlock_go_cb(lv_event_t * e);   /* 主页"开锁"按钮 → PIN 页 */
-static void face_unlock_cb(lv_event_t * e); /* 主页"人脸开锁"占位按钮 */
-static void face_tip_timer_cb(lv_timer_t * t);  /* 人脸开锁提示自动消失 */
+static void face_unlock_cb(lv_event_t * e); /* 主页"人脸开锁"模拟按钮 */
 /* 主题切换回调：定义在文件后半部，需前置声明 */
 static void monitor_refresh_theme(int idx);
 
@@ -139,9 +139,9 @@ lv_obj_t * page_monitor_create(lv_obj_t * parent)
     lv_label_set_text(face_txt, "人脸开锁");
     lv_obj_set_style_text_font(face_txt, app_font_scaled(14), 0);
     lv_obj_set_style_pad_top(face_txt, SY(4), 0);
-    /* "未配置" 角标 */
+    /* "模拟" 角标（阶段 1 PC mock：UI 注入置信度，阶段 3 接真实 FM225） */
     lv_obj_t * face_tag = lv_label_create(face_btn);
-    lv_label_set_text(face_tag, "未配置");
+    lv_label_set_text(face_tag, "模拟");
     lv_obj_set_style_text_font(face_tag, app_font_scaled(10), 0);
     lv_obj_set_style_text_color(face_tag, theme_color(TH_TEXT_MUT), 0);
     lv_obj_align(face_tag, LV_ALIGN_TOP_RIGHT, -SX(6), SY(4));
@@ -326,32 +326,14 @@ static void unlock_go_cb(lv_event_t * e)
     ui_switch_page(PAGE_KEYPAD);
 }
 
-/* ★ v2：人脸开锁占位回调（DESIGN.md 预留，PC 端 mock） */
-static lv_obj_t * s_face_tip = NULL;
-static void face_tip_timer_cb(lv_timer_t * t)
-{
-    (void)t;
-    if (s_face_tip) {
-        lv_obj_delete(s_face_tip);
-        s_face_tip = NULL;
-    }
-}
+/* 阶段 1：人脸开锁（PC 端以「注入一次高置信度识别」模拟 FM225 命中 admin）。
+ * 真实模组阶段 3 接入后，这里改为触发 hal_face 轮询即可，业务不动（NFR-5）。 */
 static void face_unlock_cb(lv_event_t * e)
 {
     (void)e;
-    if (s_face_tip) return;  /* 已有提示就不重复弹 */
-    /* 屏幕中央 warn 色提示：人脸开锁功能开发中 */
-    s_face_tip = lv_label_create(lv_screen_active());
-    lv_label_set_text(s_face_tip, "人脸开锁：功能开发中");
-    lv_obj_add_style(s_face_tip, &st_warn_text, 0);
-    lv_obj_set_style_text_font(s_face_tip, app_font_scaled(16), 0);
-    lv_obj_set_style_bg_color(s_face_tip, theme_color(TH_PANEL), 0);
-    lv_obj_set_style_bg_opa(s_face_tip, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_all(s_face_tip, SX(16), 0);
-    lv_obj_set_style_radius(s_face_tip, SX(8), 0);
-    lv_obj_align(s_face_tip, LV_ALIGN_CENTER, 0, 0);
-    lv_timer_t * t = lv_timer_create(face_tip_timer_cb, 1500, NULL);
-    lv_timer_set_repeat_count(t, 1);
+    /* admin 在 bootstrap 中预置 face_id=1、score_high=85：
+     * 注入 90 ≥ 85 → 直接开锁；改 75 走动态码；改 50 拒绝（用 MQTT inject_score 调试）。 */
+    auth_fsm_submit_detect(1, 90);
 }
 
 

@@ -71,7 +71,14 @@ set(APP_CORE_SOURCES
     src/core/crypto.c
     src/core/worker.c
     src/core/async_store.c
+    src/core/sha1.c
+    src/core/totp.c
+    src/core/auth_fsm.c
+    src/core/rpc.c
+    src/core/mqtt_client.c
     src/hal/actuator.c
+    src/hal/hal_time.c
+    src/hal/hal_face.c
     third_party/aes/aes.c
     third_party/sha256/sha256.c)
 set(APP_SOURCES ${APP_UI_SOURCES} ${APP_CORE_SOURCES})
@@ -135,7 +142,7 @@ if(CONFIG_LV_USE_SDL)
 else()
     target_compile_definitions(lvglsim PRIVATE SAFE_DIR_DEVICE)
 endif()
-target_link_libraries(lvglsim PUBLIC lvgl_linux ${EXTRA_LIBS} Threads::Threads)
+target_link_libraries(lvglsim PUBLIC lvgl_linux ${EXTRA_LIBS} Threads::Threads paho-mqtt3a cjson)
 
 if(WERROR)
     target_compile_options(lvglsim PRIVATE -Werror)

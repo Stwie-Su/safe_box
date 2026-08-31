@@ -21,13 +21,15 @@ typedef struct {
     int pin_max_len;    /* PIN 最长长度 */
     int max_failed;     /* 连续失败锁定阈值 */
     int lock_seconds;   /* 锁定时长（秒） */
+    int score_high;     /* 置信度 ≥ 此值直接开锁（FR-2） */
+    int score_mid;      /* 置信度 ≥ 此值走动态码；< 此值直接拒绝（FR-2） */
 } safe_policy_t;
 
-/* ---------------- 用户数据模型（DESIGN.md §2.2） ---------------- */
+/* ---------------- 用户数据模型（DESIGN.md §2.2，阶段 1 扩展） ---------------- */
 typedef struct {
     int     id;
     char    name[32];       /* 用户名（字母数字） */
-    char    role[16];       /* "admin" / "user" */
+    char    role[16];       /* "admin" / "user" / "temp" */
     char    pin_hash[65];   /* PBKDF2-SHA256 hex（64 字符） */
     char    pin_salt[33];   /* 16 字节随机盐 hex（32 字符） */
     char    auth_method[16];/* "pin"，预留 "otp" */
@@ -35,6 +37,16 @@ typedef struct {
     char    created_at[24]; /* ISO8601 */
     int     failed_attempts;
     int64_t lock_until;     /* Unix 秒时间戳，0=未锁定 */
+
+    /* —— 阶段 1 新增（FR-1 三通道 / FR-4 / FR-9 临时授权）—— */
+    int     face_id;            /* FM225 注册 ID；-1 = 未录入人脸 */
+    bool    face_enable;        /* 管理员开关：人脸通道是否可用 */
+    char    totp_secret[36];    /* Base32 密钥（16 字节 → 26 字符 + '\0'）；空=未绑定 */
+    bool    totp_enable;        /* 管理员开关：动态密码通道是否可用 */
+    int64_t last_otp_counter;   /* TOTP 防重放：上次成功使用过的时间片序号 */
+    int64_t valid_until;        /* 临时用户有效期截止（Unix 秒，0 = 不限） */
+    int     use_limit;          /* 临时用户开锁次数上限（0 = 不限） */
+    int     used_count;         /* 临时用户已开锁次数 */
 } safe_user_t;
 
 /* ---------------- 日志条目（safe.log，JSON Lines） ---------------- */
@@ -57,11 +69,15 @@ int user_add(const safe_user_t *u);                      /* 0=成功；失败计
 int user_del(int id);                                    /* 0=成功 */
 int user_update(const safe_user_t *u);                   /* 按 id 整体覆盖；0=成功 */
 int user_find_by_name(const char *name, safe_user_t *out);/* 0=找到 */
+int user_find_by_id(int id, safe_user_t *out);            /* 0=找到 */
+int user_find_by_face(int face_id, safe_user_t *out);     /* 0=找到（face_id>=0 且已录入） */
 int user_verify_pin(const char *name, const char *pin);  /* 0=通过 1=错误 2=已锁定 -1=无此用户 */
 int pin_hash(const char *pin, uint8_t *salt_out, char *hash_hex_out);  /* 生成新哈希，0=成功 */
 int pin_check(const char *pin, const char *salt_hex, const char *hash_hex); /* 0=匹配 */
 const safe_policy_t * user_policy(void);                 /* 返回当前策略指针（内部静态） */
 void user_policy_set(int max_failed, int lock_seconds);   /* 修改安全策略并落盘 */
+void user_policy_set_score(int high, int mid);            /* 修改置信度阈值（FR-2）并落盘 */
+int  user_next_id(void);                                  /* 分配下一个用户 id */
 void user_list_free(safe_user_t *list);
 
 /* ---------------- 网络（psk 可逆加密，DESIGN.md §4.3） ---------------- */

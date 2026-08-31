@@ -37,6 +37,8 @@
 #endif
 #include "hal/actuator.h"
 #include "core/store.h"
+#include "core/auth_fsm.h"   /* 阶段 1：置信度状态机 */
+#include "core/rpc.h"        /* 阶段 1：RPC/MQTT 指令框架 */
 
 /* ===================== 内部函数声明 ===================== */
 static void __attribute__((unused)) configure_simulator(int argc, char ** argv);  /* PC 专用：解析命令行并注册后端 */
@@ -45,6 +47,9 @@ static void print_usage(void);                            /* 打印帮助信息 
 
 /* 用户在命令行用 -b 指定的后端名；未指定时为 NULL */
 static char * selected_backend;
+
+/* 阶段 1：FSM 事件 → MQTT（safe/log）桥接回调 */
+static void main_fsm_event_cb(const char *evt, const char *user, const char *detail, int res);
 
 /* 仿真器全局设置（窗口尺寸、是否全屏、旋转角度等），定义在其他文件 */
 extern simulator_settings_t settings;
@@ -237,6 +242,12 @@ static void perf_log_cb(lv_timer_t * t)
     s_perf_ms_max = 0;
 }
 
+/* 阶段 1：FSM 事件 → MQTT safe/log 转发（验收用例 6：事件流可见） */
+static void main_fsm_event_cb(const char *evt, const char *user, const char *detail, int res)
+{
+    rpc_publish_event(evt, user, detail, res);
+}
+
 int main(int argc, char ** argv)
 {
     // 根据平台宏决定如何初始化后端：
@@ -329,6 +340,16 @@ int main(int argc, char ** argv)
     }
 
     app_start();
+
+    /* ============================================================
+     * 阶段 1：启动置信度状态机 + RPC/MQTT。
+     *  - FSM 负责人脸/PIN/动态码三通道编排；
+     *  - RPC 连接本地 Broker（127.0.0.1:1883，与 Windows MQTTX 同一 Broker）；
+     *  - FSM 事件经回调转发到 safe/log（MQTT 事件流，验收用例 6）。
+     * ============================================================ */
+    auth_fsm_init();
+    rpc_init("127.0.0.1", 1883);
+    auth_fsm_set_event_cb(main_fsm_event_cb);
 
     /* ============================================================
      * 测试模式：环境变量控制起始页 / 起始主题（仅 PC 调试用）

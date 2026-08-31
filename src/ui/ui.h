@@ -36,6 +36,7 @@ typedef enum {
     PAGE_NETWORK,        /* 网络（设置子页） */
     PAGE_SYSTEM,         /* 系统（设置子页） */
     PAGE_KEYPAD,         /* 开锁 PIN 键盘（主页全屏层） */
+    PAGE_OTP,            /* 动态密码（人脸置信度二次确认，全屏层） */
     PAGE_COUNT
 } ui_page_t;
 

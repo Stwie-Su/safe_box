@@ -42,7 +42,7 @@
 
 /* ---------------- 全局 ---------------- */
 static char g_dir[512] = {0};          /* 数据目录（store_set_dir 覆盖） */
-static safe_policy_t g_policy = { 4, 8, 5, 60 };  /* pin_min/max/max_failed/lock_seconds */
+static safe_policy_t g_policy = { 4, 8, 5, 30, 85, 60 };  /* pin_min/max/max_failed/lock_seconds/score_high/score_mid */
 
 /* DESIGN.md §9：g_policy 被主线程(user_policy)与后台 worker(user_policy_set/load_users)
  * 交叉访问，加一把小锁；文件读写仍由 worker 单线程持有，无需全局锁。 */
@@ -424,22 +424,28 @@ int pin_check(const char *pin, const char *salt_hex, const char *hash_hex)
  * ================================================================== */
 static void user_to_json(const safe_user_t *u, char *out, size_t cap)
 {
-    char nq[96], rq[48], amq[48], cq[48];
+    char nq[96], rq[48], amq[48], cq[48], tsq[48];
     js_quote(u->name,  nq,  sizeof(nq));
     js_quote(u->role,  rq,  sizeof(rq));
     js_quote(u->auth_method, amq, sizeof(amq));
     js_quote(u->created_at,  cq,  sizeof(cq));
+    js_quote(u->totp_secret, tsq, sizeof(tsq));
     snprintf(out, cap,
         "{\"id\":%d,\"name\":%s,\"role\":%s,\"pin_hash\":\"%s\",\"pin_salt\":\"%s\","
-        "\"auth_method\":%s,\"enabled\":%s,\"created_at\":%s,\"failed_attempts\":%d,\"lock_until\":%lld}",
+        "\"auth_method\":%s,\"enabled\":%s,\"created_at\":%s,\"failed_attempts\":%d,\"lock_until\":%lld,"
+        "\"face_id\":%d,\"face_enable\":%s,\"totp_enable\":%s,\"totp_secret\":%s,"
+        "\"last_otp_counter\":%lld,\"valid_until\":%lld,\"use_limit\":%d,\"used_count\":%d}",
         u->id, nq, rq, u->pin_hash, u->pin_salt, amq,
-        u->enabled ? "true" : "false", cq, u->failed_attempts, (long long)u->lock_until);
+        u->enabled ? "true" : "false", cq, u->failed_attempts, (long long)u->lock_until,
+        u->face_id, u->face_enable ? "true" : "false", u->totp_enable ? "true" : "false", tsq,
+        (long long)u->last_otp_counter, (long long)u->valid_until, u->use_limit, u->used_count);
 }
 
 static bool parse_user_obj(const char *obj, safe_user_t *u)
 {
     long v;
     memset(u, 0, sizeof(*u));
+    u->face_id = -1;            /* 老数据缺字段时的安全默认值 */
     if (!js_get_int(obj, "id", &v)) return false;
     u->id = (int)v;
     if (!js_get_str(obj, "name", u->name, sizeof(u->name))) return false;
@@ -451,6 +457,15 @@ static bool parse_user_obj(const char *obj, safe_user_t *u)
     js_get_str(obj, "created_at", u->created_at, sizeof(u->created_at));
     if (js_get_int(obj, "failed_attempts", &v)) u->failed_attempts = (int)v;
     if (js_get_int(obj, "lock_until", &v)) u->lock_until = v;
+    /* —— 阶段 1 新增字段：缺省给兼容默认值 —— */
+    if (js_get_int(obj, "face_id", &v)) u->face_id = (int)v; else u->face_id = -1;
+    js_get_bool(obj, "face_enable", &u->face_enable);
+    js_get_bool(obj, "totp_enable", &u->totp_enable);
+    js_get_str(obj, "totp_secret", u->totp_secret, sizeof(u->totp_secret));
+    if (js_get_int(obj, "last_otp_counter", &v)) u->last_otp_counter = v;
+    if (js_get_int(obj, "valid_until", &v)) u->valid_until = v;
+    if (js_get_int(obj, "use_limit", &v)) u->use_limit = (int)v;
+    if (js_get_int(obj, "used_count", &v)) u->used_count = (int)v;
     return true;
 }
 
@@ -474,6 +489,9 @@ static int load_users(safe_user_t **list, int *count, bool *ok)
         if (js_get_int(pol, "pin_max_len", &v) && v >= 4) g_policy.pin_max_len = (int)v;
         if (js_get_int(pol, "max_failed", &v) && v >= 1)  g_policy.max_failed = (int)v;
         if (js_get_int(pol, "lock_seconds", &v) && v >= 1) g_policy.lock_seconds = (int)v;
+        /* 阈值有合理范围才采纳：high∈[60,100]，mid∈[20,high) */
+        if (js_get_int(pol, "score_high", &v) && v >= 60 && v <= 100) g_policy.score_high = (int)v;
+        if (js_get_int(pol, "score_mid", &v) && v >= 20 && v < g_policy.score_high) g_policy.score_mid = (int)v;
         pthread_mutex_unlock(&g_policy_mutex);
     }
 
@@ -508,8 +526,8 @@ static bool save_users(const safe_user_t *us, int n)
     const safe_policy_t *p = &g_policy;
     o += (size_t)snprintf(buf + o, cap - o,
         "{\n  \"version\": 1,\n  \"policy\": {\"pin_min_len\": %d, \"pin_max_len\": %d, "
-        "\"max_failed\": %d, \"lock_seconds\": %d},\n  \"users\": [\n",
-        p->pin_min_len, p->pin_max_len, p->max_failed, p->lock_seconds);
+        "\"max_failed\": %d, \"lock_seconds\": %d, \"score_high\": %d, \"score_mid\": %d},\n  \"users\": [\n",
+        p->pin_min_len, p->pin_max_len, p->max_failed, p->lock_seconds, p->score_high, p->score_mid);
     for (int i = 0; i < n; i++) {
         char one[600];
         user_to_json(&us[i], one, sizeof(one));
@@ -548,6 +566,50 @@ int user_find_by_name(const char *name, safe_user_t *out)
     }
     user_list_free(us);
     return -1;
+}
+
+int user_find_by_id(int id, safe_user_t *out)
+{
+    safe_user_t *us = NULL;
+    int n = 0;
+    if (load_users(&us, &n, NULL) != 0 || n <= 0) return -1;
+    for (int i = 0; i < n; i++) {
+        if (us[i].id == id) {
+            if (out) *out = us[i];
+            user_list_free(us);
+            return 0;
+        }
+    }
+    user_list_free(us);
+    return -1;
+}
+
+int user_find_by_face(int face_id, safe_user_t *out)
+{
+    if (face_id < 0) return -1;   /* 陌生人无法映射 */
+    safe_user_t *us = NULL;
+    int n = 0;
+    if (load_users(&us, &n, NULL) != 0 || n <= 0) return -1;
+    for (int i = 0; i < n; i++) {
+        if (us[i].face_id == face_id) {
+            if (out) *out = us[i];
+            user_list_free(us);
+            return 0;
+        }
+    }
+    user_list_free(us);
+    return -1;
+}
+
+int user_next_id(void)
+{
+    safe_user_t *us = NULL;
+    int n = 0, maxid = 0;
+    if (load_users(&us, &n, NULL) == 0) {
+        for (int i = 0; i < n; i++) if (us[i].id > maxid) maxid = us[i].id;
+        user_list_free(us);
+    }
+    return maxid + 1;
 }
 
 int user_add(const safe_user_t *u)
@@ -617,6 +679,19 @@ void user_policy_set(int max_failed, int lock_seconds)
     if (lock_seconds >= 5 && lock_seconds <= 3600) g_policy.lock_seconds = lock_seconds;
     pthread_mutex_unlock(&g_policy_mutex);
     /* 落盘：读出全部用户后以新策略重写 users.json */
+    safe_user_t *us = NULL;
+    int n = 0;
+    load_users(&us, &n, NULL);
+    if (n > 0) save_users(us, n);
+    user_list_free(us);
+}
+
+void user_policy_set_score(int high, int mid)
+{
+    pthread_mutex_lock(&g_policy_mutex);
+    if (high >= 60 && high <= 100) g_policy.score_high = high;
+    if (mid  >= 20 && mid  < g_policy.score_high) g_policy.score_mid = mid;
+    pthread_mutex_unlock(&g_policy_mutex);
     safe_user_t *us = NULL;
     int n = 0;
     load_users(&us, &n, NULL);
@@ -909,6 +984,12 @@ bool store_init(void)
     strncpy(boot.role, "admin", sizeof(boot.role) - 1);
     strncpy(boot.auth_method, "pin", sizeof(boot.auth_method) - 1);
     boot.enabled = true;
+    /* 阶段 1 演示预置：管理员绑定人脸 id=1、启用 TOTP（固定演示密钥便于验收）。
+     * 仅 bootstrap（首次无 users.json）生效；已存在数据时按文件字段读取。 */
+    boot.face_id = 1;
+    boot.face_enable = true;
+    boot.totp_enable = true;
+    strncpy(boot.totp_secret, "JBSWY3DPEHPK3PXP", sizeof(boot.totp_secret) - 1);
     time_t now = time(NULL);
     struct tm tmv;
     localtime_r(&now, &tmv);
