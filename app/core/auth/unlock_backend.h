@@ -1,0 +1,53 @@
+/**
+ * @file unlock_backend.h
+ * 解锁后端接口（策略抽象）：UI / FSM 只调用本接口，不持有任何判定逻辑。
+ * 多用户模型（DESIGN.md §2）：三通道（PIN / 人脸 / 动态码）共用同一张用户表。
+ *
+ * 阶段 1 新增：auth_result_t 统一返回码 + 动态码校验入口（FR-1 / NFR-3）。
+ */
+#pragma once
+#include <stdbool.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* 三通道 / 远程开锁的统一返回码（TOTP / 远程开锁 / 管理员二次确认） */
+typedef enum {
+    AUTH_OK = 0,        /* 验证通过 */
+    AUTH_FAIL,          /* 验证失败（未达锁定） */
+    AUTH_LOCKED,        /* 相关用户处于锁定 */
+    AUTH_DISABLED,      /* 用户已停用 */
+    AUTH_NOUSER,        /* 用户不存在 */
+    AUTH_EXPIRED,       /* 临时授权已过期 / 次数用尽 */
+    AUTH_CHANNEL_OFF,   /* 该功能未启用（face_enable / totp_enable 为 false） */
+    AUTH_REPLAY,        /* 动态码已使用（防重放） */
+} auth_result_t;
+
+/* PIN 主页开锁专用返回码（与 baseline 兼容：page_keypad.c 仍按此判定） */
+typedef enum {
+    UNLOCK_OK = 0,      /* 验证通过 */
+    UNLOCK_FAIL,        /* 验证失败（未达锁定） */
+    UNLOCK_LOCKED       /* 所有启用用户均处于锁定 */
+} unlock_result_t;
+
+/* PIN 主页开锁：匹配任一【启用且未锁定】用户。成功时 out_user 填用户名。 */
+unlock_result_t backend_verify_pin(const char *pin, char *out_user, size_t user_cap);
+
+/* 动态码开锁：校验某用户的 TOTP（含 ±1 窗口容忍 + 防重放 + 失败计数 + 通道开关）。 */
+auth_result_t backend_verify_totp(const char *user, const char *code);
+
+/* 管理员动态码二次确认：在「任一启用且开启 TOTP 的管理员」上验证 otp。
+ * 用于 FR-3 敏感操作 / 远程开锁强制 TOTP。成功返回 AUTH_OK。 */
+auth_result_t backend_admin_verify_totp(const char *code);
+
+/* 是否存在处于锁定的启用用户（任一通道锁定也算） */
+bool backend_is_locked(void);
+
+/* 所有用户中最大锁定剩余秒数（0 = 无锁定） */
+int backend_lock_remaining(void);
+
+#ifdef __cplusplus
+} /*extern "C"*/
+#endif

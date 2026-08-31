@@ -1,155 +1,159 @@
 # CLAUDE.md — lv_port_linux（智能保险柜 UI / i.MX6ULL）
 
-> 最近更新：2026-08-27（补全目录结构与每个文件功能；修正路径 `Desktop`→`桌面`；PC 环境更正为 22.04；同步已知坑）
+> 最近更新：2026-08-31（工程骨架重构：分层目录、模块化 CMake、HAL 后端注册、单元测试）
+> 需求基线：`docs/01-需求规格.md`　架构说明：`docs/02-架构设计.md`　迁移记录：`docs/03-迁移清单.md`
 
 ## 1. 项目定位
-- Claude Code 运行在 Windows，通过 SSH 操作 Ubuntu 下的工程（`~/桌面/lv_port_linux`）。
-- 基于 **LVGL v9**（submodule 指向 `lvgl` 主线 `release/v9.2`）的智能保险柜（safe）前端工程。
-- PC 验证阶段（当前）聚焦四块：**日志、用户管理、数据存储、UI 设计**。
-- **本期不做**：摄像头、真实开锁动作（主页"开锁"按钮仅占位/预留；`actuator` 在 PC 端只打印）。
-- 硬件目标：NXP i.MX6ULL（百问网 100ask 板），LCD **1024×600 / RGB565**。
-- PC 验证环境：Ubuntu **22.04** VM（book@192.168.150.139，内核 5.15），用 **SDL2 2.28.5** 桌面窗口；上板用 **FBDEV + EVDEV** 后端。
-- 业务 `src/core` / `src/hal` / `src/ui` 代码在 PC 与板子之间**零改动**迁移（仅靠切换 defconfig + 编译器）。
 
-## 2. 双平台构建
-配置差异只在后端三行（PC=SDL；板子=FBDEV+EVDEV），其余（颜色深度16、日志、字体等）完全相同，由 `configs/*.defconfig` 决定，与源码无关。
+- 多用户共享保险柜（民宿短租 / 小型办公室 / 多成员家庭），不是"家庭保险柜"。
+  这一定位决定了多用户权限、TOTP、远程管理、审计日志、限时授权都是必需项。
+- 基于 **LVGL v9**（submodule `lvgl/`）。
+- 目标硬件：100ask i.MX6ULL（Cortex-A7 单核 / 512MB / 1024×600 触摸屏）。
+- **当前阶段：PC 验证优先**。业务代码在 PC 与板子之间零改动迁移，差异只落在 HAL 与平台引导层。
+- 人脸模组 FM225、RTC DS3231 均未到货：接口与后端空壳已就位，业务链路用模拟后端完整验证。
 
-**PC（看真实 UI 窗口，需进 VM 桌面）**
+## 2. 构建
+
+配置差异全部由 defconfig 决定，源码不出现平台判断。
+
+**PC（Ubuntu + SDL2）**
 ```bash
 cd ~/桌面/lv_port_linux
-export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig        # 指向 SDL2 2.28.5
-CMAKE=~/tools/cmake-3.22.1-linux-x86_64/bin/cmake
-# 本机已 Ubuntu 22.04，系统 python3 为 3.10（>=3.7），无需再指定 Buildroot 的 python3
-$CMAKE -B build_pc -DLV_PORT_DEFCONFIG=configs/pc.defconfig .
+cmake -B build_pc -DLV_PORT_DEFCONFIG=configs/pc.defconfig .
 cmake --build build_pc -j$(nproc)
-DISPLAY=:0 ./build_pc/bin/lvglsim
+ctest --test-dir build_pc --output-on-failure      # 单元测试 + 分层检查
+
+# 无桌面登录时用 Xvfb 提供虚拟显示
+Xvfb :99 -screen 0 1280x800x24 &
+DISPLAY=:99 ./build_pc/bin/lvglsim
 ```
 
-**开发板（i.MX6ULL，交叉编译 → ARM ELF）**
+**开发板（交叉编译）**
 ```bash
-cd ~/桌面/lv_port_linux
 BR=~/100ask_imx6ull-sdk/Buildroot_2020.02.x
 export PATH=~/tools/cmake-3.22.1-linux-x86_64/bin:$BR/output/host/bin:$PATH
-cmake -B build -DLV_PORT_DEFCONFIG=configs/get_started.defconfig \
+cmake -B build_board -DLV_PORT_DEFCONFIG=configs/board.defconfig \
   -DCMAKE_TOOLCHAIN_FILE=cmake/user_cross_compile_setup.cmake \
   -DPython3_EXECUTABLE=$BR/output/host/bin/python3 .
-cmake --build build -j$(nproc)            # 产物 build/bin/lvglsim（ARM ELF）
-# 拷到板子根文件系统直接运行（NFS 挂载或 scp）
+cmake --build build_board -j$(nproc)
 ```
-> ⚠️ 板子构建当前**不可用**：Buildroot 工具链 sysroot 不完整（缺 `crt1.o`/`libc.so`），需先在 SDK 侧修复（见 §6）。
+> 板子构建仍受 SDK sysroot 完整性影响；交叉编译时 MQTT 与测试默认关闭。
 
-## 3. 目录结构与每个文件功能
+**可选特性**（`cmake/SafeFeatures.cmake`，缺依赖自动降级，不会让构建失败）
 
-```
-lv_port_linux/
-├── CLAUDE.md                      # 本文件：项目说明、目录结构、约定、坑
-├── DESIGN.md                      # 需求与设计说明（用户模型/日志/存储/UI 信息架构/主题色板）
-├── CMake_VSCODE_修复记录.md        # VS Code/CMake 报错修复记录（目录改名、python3、源码红、tabbar 缺变量）
-├── CMakeLists.txt                 # 主构建脚本：Kconfig 选 defconfig；业务源码 glob；零改动切 PC/板子
-├── Kconfig                        # Kconfig 根：rsource lvgl/Kconfig + 3D truck demo 选项
-├── manifest.json                  # LVGL 官方项目元数据（显示后端/色深下拉等）
-├── LICENSE                        # 许可证
-├── .clang-format                  # clang-format 代码格式配置
-├── .gitignore                     # 忽略 .config / build/ / .deps / env
-├── .gitmodules                    # lvgl 子模块（https://github.com/lvgl/lvgl.git）
-├── .mcp.json                      # lvgl MCP（Kapa：https://lvgl.mcp.kapa.ai/），项目级
-├── lv_port_linux.code-workspace   # VS Code 工作区设置（cmake 路径 / build_pc / configureOnOpen）
-├── cmake/
-│   └── user_cross_compile_setup.cmake   # 交叉编译工具链（Buildroot arm-buildroot-linux-gnueabihf；带 libevdev 的 sysroot）
-├── configs/
-│   ├── pc.defconfig               # PC 验证：SDL2 + FreeType 中文 + RGB565（默认）
-│   ├── get_started.defconfig      # 开发板：FBDEV + EVDEV（交叉编译上板）
-│   └── get_started_3d.defconfig   # 3D truck demo 全特性配置（参考/未启用）
-├── src/
-│   ├── main.c                     # 程序入口：注册/初始化显示后端 → lv_init → actuator_init → app_start → LVGL 主循环
-│   ├── main.c.bak_204907          # main.c 的旧备份（勿用，历史残留）
-│   ├── core/                      # 业务逻辑层（与平台无关，PC/板子零改动）
-│   │   ├── config.c/.h            # 保险柜开锁密码：读/校验/写 password.cfg；含虚位密码（PIN_REAL_LEN=6, 虚位最大20）
-│   │   ├── crypto.c/.h            # 认证加密原语：AES-CBC + 随机 IV + PBKDF2-HMAC-SHA256 + HMAC（password.cfg 用）
-│   │   ├── store.c/.h             # 存储抽象层：users.json / network.json / safe.log（用户PIN哈希、网络psk、日志）
-│   │   ├── unlock_backend.c/.h    # 解锁策略抽象：PIN 匹配任一启用用户；防暴力按用户独立计数
-│   │   ├── worker.c/.h            # 通用异步 worker：后台线程执行阻塞任务 + 主线程结果泵（保证 LVGL 线程安全）
-│   │   └── async_store.c/.h       # store 的类型化异步包装（配合 worker，回调回主线程，回调内可操作 LVGL）
-│   ├── hal/                       # 硬件抽象层
-│   │   └── actuator.c/.h          # 执行器：开锁机构高/低电平驱动（PC 端仅打印状态；板子接 GPIO）
-│   ├── lib/                       # LVGL 移植框架（来自官方 lv_port_linux）
-│   │   ├── backends.h             # 后端接口定义（display/indev backend 结构体与 init 函数原型）
-│   │   ├── driver_backends.c/.h   # 多后端注册/初始化抽象（register / init_backend / is_supported / print）
-│   │   ├── simulator_util.c/.h    # 仿真器工具（后端选择/窗口辅助等）
-│   │   ├── simulator_settings.h   # 仿真器全局设置（默认窗口 1024×600，与目标屏一致）
-│   │   ├── mouse_cursor_icon.c    # SDL 鼠标光标图标位图
-│   │   ├── display_backends/      # 显示后端实现（按 defconfig 编译其中所需，其余不进产物）
-│   │   │   ├── sdl.c              #   SDL2 窗口后端（PC）
-│   │   │   ├── fbdev.c            #   帧缓冲 /dev/fb0 后端（开发板）
-│   │   │   ├── drm.c             #   DRM/KMS 后端（可选）
-│   │   │   ├── glfw3.c           #   GLFW 后端（可选）
-│   │   │   ├── wayland.c         #   Wayland 后端（可选）
-│   │   │   └── x11.c             #   X11 后端（可选）
-│   │   └── indev_backends/       # 输入设备后端
-│   │       └── evdev.c            #   触摸屏 evdev 后端（开发板；PC 不编译）
-│   ├── ui/                        # 视图层（只做界面渲染 + 事件绑定；判定走 core，硬件动作走 hal）
-│   │   ├── ui.c/.h                # UI 外壳：顶栏(锁/时钟/WiFi)+底部Tab+内容区；页面路由表；app_start/ui_switch_page
-│   │   ├── theme.c/.h             # 主题系统：4 套色板 + 全局复用样式 + theme_switch 一键换肤
-│   │   ├── fonts/                 # 字体
-│   │   │   ├── fonts.h           #   字体统一入口 app_font(size)（PC=FreeType 动态 / 板子=嵌入位图）
-│   │   │   ├── fonts_ft.c        #   FreeType 初始化（PC 从系统 Noto CJK 动态渲染中文，避缺字）
-│   │   │   ├── lv_font_cn_14.c/.h（及 16/20/28）# 嵌入中文字体位图（开发板用）
-│   │   │   └── lv_font_cn_decl.h #   位图字体声明
-│   │   └── pages/                 # 各页面（CMakeLists 用 GLOB 编译，新增页面后重 Configure）
-│   │       ├── page_monitor.c/.h  # 主页/综合监控页（锁状态·时钟·开锁占位·最近日志，PAGE_HOME）
-│   │       ├── page_logs.c/.h     # 日志页（列表+筛选，PAGE_LOGS）
-│   │       ├── page_settings.c/.h # 设置中枢（用户/网络/系统入口，进前二次验 admin PIN，PAGE_SETTINGS）
-│   │       ├── page_users.c/.h    # 用户管理子页（列表/添加/改密/删除/启用，PAGE_USERS）
-│   │       ├── page_network.c/.h  # 网络子页（WiFi 扫描/连接/PSK，PAGE_NETWORK）
-│   │       ├── page_system.c/.h   # 系统子页（时间/安全策略/恢复出厂，PAGE_SYSTEM）
-│   │       └── page_keypad.c/.h   # 开锁 PIN 键盘（全屏层，虚位密码校验，PAGE_KEYPAD）
-│   └── safe/                      # 运行时数据目录（PC 阶段落此处免权限；板子 CMake 传 SAFE_DIR_DEVICE→/var/lib/safe）
-│       ├── users.json             # 用户/角色/PIN哈希/盐（已建 admin/guest；板子权限 600 属主 root）
-│       ├── safe.log               # 审计日志（JSON Lines，运行产生，滚动截断）
-│       └── password.cfg           # 保险柜开锁密码（crypto 认证加密；首跑用默认 "123456"）
-├── third_party/                   # 第三方库（自包含，无外部依赖）
-│   ├── aes/                       # tiny-AES-c（AES 实现，crypto.c 调用）
-│   │   └── aes.c/.h
-│   └── sha256/                     # B-Con SHA256（PBKDF2/HMAC 用）
-│       └── sha256.c/.h
-├── build_pc/                      # PC(SDL) 构建产物（lvglsim + liblvgl_linux.a + compile_commands.json）
-├── build_board/                   # 开发板交叉编译产物（当前 sysroot 不完整，暂不可上板）
-├── .build_bak/                    # 旧构建目录备份（Desktop→桌面 改名时移入，可删）
-├── .vscode/                       # VS Code 配置（c_cpp_properties / settings / tasks）
-├── .cache/                        # clangd 索引缓存
-└── .git/                          # git 仓库
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `SAFE_FEATURE_MQTT` | PC 自动探测 | 缺 paho-mqtt3a / cJSON 时编 `remote/mqtt_stub.c`、`rpc_stub.c` |
+| `SAFE_FACE_BACKEND` | `fake` | `fake`（模拟，可注入分数）/ `fm225`（协议占位）/ `none` |
+| `SAFE_BUILD_TESTS` | PC ON，交叉 OFF | CTest 用例 |
+| `SAFE_DATA_DIR` | PC `data/`，板子 `/var/lib/safe` | 运行时数据目录 |
+
+```bash
+cmake -B build_pc -DSAFE_FEATURE_MQTT=OFF .     # 验证降级路径
 ```
 
-> **两套密码体系（易混，注意区分）**
-> - `core/config` + `core/crypto`：**保险柜开锁密码**（`password.cfg`），支持虚位密码，用认证加密存储。
-> - `core/store` 的 `user_*`：**多用户 PIN**（`users.json`），存 PBKDF2-SHA256 哈希 + 每用户随机盐，绝不存明文。
-> 二者用途与存储格式不同，不要混淆。
+**调试环境变量**
 
-## 4. 代码约定
-- **颜色集中管理**：所有颜色来自 `app_theme_t THEMES[]` + 一组可复用 `lv_style_t`（如 `st_screen/st_panel/st_text/st_accent_btn/st_border`）。页面控件只 `lv_obj_add_style(obj, &st_xxx, 0)`，**严禁在控件上写死 hex**。
-- **主题切换**：`theme_switch(idx)` → `lv_obj_report_style_change()` 全局刷新，所有页面自动换肤。
-- **已实现 4 套主题**：石墨黑 / 月白 / 蓝白 / 松石青。新增主题 = 在 `THEMES[]` 增一行填色板，无需改任何页面。
-- **存储走抽象层**：业务只调 `user_*/net_*/log_*` 接口，底层今天是 JSON 文件，将来换 SQLite 或独立分区只改实现。
-- **字体统一入口**：UI 代码只写 `app_font(14/16/20/28)`，PC 自动走 FreeType、板子自动走嵌入位图，不写死具体字体变量。
-- **线程边界**：LVGL API 只能在主线程调用；阻塞任务（PBKDF2、文件 I/O、网络扫描）走 `worker_post`，结果在 `worker_poll()`（主线程）回调。
+| 变量 | 作用 |
+|---|---|
+| `SAFE_DATA_DIR` | 覆盖数据目录 |
+| `SAFE_TEST_PAGE` | 起始页：HOME/LOGS/SETTINGS/USERS/NETWORK/SYSTEM/KEYPAD |
+| `SAFE_TEST_THEME` | 起始主题 0..3 |
+| `SAFE_TEST_DLG` | 自动开弹窗：add_user / auth / change_pwd |
+| `SAFE_TEST_SHOT` | 截图到指定路径（原始 RGB565）后退出 |
+| `SAFE_PERF_LOG=1` | 每 2 秒打一行主循环耗时 |
+| `SAFE_MQTT_HOST/PORT`、`SAFE_MQTT_OFF=1` | 远程通道参数与开关 |
 
-## 5. 安全红线（务必遵守）
-- **用户 PIN**：只存 `PBKDF2-SHA256(密码 + 每用户随机盐)` 哈希，绝不存明文；验证时现算比对。
-- **保险柜密码**：`password.cfg` 用 crypto 层的 AES-CBC 认证加密（随机 IV + 随机盐 + HMAC 完整性校验），相同明文每次密文不同。
-- **WiFi psk**：用设备密钥（PC 阶段固定串，后续入安全元件）包裹加密存储；联网时 `net_get_psk()` 解密。
-- **日志**：明文 JSON Lines（见 DESIGN.md），记录开锁/失败/用户变更/设置变更；追加写 + 滚动截断（防写爆）。
-- **文件权限**：板子上 `users.json` / `network.json` 权限 600、属主 root，目录 `/var/lib/safe/`。
+## 3. 目录结构
 
-## 6. 已知坑
-- **SDL2 必须 ≥ 2.0.12**（lvgl v9 SDL 后端用到 `SDL_PixelFormatEnum`），Ubuntu 源只给旧版；已源码编 **2.28.5** 装 `/usr/local`。PC 构建前务必 `export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig`。
-- **Python3 解释器**：旧 VM(18.04) 系统 python3 仅 3.6 太低，曾硬编码 Buildroot python3.8；现 VM 为 **22.04**（系统 python3.10 够用），已删掉 `.vscode`/`code-workspace` 里的 `Python3_EXECUTABLE` 硬编码，PC 构建**无需**再指定（板子交叉编译仍需 Buildroot 的 python3）。
-- **CMake 缓存绝对路径**：工程目录由 `~/Desktop` 改名 `~/桌面` 后，旧 `CMakeCache.txt` 里固化路径失效会拒绝配置。已删 `build_*` 重建（备份在 `.build_bak/`）。**不要再改名**；若必须迁移，记得删 `build_*` 重建。
-- **SDL 双窗口**：SDL 后端会弹两个窗口（一个 UI、一个空白挡住 UI）；截图验证 UI 时需手动挪开空白窗口。
-- **板子 sysroot 不完整**：Buildroot 工具链 `output/host/arm-buildroot-linux-gnueabihf/sysroot` 缺 `crt1.o`/`libc.so`，`build_board` 暂不可交叉编译上板。需先在 100ask SDK 重 make 一次 Buildroot 或恢复完整 sysroot。
-- **改密键盘弹不出（待修）**：`lv_keyboard` 必须 `lv_keyboard_set_textarea(kb, ta)` 绑定到目标输入框，且键盘要建在**当前 screen / 顶层图层**上，否则不显示。
-- **字体**：PC 已用 FreeType 从系统 Noto CJK 动态渲染解决缺字（`pc.defconfig` 开 `LV_USE_FREETYPE`）；开发板用嵌入位图 `lv_font_cn_*`，后续需补全完整字库。
+```
+app/                      业务代码
+├── main.c                进程入口：引导 + 主循环，不含业务逻辑
+├── app.c/h               应用编排：初始化顺序、周期节拍（不依赖 LVGL）
+├── core/                 平台无关，禁止 lvgl.h / 平台头（tools/check_layers.sh 校验）
+│   ├── err.h             统一错误码
+│   ├── event_bus.c/h     事件总线（替代散落的回调字段）
+│   ├── config.c/h        系统配置快照（阈值/MQTT/日志/数据目录）
+│   ├── store/            存储门面：users.json / network.json / safe.log
+│   │   └── credentials.c/h  保险柜开锁密码（password.cfg，与多用户 PIN 是两套）
+│   ├── auth/             auth_fsm（置信度分级状态机）/ totp / unlock_backend
+│   ├── remote/           mqtt_client + rpc（缺依赖时编 *_stub.c）
+│   └── support/          worker、async_store、crypto、sha1
+├── hal/                  硬件抽象：头文件 + 后端实现
+│   ├── hal_face.h        ★ 人脸服务接口（业务层唯一可见）
+│   ├── face/             face_service + backend_fake / backend_fm225 / backend_none
+│   ├── time/             time_service + time_sys（DS3231 后端留位）
+│   ├── actuator/         actuator_service + actuator_mock（GPIO 后端留位）
+│   └── camera/           camera_service + camera_null（FR-7 预留）
+├── ui/                   外壳、主题、字体、页面（ui_init 只做界面，不管业务编排）
+└── platform/             platform_sdl / platform_fbdev / platform_null、perf_probe、debug_hooks
+ports/lv_port/            LVGL 官方 Linux 移植层（原 src/lib）
+third_party/              aes、sha256
+tests/                    CTest：totp / auth_fsm / store / check_layers
+tools/check_layers.sh     分层检查脚本
+docs/                     需求规格、架构设计、迁移清单、测试计划
+data/                     PC 运行时数据（不入库）
+legacy/                   旧实现，冻结，迁移完成前保留对照
+```
 
-## 7. 范围与边界
-- 本期只做：设置 / 用户 / 网络 / 日志 四大块；真实开锁、摄像头不在范围内。
-- 数据存储暂用 **JSON 文件 + 抽象层**，不引入数据库，不构建独立根文件系统。
-- 详细需求与字段定义见同目录 **DESIGN.md**；CMake/VS Code 报错排查见 **CMake_VSCODE_修复记录.md**。
+**构建产物**：`lvgl_linux`（移植层）、`safe_core` / `safe_hal`（业务静态库，不含 LVGL）、
+`safe_ui`、`safe_platform`、`lvglsim`。
+
+## 4. 分层规则（铁律）
+
+1. `app/core/**` 不得出现 `lvgl.h`、`<linux/...>`、`SDL2`、`cJSON`（`remote/` 除外）。
+2. `app/hal/*.h` 头文件只放类型与声明，不带平台头文件，避免污染上游。
+3. `app/ui/**` 只做渲染与事件绑定；判定下沉到 core，硬件动作下沉到 hal。
+4. `app/main.c` 只做引导；周期任务由 `app.c` 暴露纯 C 节拍函数，main 用 `lv_timer` 挂载。
+5. 违反 1–4 会被 `ctest -R check_layers` 拦下。
+
+## 5. 代码约定
+
+- **颜色集中管理**：颜色一律来自 `THEMES[]` + `st_xxx` 样式，页面不写死 hex。切主题用 `theme_switch()`。
+- **存储走抽象层**：业务只调 `user_*` / `net_*` / `log_*`，底层是 JSON 文件，将来换 SQLite 只改实现。
+- **字体统一入口**：UI 只写 `app_font(14/16/20/28)`，PC 走 FreeType、板子走嵌入位图。
+- **线程边界**：LVGL API 只在主线程；阻塞任务走 `worker_post`，结果在 `worker_poll()` 回调。
+  跨线程事件用 `event_bus_post()`，主线程 `event_bus_pump()` 派发。
+- **错误码**：模块间统一 `safe_err_t`；认证域保留 `auth_result_t`（映射 RPC 错误码）。
+
+## 6. 两套密码体系（易混）
+
+- `core/store/credentials.c`：**保险柜开锁密码** `password.cfg`，支持虚位密码，认证加密存储。
+- `core/store/store.c` 的 `user_*`：**多用户 PIN** `users.json`，PBKDF2-SHA256 哈希 + 每用户随机盐。
+
+## 7. 安全红线
+
+- PIN 只存 PBKDF2-SHA256 哈希 + 随机盐，不存明文、不做可逆加密。
+- 敏感操作（增删用户、切换通道开关、改阈值、远程开锁）执行前需管理员 TOTP 二次确认。
+- TOTP 一码一用（`last_otp_counter` 递增，防重放），±1 窗口容忍。
+- 执行器脉冲上限 500ms 由 `hal_actuator_pulse()` 强制截断。
+- 删除用户后必须仍保留至少 1 个启用管理员（`user_del` 内已校验）。
+- 临时用户到期或次数用尽自动置为停用，不删除记录。
+
+## 8. 接硬件时改哪里
+
+| 硬件到货 | 改动位置 | 业务代码 |
+|---|---|---|
+| FM225 人脸模组 | `app/hal/face/backend_fm225.c`（补 UART 帧解析，标记 TODO-FM225），构建切 `-DSAFE_FACE_BACKEND=fm225` | 不动 |
+| DS3231 RTC | 新增 `app/hal/time/time_rtc.c`，`time_service.c` 换默认后端 | 不动 |
+| 电磁锁 / 继电器 | 新增 `app/hal/actuator/actuator_gpio.c`，`actuator_service.c` 换默认后端 | 不动 |
+| 摄像头预览 | 新增 `app/hal/camera/camera_v4l2.c` | 不动（UI 预览区已预留） |
+
+## 9. 已知坑
+
+- **VM 桌面未登录时 `DISPLAY=:0` 不可用**，SDL 初始化失败会导致进程在 LVGL 内部崩溃（不是代码 bug）。
+  用 `Xvfb :99` + `DISPLAY=:99`，或进桌面后再跑。
+- **LVGL 内部宏（如 `LV_USE_SDL`）不保证传播到应用层**。平台能力判断用构建系统显式定义的
+  `SAFE_PLATFORM_PC` / `SAFE_HAVE_SNAPSHOT`，不要依赖 LVGL 宏。
+- `store_set_dir()` 会规范化尾斜杠；自己拼路径时仍要用 `store_dir()` 作为唯一来源。
+- 板子息屏：内核 `consoleblank` 是只读参数，应用层用 `KDSETMODE KD_GRAPHICS` + `FBIOBLANK` 轮询保活，
+  已实现在 `platform_fbdev.c`，别删。
+- 板子性能：单核 A7，视频预览锁 320×240，MQTT 周期上报 5s，`SAFE_PERF_LOG=1` 可查主循环耗时。
+- 改密键盘弹不出：`lv_keyboard` 必须 `lv_keyboard_set_textarea()` 绑定，且建在顶层图层。
+- 字体：PC 用 FreeType 动态渲染 Noto CJK；板子用嵌入位图，字库需补全。
+
+## 10. 范围与边界
+
+- 本期（骨架重构期）做：目录分层、构建模块化、人脸接口预留与模拟后端、单元测试、PC 全链路验证。
+- 本期不做：真实人脸采集、DS3231 驱动、视频解码链路、公网穿透、小程序、指纹/NFC/4G/CAN、数据库。
+- 详细需求与验收见 `docs/01-需求规格.md`。

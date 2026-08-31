@@ -1,0 +1,16 @@
+/* 本文件由 CMake 生成，不要手改。 */
+#pragma once
+
+#define SAFE_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define SAFE_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define SAFE_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define SAFE_VERSION_STRING "@PROJECT_VERSION@"
+
+#define SAFE_GIT_DESC   "@SAFE_GIT_DESC@"
+#define SAFE_BUILD_TIME "@SAFE_BUILD_TIME@"
+
+/* 运行时数据目录（运行时可用环境变量 SAFE_DATA_DIR 覆盖） */
+#define SAFE_DATA_DIR "@SAFE_DATA_DIR@"
+
+/* 人脸后端：fake / fm225 / none */
+#define SAFE_FACE_BACKEND "@SAFE_FACE_BACKEND@"
