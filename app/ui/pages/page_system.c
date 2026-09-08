@@ -110,14 +110,9 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(head, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    lv_obj_t * back = lv_button_create(head);
-    lv_obj_set_size(back, SX(72), SY(40));
-    lv_obj_add_style(back, &st_ghost_btn, 0);
-    lv_obj_add_event_cb(back, go_back_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * bl = lv_label_create(back);
-    lv_label_set_text(bl, "‹ 返回");
-    lv_obj_set_style_text_font(bl, app_font_scaled(14), 0);
-    lv_obj_center(bl);
+    lv_obj_t * back = ui_icon_text_button(head, LV_SYMBOL_LEFT, "返回",
+                                           SX(78), SY(40), &st_ghost_btn,
+                                           theme_color(TH_TEXT), go_back_cb, NULL);
 
     lv_obj_t * title = lv_label_create(head);
     lv_label_set_text(title, "系统");
@@ -158,15 +153,10 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     stepper_row(left, "连续失败次数上限", &s_failed_lbl, policy_dec_cb, policy_inc_cb, 0);
     stepper_row(left, "锁定时长（秒）",   &s_lock_lbl,   policy_dec_cb, policy_inc_cb, 1);
 
-    lv_obj_t * save = lv_button_create(left);
-    lv_obj_set_size(save, 160, 44);
-    lv_obj_add_style(save, &st_accent_btn, 0);
+    lv_obj_t * save = ui_icon_text_button(left, LV_SYMBOL_SAVE, "保存策略",
+                                          SX(170), SY(44), &st_accent_btn,
+                                          theme_color(TH_ACCENT_INK), save_policy_cb, NULL);
     lv_obj_add_style(save, &st_accent_btn_pr, LV_STATE_PRESSED);
-    lv_obj_add_event_cb(save, save_policy_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * sl = lv_label_create(save);
-    lv_label_set_text(sl, "保存策略");
-    lv_obj_set_style_text_font(sl, app_font_scaled(14), 0);
-    lv_obj_center(sl);
 
     /* 右：主题 + 恢复出厂 */
     lv_obj_t * right = lv_obj_create(body);
@@ -204,14 +194,9 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(spacer, 0, 0);
 
-    lv_obj_t * fr = lv_button_create(right);
-    lv_obj_set_size(fr, lv_pct(100), 44);
-    lv_obj_add_style(fr, &st_danger_btn, 0);
-    lv_obj_add_event_cb(fr, factory_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * frl = lv_label_create(fr);
-    lv_label_set_text(frl, "恢复出厂设置");
-    lv_obj_set_style_text_font(frl, app_font_scaled(16), 0);
-    lv_obj_center(frl);
+    lv_obj_t * fr = ui_icon_text_button(right, LV_SYMBOL_REFRESH, "恢复出厂设置",
+                                        lv_pct(100), SY(44), &st_danger_btn,
+                                        lv_color_white(), factory_btn_cb, NULL);
 
     refresh_policy();
     lv_timer_create(clock_timer_cb, 1000, NULL);
@@ -353,16 +338,11 @@ static void dlg_factory(void)
     lv_obj_set_style_text_font(ccl, app_font_scaled(14), 0);
     lv_obj_center(ccl);
 
-    lv_obj_t * yy = lv_button_create(s_win);
-    lv_obj_set_size(yy, 136, 44);
-    lv_obj_set_pos(yy, btn_x + 144, btn_y);
+    lv_obj_t * yy = ui_icon_text_button(s_win, LV_SYMBOL_TRASH, "确认恢复",
+                                        136, 44, &st_danger_btn,
+                                        lv_color_white(), do_factory_cb, NULL);
     lv_obj_add_flag(yy, LV_OBJ_FLAG_FLOATING);
-    lv_obj_add_style(yy, &st_danger_btn, 0);
-    lv_obj_add_event_cb(yy, do_factory_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * yyl = lv_label_create(yy);
-    lv_label_set_text(yyl, "确认恢复");
-    lv_obj_set_style_text_font(yyl, app_font_scaled(14), 0);
-    lv_obj_center(yyl);
+    lv_obj_set_pos(yy, btn_x + 144, btn_y);
 }
 
 /* 恢复出厂：删文件 + 重建默认 admin 整段在后台执行 */

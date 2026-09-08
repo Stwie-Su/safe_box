@@ -50,8 +50,11 @@ void platform_bootstrap(int argc, char ** argv)
 
     const char * env_w = getenv("LV_SIM_WINDOW_WIDTH");
     const char * env_h = getenv("LV_SIM_WINDOW_HEIGHT");
-    settings.window_width  = atoi(env_w ? env_w : "1024");
-    settings.window_height = atoi(env_h ? env_h : "600");
+    /* PC 模拟默认 2× 放大（2048×1200 = 2× 硬件 1024×600，比例一致不拉伸）；
+     * ui_scale 的 SX()/SY() 与 FreeType 字号会据此自动等比放大。
+     * 仍可用 env LV_SIM_WINDOW_WIDTH/HEIGHT 或 -W/-H 临时覆盖。 */
+    settings.window_width  = atoi(env_w ? env_w : "2048");
+    settings.window_height = atoi(env_h ? env_h : "1200");
 
     while((opt = getopt(argc, argv, "b:fmW:H:R:BVh")) != -1) {
         switch(opt) {

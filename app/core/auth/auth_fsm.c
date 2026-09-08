@@ -44,10 +44,16 @@ static void handle_detect_frame(int face_id, int score);
 static void on_face_event(face_event_t ev, const void * payload, void * user);
 static void do_unlock(const char * user);
 
-/* 超时（秒） */
+/* 超时（秒）
+ *
+ * TO_UNLOCKED = 30：开锁后「保险柜已开启」状态保持 30s，期间不重新上锁，
+ * 让 UI 来得及显示「已开锁」并允许用户继续操作。
+ * 30s 之后自动回到 IDLE（保险柜已上锁）。
+ * 实际物理执行器（hal_actuator_pulse）保持 500ms 上限，NFR-7 不变。
+ */
 #define TO_DETECTING 5
 #define TO_OTP       60
-#define TO_UNLOCKED  3
+#define TO_UNLOCKED  30
 #define TO_DENY      2
 /* LOCKOUT 用策略 lock_seconds（阶段 1 默认 30） */
 
@@ -60,17 +66,12 @@ static void set_state(fsm_state_t st, const char *user, const char *detail)
 }
 
 void auth_fsm_init(void)
-{
-    memset(&s_fsm, 0, sizeof(s_fsm));
+{    memset(&s_fsm, 0, sizeof(s_fsm));
     s_fsm.state = FSM_IDLE;
     s_fsm.last_score = -1;
 
     /* 人脸通道：初始化后端并订阅识别结果。后端是模拟器还是 FM225，
      * 由构建选项决定，这里不做任何区分。 */
-    if(face_service_init(NULL) == SAFE_OK) {
-        face_service_subscribe(on_face_event, NULL);
-        face_service_start();
-    }
 }
 
 /* 识别帧分流：核心原则是「绝不重放旧识别」

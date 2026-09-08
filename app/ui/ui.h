@@ -38,6 +38,7 @@ typedef enum {
     PAGE_SYSTEM,         /* 系统（设置子页） */
     PAGE_KEYPAD,         /* 开锁 PIN 键盘（主页全屏层） */
     PAGE_OTP,            /* 动态密码（人脸置信度二次确认，全屏层） */
+    PAGE_FACE,           /* 人脸识别（全屏层：从主页"人脸识别"卡进入；视频区留空） */
     PAGE_COUNT
 } ui_page_t;
 
@@ -46,6 +47,18 @@ void ui_init(void);
 
 /* 切换到指定页面（隐藏其余容器、显示目标页，不重建）。 */
 void ui_switch_page(ui_page_t page);
+
+/* 图标+文本按钮辅助函数：左侧放 LV_SYMBOL_*，右侧放 CJK 文本。
+ * icon 用 Montserrat（含 LVGL 符号），text 用当前主题中文字体；
+ * 适用于需要同时显示符号和中文的按钮（返回/保存/添加等）。 */
+lv_obj_t * ui_icon_text_button(lv_obj_t * parent,
+                               const char * icon,
+                               const char * text,
+                               int32_t w, int32_t h,
+                               lv_style_t * style,
+                               lv_color_t text_color,
+                               lv_event_cb_t cb,
+                               void * user_data);
 
 #ifdef __cplusplus
 } /*extern "C"*/

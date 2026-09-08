@@ -75,6 +75,8 @@ lv_obj_t * page_logs_create(lv_obj_t * parent)
     lv_obj_set_style_text_font(title, app_font_scaled(28), 0);
 
     s_summary = lv_label_create(head);
+    /* 默认先空着（避免 LVGL placeholder 显示 "Text"）；rebuild_list 后会被刷成 "共 N 条" */
+    lv_label_set_text(s_summary, "");
     lv_obj_add_style(s_summary, &st_text_mut, 0);
     lv_obj_set_style_text_font(s_summary, app_font_scaled(14), 0);
     lv_obj_set_style_pad_left(s_summary, SX(16), 0);

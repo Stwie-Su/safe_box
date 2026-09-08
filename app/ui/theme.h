@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define THEME_COUNT 4
+#define THEME_COUNT 5
 
 /* 颜色角色（DESIGN.md §6.1 色板列） */
 typedef enum {

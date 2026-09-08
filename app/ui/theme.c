@@ -33,6 +33,9 @@ const app_theme_t THEMES[THEME_COUNT] = {
     /* 松石青（深色青绿） */
     { "松石青", TH_COL(0x0A1F1C, 0x102A26, 0x163A34, 0xE3F2EE, 0x8FB3AB, 0x5F8079,
                        0x1A3D3A, 0x1BB3A0, 0xFFFFFF, 0x2FAE8A, 0xE0A52E, 0xE5533D) },
+    /* 浅蓝（浅色天蓝，用户偏好）：accent=Light Blue 400，柔和明亮不刺眼 */
+    { "浅蓝",   TH_COL(0xF0F7FD, 0xFFFFFF, 0xE1F0FB, 0x14324C, 0x5C7A93, 0x9DB4C6,
+                       0xD2E4F2, 0x29B6F6, 0xFFFFFF, 0x2E9E6B, 0xE8A33D, 0xE5564B) },
 };
 
 /* ---------------- 全局样式 ---------------- */
@@ -53,7 +56,8 @@ lv_style_t st_danger_text;
 lv_style_t st_tab_btn;
 lv_style_t st_tab_btn_checked;
 
-static int g_idx = 1;   /* 默认主题索引：0 石墨黑 / 1 月白 / 2 蓝白 / 3 松石青 */
+static int g_idx = 1;   /* 默认主题索引：0 石墨黑 / 1 月白 / 2 蓝白 / 3 松石青 / 4 浅蓝 */
+static lv_style_transition_dsc_t s_trans;  /* 按钮按下过渡描述符（apply_theme 内初始化） */
 
 /* 依据当前主题刷新全部样式内容 */
 static void apply_theme(void)
@@ -69,6 +73,11 @@ static void apply_theme(void)
     lv_style_set_border_width(&st_panel, 1);
     lv_style_set_radius(&st_panel, 16);
     lv_style_set_pad_all(&st_panel, 16);
+    /* 柔和投影： elevace 观感（浅蓝主题下更明显） */
+    lv_style_set_shadow_color(&st_panel, lv_color_hex(0x16344C));
+    lv_style_set_shadow_width(&st_panel, 24);
+    lv_style_set_shadow_opa(&st_panel, 20);
+    lv_style_set_shadow_ofs_y(&st_panel, 4);
 
     lv_style_set_bg_color(&st_panel2, p->c[TH_PANEL2]);
     lv_style_set_bg_opa(&st_panel2, LV_OPA_COVER);
@@ -128,6 +137,14 @@ static void apply_theme(void)
     lv_style_set_bg_opa(&st_tab_btn_checked, LV_OPA_COVER);
     lv_style_set_border_width(&st_tab_btn_checked, 0);
     lv_style_set_pad_all(&st_tab_btn_checked, 8);
+
+    /* 交互过渡：按钮/页签按下平滑变色（美观增强，150ms，v9 过渡描述符 API） */
+    static const lv_style_prop_t trans_props[] = { LV_STYLE_BG_COLOR, LV_STYLE_TEXT_COLOR, 0 };
+    lv_style_transition_dsc_init(&s_trans, trans_props, NULL, 150, 0, NULL);
+    lv_style_set_transition(&st_accent_btn, &s_trans);
+    lv_style_set_transition(&st_ghost_btn, &s_trans);
+    lv_style_set_transition(&st_danger_btn, &s_trans);
+    lv_style_set_transition(&st_tab_btn, &s_trans);
 }
 
 void theme_init(void)
@@ -149,7 +166,7 @@ void theme_init(void)
     lv_style_init(&st_danger_text);
     lv_style_init(&st_tab_btn);
     lv_style_init(&st_tab_btn_checked);
-    g_idx = 1;          /* 默认主题：月白（浅色暖色，默认进入更友好） */
+    g_idx = 4;          /* 默认主题：浅蓝（用户偏好浅蓝色系） */
     apply_theme();
 }
 

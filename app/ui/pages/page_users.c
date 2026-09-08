@@ -156,14 +156,9 @@ lv_obj_t * page_users_create(lv_obj_t * parent)
     lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(head, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    lv_obj_t * back = lv_button_create(head);
-    lv_obj_set_size(back, SX(72), SY(38));
-    lv_obj_add_style(back, &st_ghost_btn, 0);
-    lv_obj_add_event_cb(back, go_back_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * bl = lv_label_create(back);
-    lv_label_set_text(bl, "‹ 返回");  /* ‹ 返回 */
-    lv_obj_set_style_text_font(bl, app_font_scaled(14), 0);
-    lv_obj_center(bl);
+    lv_obj_t * back = ui_icon_text_button(head, LV_SYMBOL_LEFT, "返回",
+                                           SX(78), SY(38), &st_ghost_btn,
+                                           theme_color(TH_TEXT), go_back_cb, NULL);
 
     lv_obj_t * title = lv_label_create(head);
     lv_label_set_text(title, "用户管理");  /* 用户管理 */
@@ -176,15 +171,10 @@ lv_obj_t * page_users_create(lv_obj_t * parent)
     lv_obj_set_style_bg_opa(spacer_h, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(spacer_h, 0, 0);
 
-    lv_obj_t * add = lv_button_create(head);
-    lv_obj_set_size(add, SX(110), SY(38));
-    lv_obj_add_style(add, &st_accent_btn, 0);
+    lv_obj_t * add = ui_icon_text_button(head, LV_SYMBOL_PLUS, "添加用户",
+                                          SX(120), SY(38), &st_accent_btn,
+                                          theme_color(TH_ACCENT_INK), add_btn_cb, NULL);
     lv_obj_add_style(add, &st_accent_btn_pr, LV_STATE_PRESSED);
-    lv_obj_add_event_cb(add, add_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * al = lv_label_create(add);
-    lv_label_set_text(al, "+ 添加用户");  /* + 添加用户 */
-    lv_obj_set_style_text_font(al, app_font_scaled(14), 0);
-    lv_obj_center(al);
 
     /* ------ 安全规则提示条 ------
      * 说明「为什么那一行按钮是灰的」，避免用户以为界面卡死。
@@ -379,8 +369,8 @@ static void users_list_loaded(safe_user_t * us, int n)
         lv_obj_add_style(b_pwd, &st_ghost_btn, 0);
         lv_obj_add_event_cb(b_pwd, row_pwd_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)uid);
         lv_obj_t * bpwl = lv_label_create(b_pwd);
-        lv_label_set_text(bpwl, "改密");   /* 直接写 UTF-8 源字符，不要用 hex escape */
-        lv_obj_set_style_text_font(bpwl, app_font_scaled(12), 0);
+        lv_label_set_text(bpwl, LV_SYMBOL_EDIT);   /* 改密：用编辑图标 */
+        lv_obj_set_style_text_font(bpwl, app_montserrat_scaled(16), 0);
         lv_obj_center(bpwl);
 
         /* 启用/停用 —— 末位管理员锁死 */
@@ -409,8 +399,8 @@ static void users_list_loaded(safe_user_t * us, int n)
             lv_obj_add_event_cb(b_del, row_del_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)uid);
         }
         lv_obj_t * bdll = lv_label_create(b_del);
-        lv_label_set_text(bdll, "删除");
-        lv_obj_set_style_text_font(bdll, app_font_scaled(12), 0);
+        lv_label_set_text(bdll, LV_SYMBOL_TRASH);   /* 删除：用垃圾桶图标 */
+        lv_obj_set_style_text_font(bdll, app_montserrat_scaled(16), 0);
         lv_obj_center(bdll);
     }
 }
@@ -580,15 +570,10 @@ static void dlg_add_user(void)
     dlg_textarea("PIN(4-8 位数字)",   true,  true,  1);  /* 默认焦点 */
     dlg_textarea("确认 PIN",          true,  true,  2);
 
-    lv_obj_t * save = lv_button_create(s_win);
-    lv_obj_set_size(save, SX(160), SY(44));
-    lv_obj_add_style(save, &st_accent_btn, 0);
+    lv_obj_t * save = ui_icon_text_button(s_win, LV_SYMBOL_SAVE, "保存",
+                                          SX(160), SY(44), &st_accent_btn,
+                                          theme_color(TH_ACCENT_INK), save_add_cb, NULL);
     lv_obj_add_style(save, &st_accent_btn_pr, LV_STATE_PRESSED);
-    lv_obj_add_event_cb(save, save_add_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * sl = lv_label_create(save);
-    lv_label_set_text(sl, "保存");  /* 保存 */
-    lv_obj_set_style_text_font(sl, app_font_scaled(20), 0);
-    lv_obj_center(sl);
 
     /* 取消按钮 — ★ 不用 st_ghost_btn（实测该样式的 text_color 有时不级联到 label，
      *  "取消"会显示成深色方块），改为手动设置所有样式 */
@@ -722,15 +707,10 @@ static void dlg_change_pwd(void)
     dlg_textarea("新 PIN(4-8 位)",  true, true, 1);  /* 默认焦点 */
     dlg_textarea("确认新 PIN",       true, true, 2);
 
-    lv_obj_t * save = lv_button_create(s_win);
-    lv_obj_set_size(save, SX(160), SY(44));
-    lv_obj_add_style(save, &st_accent_btn, 0);
+    lv_obj_t * save = ui_icon_text_button(s_win, LV_SYMBOL_SAVE, "保存",
+                                          SX(160), SY(44), &st_accent_btn,
+                                          theme_color(TH_ACCENT_INK), save_pwd_cb, NULL);
     lv_obj_add_style(save, &st_accent_btn_pr, LV_STATE_PRESSED);
-    lv_obj_add_event_cb(save, save_pwd_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * sl = lv_label_create(save);
-    lv_label_set_text(sl, "保存");  /* 保存 */
-    lv_obj_set_style_text_font(sl, app_font_scaled(16), 0);
-    lv_obj_center(sl);
 }
 
 static void chg_pwd_worker(void * p)
@@ -1026,16 +1006,11 @@ static void auth_show(void)
     lv_obj_set_style_text_font(cl, app_font_scaled(16), 0);
     lv_obj_center(cl);
 
-    lv_obj_t * ok = lv_button_create(win);
-    lv_obj_set_size(ok, SX(160), SY(44));
+    lv_obj_t * ok = ui_icon_text_button(win, LV_SYMBOL_OK, "确认",
+                                         SX(160), SY(44), &st_accent_btn,
+                                         theme_color(TH_ACCENT_INK), auth_ok_cb, NULL);
     lv_obj_set_pos(ok, SX(200), SY(376));
-    lv_obj_add_style(ok, &st_accent_btn, 0);
     lv_obj_add_style(ok, &st_accent_btn_pr, LV_STATE_PRESSED);
-    lv_obj_add_event_cb(ok, auth_ok_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * ol = lv_label_create(ok);
-    lv_label_set_text(ol, "确认");
-    lv_obj_set_style_text_font(ol, app_font_scaled(16), 0);
-    lv_obj_center(ol);
 }
 
 /* ================================================================
@@ -1095,16 +1070,11 @@ static void dlg_confirm_del(const char *msg)
     lv_obj_set_style_text_font(ccl, app_font_scaled(14), 0);
     lv_obj_center(ccl);
 
-    lv_obj_t * yy = lv_button_create(s_win);
-    lv_obj_set_size(yy, 136, 44);
-    lv_obj_set_pos(yy, btn_x + 144, btn_y);
+    lv_obj_t * yy = ui_icon_text_button(s_win, LV_SYMBOL_TRASH, "删除",
+                                        136, 44, &st_danger_btn,
+                                        lv_color_white(), do_del_cb, NULL);
     lv_obj_add_flag(yy, LV_OBJ_FLAG_FLOATING);
-    lv_obj_add_style(yy, &st_danger_btn, 0);
-    lv_obj_add_event_cb(yy, do_del_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * yyl = lv_label_create(yy);
-    lv_label_set_text(yyl, "删除");  /* 删除 */
-    lv_obj_set_style_text_font(yyl, app_font_scaled(14), 0);
-    lv_obj_center(yyl);
+    lv_obj_set_pos(yy, btn_x + 144, btn_y);
 }
 
 static void dlg_tip(const char *text)
@@ -1115,14 +1085,9 @@ static void dlg_tip(const char *text)
     lv_obj_add_style(m, &st_warn_text, 0);
     lv_obj_set_style_text_font(m, app_font_scaled(16), 0);
 
-    lv_obj_t * okb = lv_button_create(s_win);
-    lv_obj_set_size(okb, 120, 40);
-    lv_obj_add_style(okb, &st_ghost_btn, 0);
-    lv_obj_add_event_cb(okb, dlg_ok_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * ok = lv_label_create(okb);
-    lv_label_set_text(ok, "知道了");  /* 知道了 */
-    lv_obj_set_style_text_font(ok, app_font_scaled(14), 0);
-    lv_obj_center(ok);
+    ui_icon_text_button(s_win, LV_SYMBOL_OK, "知道了",
+                        120, 40, &st_ghost_btn,
+                        theme_color(TH_TEXT), dlg_ok_cb, NULL);
 }
 
 static void del_worker(void * p)
@@ -1322,16 +1287,11 @@ static void pwd_otp_show(void)
     lv_obj_set_style_text_font(cl, app_font_scaled(16), 0);
     lv_obj_center(cl);
 
-    lv_obj_t * ok = lv_button_create(win);
-    lv_obj_set_size(ok, SX(160), SY(44));
+    lv_obj_t * ok = ui_icon_text_button(win, LV_SYMBOL_OK, "验证",
+                                         SX(160), SY(44), &st_accent_btn,
+                                         theme_color(TH_ACCENT_INK), pwd_otp_ok_cb, NULL);
     lv_obj_set_pos(ok, SX(200), SY(376));
-    lv_obj_add_style(ok, &st_accent_btn, 0);
     lv_obj_add_style(ok, &st_accent_btn_pr, LV_STATE_PRESSED);
-    lv_obj_add_event_cb(ok, pwd_otp_ok_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * ol = lv_label_create(ok);
-    lv_label_set_text(ol, "验证");
-    lv_obj_set_style_text_font(ol, app_font_scaled(16), 0);
-    lv_obj_center(ol);
 }
 
 /* ★ 测试钩子：让 main.c 的 SAFE_TEST_DLG=add_user 能直接打开"添加用户"弹窗（无需点击） */

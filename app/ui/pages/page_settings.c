@@ -20,8 +20,8 @@ typedef struct {
 
 static const entry_t ENTRIES[3] = {
     { PAGE_USERS,   "用户管理", "添加 / 删除用户，修改 PIN 与角色", "用" },
-    { PAGE_NETWORK, "网络",     "WiFi 连接与已存网络管理",         "网" },
-    { PAGE_SYSTEM,  "系统",     "时间 / 安全策略 / 主题 / 恢复出厂", "系" },
+    { PAGE_NETWORK, "网络",     "WiFi 连接与已存网络管理",         LV_SYMBOL_WIFI },
+    { PAGE_SYSTEM,  "系统",     "时间 / 安全策略 / 主题 / 恢复出厂", LV_SYMBOL_SETTINGS },
 };
 
 /* 验证弹窗控件 */
@@ -78,7 +78,9 @@ lv_obj_t * page_settings_create(lv_obj_t * parent)
         lv_obj_t * icl = lv_label_create(icon);
         lv_label_set_text(icl, ENTRIES[i].icon);
         lv_obj_set_style_text_color(icl, theme_color(TH_ACCENT_INK), 0);
-        lv_obj_set_style_text_font(icl, app_font_scaled(20), 0);
+        /* 用户管理无 LV_SYMBOL_USER，保留 CJK；网络/系统用 LVGL 符号 */
+        if (i == 0) lv_obj_set_style_text_font(icl, app_font_scaled(20), 0);
+        else        lv_obj_set_style_text_font(icl, app_montserrat_scaled(20), 0);
         lv_obj_center(icl);
 
         /* 名称 + 描述 */
@@ -96,10 +98,10 @@ lv_obj_t * page_settings_create(lv_obj_t * parent)
 
         /* 右箭头 */
         lv_obj_t * ar = lv_label_create(card);
-        lv_label_set_text(ar, "›");
-        lv_obj_add_style(ar, &st_text_mut, 0);
-        lv_obj_set_style_text_font(ar, app_font_scaled(28), 0);
-        lv_obj_align(ar, LV_ALIGN_RIGHT_MID, -24, 0);
+        lv_label_set_text(ar, LV_SYMBOL_RIGHT);
+        lv_obj_set_style_text_font(ar, app_montserrat_scaled(22), 0);
+        lv_obj_set_style_text_color(ar, theme_color(TH_TEXT_MUT), 0);
+        lv_obj_align(ar, LV_ALIGN_RIGHT_MID, -SX(20), 0);
     }
     return root;
 }
