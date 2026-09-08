@@ -32,7 +32,10 @@ static lv_obj_t * s_scan_beam;        // 顶部扫描光带（细长矩形）
 static lv_obj_t * s_canvas;           // 预览画布（RGB565 直绘）
 static lv_obj_t * s_ph_label;         // 占位文字（首帧后隐藏）
 static lv_obj_t * s_page_root;        // 页面根容器（可见性判断）
-static lv_color_t s_frame_buf[PREVIEW_W * PREVIEW_H];   // 静态帧缓冲（RGB565 下约 150KB）
+/* 帧缓冲：固定按 RGB565 字节数分配（uint16_t），与 lv_color_t 深度解耦——
+ * 板子构建 LV_COLOR_DEPTH=32 时若用 lv_color_t 数组，sizeof 会翻倍导致 memcpy 越界读。
+ * 320×240×2 = 150KB。 */
+static uint16_t s_frame_buf[PREVIEW_W * PREVIEW_H];
 static lv_timer_t * s_frame_timer;
 
 /* ----- 私有声明 ----- */
@@ -234,7 +237,7 @@ static void frame_timer_cb(lv_timer_t * t)
     hal_camera_frame_info_t info;
     safe_err_t e = hal_camera_frame(&frame, &info);
     if (e == SAFE_OK && frame != NULL) {
-        memcpy(s_frame_buf, frame, sizeof(s_frame_buf));
+        memcpy(s_frame_buf, frame, (size_t)PREVIEW_W * PREVIEW_H * 2u);   /* RGB565 定长 */
         hal_camera_release_frame();              /* §5.13 契约：用完必须归还 */
         if (!lv_obj_is_hidden(s_ph_label)) {
             lv_obj_set_hidden(s_ph_label, true);  /* 首帧到达，隐藏占位文字 */
