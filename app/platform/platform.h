@@ -7,7 +7,7 @@
  *   2) lv_init()
  *   3) platform_init_io()              —— lv_init() 之后：初始化显示与输入
  *
- * 其余各层不出现平台判断，换平台只换 platform/*.c 的编译选择（由 defconfig 决定）。
+ * 其余各层不出现平台判断，换平台只换 platform 目录下各 .c 文件的编译选择（由 defconfig 决定）。
  */
 #pragma once
 

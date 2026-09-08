@@ -28,7 +28,7 @@ target_include_directories(safe_core PUBLIC
 
 target_include_directories(safe_core PRIVATE ${SAFE_DEP_INCLUDE_DIRS})
 
-target_link_libraries(safe_core PUBLIC safe_thirdparty Threads::Threads)
+target_link_libraries(safe_core PUBLIC safe_hal safe_thirdparty Threads::Threads)
 
 if(WERROR)
     target_compile_options(safe_core PRIVATE -Werror)
