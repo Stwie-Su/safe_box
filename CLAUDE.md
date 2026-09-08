@@ -120,7 +120,6 @@ app/                      业务代码
 │   ├── event_bus.c/h     事件总线（替代散落的回调字段）
 │   ├── config.c/h        系统配置快照（阈值/MQTT/日志/数据目录）
 │   ├── store/            存储门面：users.json / network.json / safe.log（唯一凭据体系）
-│   │   └── credentials.c/h  死代码，v1.6 已决策删除（由计划步骤 0 R3 执行，见 §6）
 │   ├── auth/             auth_fsm（置信度分级状态机）/ totp / unlock_backend
 │   ├── remote/           mqtt_client + rpc（缺依赖时编 *_stub.c）
 │   └── support/          worker、async_store、crypto、sha1
@@ -160,10 +159,10 @@ data/                     PC 运行时数据（不入库）
   跨线程事件用 `event_bus_post()`，主线程 `event_bus_pump()` 派发。
 - **错误码**：模块间统一 `safe_err_t`；认证域保留 `auth_result_t`（映射 RPC 错误码）。
 
-## 6. 密码体系（唯一凭据 + 待删遗留）
+## 6. 密码体系（唯一凭据）
 
 - **唯一凭据体系**：`core/store/store.c` 的 `user_*`——多用户 PIN `users.json`，PBKDF2-SHA256 哈希 + 每用户随机盐；虚位密码（FR-18）在 PIN 校验层实现（`pin_check_virtual`，计划步骤 1 落地），开锁可虚位、管理员二次确认必须精确匹配。
-- **待删遗留**：`core/store/credentials.c/h`（旧「保险柜开锁密码」`password.cfg`，可逆加密反模式）——全工程零调用死代码，v1.6 已决策删除，由计划步骤 0 R3 执行；**删除前不得新增任何对它的调用**。
+- **已删遗留**：`core/store/credentials.c/h`（旧「保险柜开锁密码」`password.cfg`，可逆加密反模式）已由 Sprint3 步骤 0 R3 删除——全工程零调用死代码，凭据体系统一到 store 的 PBKDF2 + 用户 PIN。
 
 ## 7. 安全红线
 

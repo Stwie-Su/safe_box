@@ -5,7 +5,6 @@ set(SAFE_CORE_SRC
     event_bus.c
     config.c
     store/store.c
-    store/credentials.c
     auth/auth_fsm.c
     auth/totp.c
     auth/unlock_backend.c
