@@ -19,6 +19,7 @@
 #include "core/store/store.h"
 #include "core/support/worker.h"
 #include "hal/hal_actuator.h"
+#include "hal/hal_camera.h"
 #include "hal/hal_face.h"
 #include "hal/hal_time.h"
 #include "platform/platform.h"
@@ -58,6 +59,11 @@ void app_main(void)
     hal_actuator_init();
     app_config_init();
 
+    /* 相机链路（Sprint3 步骤 2，FR-16）：init/start 在此统一编排。
+     * 无摄像头时 camera_service 自动降级 null 后端，预览区显示占位。 */
+    hal_camera_init();
+    hal_camera_start(320, 240);
+
     ui_init();
 
     event_bus_subscribe(EV_AUTH_RESULT, on_bus_auth_result, NULL);
@@ -94,6 +100,9 @@ void app_tick_periodic(void)
 
 void app_shutdown(void)
 {
+    hal_camera_stop();
+    hal_camera_deinit();
     face_service_deinit();
     mqtt_stop();
 }
+

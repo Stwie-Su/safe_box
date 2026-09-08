@@ -1,15 +1,16 @@
 /**
  * @file page_face.c
- * 人脸识别全屏页（v2）：
+ * 人脸识别全屏页（v3）：
  *   - 顶部：返回按钮 + 标题「人脸识别」
- *   - 中央：方形「视频预览占位」面板（暂无摄像头时显示提示文字），四
- *          角扫描框 + 一束光带从上方周期下扫（lv_anim 动画）
+ *   - 中央：320×240 视频预览（Sprint3 步骤 2：真实摄像头帧，FR-16），
+ *          四角扫描框 + 扫描光带叠加在画面之上；无摄像头时显示占位文字
  *   - 底部：状态文字「请将面部对准摄像头」 + 取消按钮
  *
  * 设计约束：
- *   - 摄像头未配置：显示提示文字「摄像头未配置」；
- *   - 摄像头已配置但未连接：显示「正在连接摄像头…」+ 持续扫描光带；
- *   - 配置完成后真实画面由 app/hal/camera 提供，本阶段仅留空 UI 框架。
+ *   - 摄像头未配置 / 未出帧：显示提示文字「视频预览区域（摄像头未配置）」；
+ *   - 首帧到达后隐藏占位文字，之后 50ms（20fps）周期拉帧；
+ *   - 页面隐藏时 timer 空转返回，不拉帧不重绘（页面不销毁，返回后再进自动恢复）；
+ *   - 契约（§5.13）：frame() 与 release() 成对调用，漏调会导致后端停更。
  */
 #include "page_face.h"
 #include "ui/ui.h"
@@ -17,11 +18,22 @@
 #include "ui/ui_scale.h"
 #include "ui/icons.h"
 #include "core/auth/auth_fsm.h"
+#include "hal/hal_camera.h"
 #include <stdlib.h>
 #include <string.h>
 
+/* 预览分辨率：采集 = 显示 = 320×240，1:1 直通（需求 v1.6 FR-16 / 规约 §4.2） */
+#define PREVIEW_W  320
+#define PREVIEW_H  240
+#define PREVIEW_MS 50      /* 20fps 拉帧周期；摄像头 YUYV@320x240 实测上限 20fps */
+
 /* ===== 静态对象句柄 ===== */
 static lv_obj_t * s_scan_beam;        // 顶部扫描光带（细长矩形）
+static lv_obj_t * s_canvas;           // 预览画布（RGB565 直绘）
+static lv_obj_t * s_ph_label;         // 占位文字（首帧后隐藏）
+static lv_obj_t * s_page_root;        // 页面根容器（可见性判断）
+static lv_color_t s_frame_buf[PREVIEW_W * PREVIEW_H];   // 静态帧缓冲（RGB565 下约 150KB）
+static lv_timer_t * s_frame_timer;
 
 /* ----- 私有声明 ----- */
 static void mk_corner(lv_obj_t * parent, int32_t x, int32_t y,
@@ -29,6 +41,7 @@ static void mk_corner(lv_obj_t * parent, int32_t x, int32_t y,
 static void back_cb(lv_event_t * e);
 static void cancel_cb(lv_event_t * e);
 static void beam_anim_xcb(void * obj, int32_t v);
+static void frame_timer_cb(lv_timer_t * t);
 static lv_anim_t s_beam_anim;
 
 /**
@@ -54,6 +67,7 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
 {
     /* 根容器 */
     lv_obj_t * root = lv_obj_create(parent);
+    s_page_root = root;
     lv_obj_set_size(root, lv_pct(100), lv_pct(100));
     lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(root, 0, 0);
@@ -112,7 +126,7 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_obj_set_style_border_width(right, 0, 0);
     lv_obj_set_style_outline_width(right, 0, 0);
 
-    /* ---------- 中央：视频预览占位面板（固定尺寸便于 4 角扫描框定位） ---------- */
+    /* ---------- 中央：视频预览面板（320×240 画面 1:1 居中，四角框叠加在画面上） ---------- */
     int32_t prev_w = SY(360);
     int32_t prev_h = SY(280);
     lv_obj_t * preview = lv_obj_create(root);
@@ -124,15 +138,23 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_obj_set_style_outline_width(preview, 0, 0);
     lv_obj_set_style_pad_all(preview, 0, 0);    /* 不要 st_panel 那个 16px pad */
 
-    /* 占位文字（无摄像头） */
-    lv_obj_t * ph_label = lv_label_create(preview);
-    lv_label_set_text(ph_label, "视频预览区域\n（摄像头未配置）");
-    lv_obj_set_style_text_color(ph_label, theme_color(TH_TEXT_MUT), 0);
-    lv_obj_set_style_text_font(ph_label, app_font_scaled(15), 0);
-    lv_obj_set_style_text_align(ph_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_center(ph_label);
+    /* 预览画布：320×240 RGB565，面板内居中（(360-320)/2, (280-240)/2）。
+     * 板子构建 LV_COLOR_DEPTH=32 时 LVGL 绘制层自动转换，接口契约仍为 RGB565。 */
+    s_canvas = lv_canvas_create(preview);
+    lv_canvas_set_buffer(s_canvas, s_frame_buf, PREVIEW_W, PREVIEW_H, LV_COLOR_FORMAT_RGB565);
+    lv_obj_set_pos(s_canvas, (prev_w - PREVIEW_W) / 2, (prev_h - PREVIEW_H) / 2);
+    lv_canvas_fill_bg(s_canvas, theme_color(TH_PANEL), LV_OPA_COVER);
 
-    /* 4 角扫描框（用 4 个 L 形组合，每个角由两段矩形构成） */
+    /* 占位文字（无摄像头/未出帧时可见；首帧后隐藏） */
+    s_ph_label = lv_label_create(preview);
+    lv_label_set_text(s_ph_label, "视频预览区域\n（摄像头未配置）");
+    lv_obj_set_style_text_color(s_ph_label, theme_color(TH_TEXT_MUT), 0);
+    lv_obj_set_style_text_font(s_ph_label, app_font_scaled(15), 0);
+    lv_obj_set_style_text_align(s_ph_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(s_ph_label);
+
+    /* 4 角扫描框（用 4 个 L 形组合，每个角由两段矩形构成）。
+     * 创建顺序在 canvas 之后 → 叠加在画面之上（FR-16「可叠加人脸框与状态提示」）。 */
     int32_t pad = SX(20);
     int32_t len = SX(36);
     int32_t thick = SY(4);
@@ -182,7 +204,7 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_obj_set_style_text_color(ct, theme_color(TH_TEXT), 0);
     lv_obj_set_style_text_font(ct, app_font_scaled(15), 0);
 
-    /* ---------- 启动扫描动画 ---------- */
+    /* ---------- 启动扫描动画 + 预览拉帧定时器 ---------- */
     lv_anim_init(&s_beam_anim);
     lv_anim_set_var(&s_beam_anim, s_scan_beam);
     lv_anim_set_exec_cb(&s_beam_anim, beam_anim_xcb);
@@ -192,7 +214,40 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_anim_set_repeat_count(&s_beam_anim, LV_ANIM_REPEAT_INFINITE);
     lv_anim_start(&s_beam_anim);
 
+    /* 拉帧定时器（20fps）：回调内部判断页面可见性，隐藏时空转不拉帧 */
+    if (s_frame_timer == NULL) {
+        s_frame_timer = lv_timer_create(frame_timer_cb, PREVIEW_MS, NULL);
+    }
+
     return root;
+}
+
+/* 预览拉帧：hal_camera_frame → memcpy 进画布 → invalidate。
+ * 首帧成功后隐藏占位文字；摄像头无帧（BUSY）时保持当前画面不闪烁。 */
+static void frame_timer_cb(lv_timer_t * t)
+{
+    (void)t;
+    if (s_page_root == NULL || lv_obj_is_hidden(s_page_root)) return;
+    if (!s_canvas) return;
+
+    const uint8_t * frame = NULL;
+    hal_camera_frame_info_t info;
+    safe_err_t e = hal_camera_frame(&frame, &info);
+    if (e == SAFE_OK && frame != NULL) {
+        memcpy(s_frame_buf, frame, sizeof(s_frame_buf));
+        hal_camera_release_frame();              /* §5.13 契约：用完必须归还 */
+        if (!lv_obj_is_hidden(s_ph_label)) {
+            lv_obj_set_hidden(s_ph_label, true);  /* 首帧到达，隐藏占位文字 */
+        }
+        lv_obj_invalidate(s_canvas);
+    }
+    else if (e == SAFE_ERR_BUSY) {
+        /* 摄像头帧率落后于拉帧周期：保持上一帧，正常现象 */
+    }
+    else {
+        /* 未启动 / 后端不支持：保持占位文字可见 */
+        hal_camera_release_frame();
+    }
 }
 
 /* 扫描动画：上下穿越（y 坐标随时间在 pad 与 prev_h-pad-beam_h 间往返）*/
@@ -213,3 +268,4 @@ static void cancel_cb(lv_event_t * e)
 {
     back_cb(e);
 }
+
