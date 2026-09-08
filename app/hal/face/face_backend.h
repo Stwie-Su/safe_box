@@ -31,7 +31,7 @@ typedef struct face_backend {
     safe_err_t (*delete_tpl)(int32_t face_id);
 
     /* 注入模拟结果，仅 FACE_CAP_INJECT 后端需要实现 */
-    safe_err_t (*inject)(int32_t face_id, int32_t score);
+    safe_err_t (*inject)(int32_t face_id, face_reason_t reason);
 } face_backend_t;
 
 /* 各后端工厂：未编入构建时返回 NULL */
@@ -45,3 +45,4 @@ void face_service_emit(face_event_t ev, const void * payload);
 #ifdef __cplusplus
 }
 #endif
+

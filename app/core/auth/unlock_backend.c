@@ -110,6 +110,43 @@ auth_result_t backend_verify_totp(const char *user, const char *code)
     return AUTH_FAIL;
 }
 
+auth_result_t backend_verify_totp_any(const char *code, char *out_user, size_t user_cap)
+{
+    if (!code || !*code) return AUTH_FAIL;
+    safe_user_t *us = NULL;
+    int n = 0;
+    if (user_load_all(&us, &n) != 0 || n <= 0) { user_list_free(us); return AUTH_NOUSER; }
+
+    const uint32_t now = hal_time();
+    auth_result_t res = AUTH_FAIL;
+
+    for (int i = 0; i < n; i++) {
+        if (!us[i].enabled || !us[i].totp_enable) continue;
+        if (us[i].totp_secret[0] == '\0')         continue;
+        if (us[i].lock_until > (int64_t)now)      continue;
+        if (!temp_valid(&us[i], now))             continue;
+
+        int64_t used = 0;
+        int r = totp_verify(us[i].totp_secret, code, now, us[i].last_otp_counter, &used);
+        if (r == 0) {
+            us[i].last_otp_counter = used;
+            us[i].failed_attempts = 0;
+            user_update(&us[i]);
+            if (out_user && user_cap) {
+                strncpy(out_user, us[i].name, user_cap - 1);
+                out_user[user_cap - 1] = '\0';
+            }
+            res = AUTH_OK;
+            break;
+        }
+        if (r == -2) { res = AUTH_REPLAY; break; }
+        /* 失败不在此处累加用户级计数：身份未定，避免一次错码误伤多个用户；
+         * 设备级防暴力由 auth_fsm 的 note_fail 兜底。 */
+    }
+    user_list_free(us);
+    return res;
+}
+
 auth_result_t backend_admin_verify_totp(const char *code)
 {
     if (!code) return AUTH_FAIL;
@@ -173,3 +210,4 @@ int backend_lock_remaining(void)
     user_list_free(us);
     return (int)max_left;
 }
+

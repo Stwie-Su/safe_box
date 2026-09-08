@@ -7,7 +7,8 @@
  *  2. 异步事件驱动，业务层不轮询硬件；
  *  3. 后端可替换：模拟后端与 FM225 后端实现同一张 vtable，
  *     由构建选项 SAFE_FACE_BACKEND 决定编哪个，业务代码零改动；
- *  4. 业务层只认 {face_id, score} 这一个数据契约，不关心数据从哪来。
+ *  4. 业务层只认 {face_id, reason} 这一个数据契约，不关心数据从哪来。
+ *     FM225 模组不输出置信度分数，识别结果只按失败原因分流（需求 v1.6 FR-19）。
  *
  * FM225 到货后只需补 app/hal/face/backend_fm225.c 里的 UART 解析，
  * 本文件与所有调用方都不用改。
@@ -25,12 +26,25 @@ extern "C" {
 
 /* ---------------- 数据契约 ---------------- */
 
+/* 识别结果按失败原因分流（FM225 无分数；auth_fsm 依赖本类型） */
+typedef enum {
+    FACE_RES_OK = 0,        /* 匹配成功 */
+    FACE_RES_NO_MATCH,      /* 未匹配：计入失败，连续达阈值转动态码 */
+    FACE_RES_LIVENESS_FAIL, /* 活体失败：拒绝 + 防伪告警 */
+    FACE_RES_TIMEOUT,       /* 超时 / 无人脸：不计数 */
+    FACE_RES_ERROR,         /* 模组/链路异常：不计数 */
+} face_reason_t;
+
 typedef struct {
-    int32_t  face_id;      /* -1 = 未识别到已注册人脸 */
-    int32_t  score;        /* 0~100，越界值业务层视为无效 */
-    uint32_t seq;          /* 帧序号，用于去重与调试 */
-    uint32_t timestamp;    /* hal_time() 时间戳 */
+    int32_t       face_id;  /* -1 = 未识别到已注册人脸 */
+    face_reason_t reason;   /* 结果原因码（取代旧 score 字段） */
+    uint32_t      seq;      /* 帧序号，用于去重与调试 */
+    uint32_t      timestamp;/* hal_time() 时间戳 */
 } face_result_t;
+
+/* 原因码的可读名（日志 / RPC status 用），非法值返回 "unknown"。
+ * 实现在 face_service.c。 */
+const char * face_reason_name(face_reason_t r);
 
 typedef struct {
     int32_t    face_id;    /* 成功 >= 0，失败 -1 */
@@ -101,8 +115,8 @@ const face_result_t * face_service_last_result(void);
 /* ---------------- 调试注入 ---------------- */
 
 /* 仅 FACE_CAP_INJECT 后端有效（当前为 fake），其它后端返回 SAFE_ERR_UNSUP。
- * 供 UI 滑块与 RPC inject_score 使用，真实硬件路径不会走到这里。 */
-safe_err_t face_service_inject(int32_t face_id, int32_t score);
+ * 供调试页与 RPC inject_face 使用，真实硬件路径不会走到这里。 */
+safe_err_t face_service_inject(int32_t face_id, face_reason_t reason);
 
 /* 兼容层：旧同步轮询接口，内部取最近一次结果。
  * 迁移期保留，待 auth_fsm 完全改为事件驱动后删除。 */
@@ -111,3 +125,4 @@ int face_service_poll_compat(face_result_t * out);
 #ifdef __cplusplus
 }
 #endif
+

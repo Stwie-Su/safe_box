@@ -20,10 +20,11 @@
 #define DEFAULT_MQTT_PORT   1883
 
 static app_config_t s_cfg = {
-    .score_high      = 85,
-    .score_mid       = 60,
-    .max_failed      = 5,
-    .lock_seconds    = 30,
+    .face_otp_after        = 3,
+    .face_verify_timeout_s = 10,
+    .virtual_pin_enable    = true,
+    .max_failed            = 5,
+    .lock_seconds          = 30,
     .log_max_entries = 5000,
     .mqtt_host       = DEFAULT_MQTT_HOST,
     .mqtt_port       = DEFAULT_MQTT_PORT,
@@ -49,10 +50,11 @@ void app_config_reload_policy(void)
 {
     const safe_policy_t * p = user_policy();
     if(p == NULL) return;
-    s_cfg.score_high   = p->score_high;
-    s_cfg.score_mid    = p->score_mid;
-    s_cfg.max_failed   = p->max_failed;
-    s_cfg.lock_seconds = p->lock_seconds;
+    s_cfg.face_otp_after        = p->face_otp_after;
+    s_cfg.face_verify_timeout_s = p->face_verify_timeout_s;
+    s_cfg.virtual_pin_enable    = p->virtual_pin_enable;
+    s_cfg.max_failed            = p->max_failed;
+    s_cfg.lock_seconds          = p->lock_seconds;
 }
 
 safe_err_t app_config_init(void)
@@ -76,3 +78,4 @@ const app_config_t * app_config(void)
 {
     return &s_cfg;
 }
+

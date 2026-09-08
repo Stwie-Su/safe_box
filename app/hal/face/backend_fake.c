@@ -22,7 +22,7 @@ static int32_t  s_next_face_id = 100;
 static bool     s_detect_job;
 static uint32_t s_detect_at_ms;
 static int32_t  s_detect_face_id;
-static int32_t  s_detect_score;
+static face_reason_t s_detect_reason;
 
 static safe_err_t fake_init(void)
 {
@@ -71,7 +71,7 @@ static void fake_tick(uint32_t now_ms)
             face_result_t r;
             memset(&r, 0, sizeof(r));
             r.face_id   = s_detect_face_id;
-            r.score     = s_detect_score;
+            r.reason    = s_detect_reason;
             r.timestamp = now_ms / 1000u;
             face_service_emit(FACE_EV_DETECT, &r);
         }
@@ -94,11 +94,11 @@ static safe_err_t fake_delete_tpl(int32_t face_id)
     return SAFE_OK;
 }
 
-static safe_err_t fake_inject(int32_t face_id, int32_t score)
+static safe_err_t fake_inject(int32_t face_id, face_reason_t reason)
 {
-    if(score < -1 || score > 100) return SAFE_ERR_PARAM;
+    if(reason < FACE_RES_OK || reason > FACE_RES_ERROR) return SAFE_ERR_PARAM;
     s_detect_face_id = face_id;
-    s_detect_score   = score;
+    s_detect_reason  = reason;
     s_detect_job     = true;
     s_detect_at_ms   = 0;
     return SAFE_OK;
@@ -122,3 +122,4 @@ const face_backend_t * face_backend_fake(void)
 {
     return &backend;
 }
+

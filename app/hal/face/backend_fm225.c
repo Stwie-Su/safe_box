@@ -8,7 +8,7 @@
  * 【到货后要做的事】
  *  1. 向厂家索取 UART 协议文档，确认帧头、长度、命令字、CRC16 多项式与校验范围；
  *  2. 在 fm225_open() 里打开串口并按文档配置波特率（常见 115200 8N1）；
- *  3. 在 fm225_parse_frame() 里按真实帧格式解析 face_id 与 score；
+ *  3. 在 fm225_parse_frame() 里按真实帧格式解析 face_id 与失败原因码；
  *  4. 在 fm225_cmd_enroll() / fm225_cmd_delete() 里下发注册/删除命令。
  *
  * 上述四点改完，业务层（auth_fsm、UI、RPC）一行都不用动。
@@ -67,11 +67,11 @@ static safe_err_t fm225_send_cmd(uint8_t cmd, const uint8_t * payload, size_t le
 
 /* TODO-FM225：从串口缓冲里找一帧完整数据并解析 */
 static safe_err_t fm225_parse_frame(const uint8_t * buf, size_t len,
-                                    int32_t * out_face_id, int32_t * out_score)
+                                    int32_t * out_face_id, face_reason_t * out_reason)
 {
     (void)buf; (void)len;
     if(out_face_id) *out_face_id = -1;
-    if(out_score)   *out_score   = 0;
+    if(out_reason)  *out_reason  = FACE_RES_NO_MATCH;
     return SAFE_ERR_UNSUP;
 }
 
@@ -109,7 +109,7 @@ static void fm225_tick(uint32_t now_ms)
 
     /* TODO-FM225：读串口缓冲 → 找帧头 → 校验 CRC16 → 解析 → 上报
      * 解析出识别结果时：
-     *     face_result_t r = { .face_id = id, .score = score, .timestamp = hal_time() };
+     *     face_result_t r = { .face_id = id, .reason = reason, .timestamp = hal_time() };
      *     face_service_emit(FACE_EV_DETECT, &r);
      * 录入/删除应答到达时：
      *     face_enroll_result_t r = { .face_id = id, .err = SAFE_OK };
@@ -142,9 +142,9 @@ static safe_err_t fm225_delete_tpl(int32_t face_id)
 }
 
 /* 真实模组不支持注入，调用方应在调用前查 FACE_CAP_INJECT */
-static safe_err_t fm225_inject(int32_t face_id, int32_t score)
+static safe_err_t fm225_inject(int32_t face_id, face_reason_t reason)
 {
-    (void)face_id; (void)score;
+    (void)face_id; (void)reason;
     return SAFE_ERR_UNSUP;
 }
 
@@ -166,3 +166,4 @@ const face_backend_t * face_backend_fm225(void)
 {
     return &backend;
 }
+

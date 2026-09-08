@@ -1,9 +1,16 @@
 /**
  * @file auth_fsm.h
- * 置信度分级状态机（需求 FR-2 / 核心）。
+ * 人脸认证状态机（FR-2 按原因分流 / 核心）。
  *
- * 这是人脸开锁链路的「大脑」：接收 hal_face 的识别结果（阶段 1 来自 UI/RPC 注入），
- * 按置信度分三档 → UNLOCK / WAIT_OTP / DENY，并负责失败计数与设备级锁定。
+ * 这是人脸开锁链路的「大脑」：接收 hal_face 的识别结果（face_reason_t 原因码，
+ * FM225 模组不输出分数），按原因分流 → UNLOCK / WAIT_OTP / DENY，
+ * 并负责失败计数与设备级锁定。
+ *
+ * 分流规则（需求 v1.6 FR-19）：
+ *   OK           → 开锁；
+ *   NO_MATCH     → 计数，连续达 face_otp_after 转 WAIT_OTP，再达 max_failed 锁定；
+ *   LIVENESS_FAIL→ 拒绝 + 防伪告警；
+ *   TIMEOUT/ERROR→ 不计数。
  *
  * 与 UI 解耦：状态变化通过 auth_ui_hook 回调通知 UI 层（切页、弹窗、提示），
  * 不直接 #include LVGL（NFR-5：业务层不依赖 UI / 平台头文件）。
@@ -11,6 +18,8 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+
+#include "hal/hal_face.h"   /* face_reason_t（core→hal 为架构允许方向） */
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,11 +48,11 @@ void auth_fsm_tick(void);                         /* 主线程 100ms 调用：�
 
 fsm_state_t      auth_fsm_state(void);
 const char *     auth_fsm_state_name(fsm_state_t s);
-int              auth_fsm_last_score(void);
+face_reason_t    auth_fsm_last_reason(void);       /* 取代旧 last_score（FM225 无分数） */
 const char *     auth_fsm_pending_user(void);
 int              auth_fsm_lock_remaining(void);    /* 0 = 无锁定 */
 
-void auth_fsm_submit_detect(int face_id, int score);   /* 注入一次识别结果（HAL→FSM） */
+void auth_fsm_submit_face(int32_t face_id, face_reason_t reason);  /* 注入一次人脸结果（HAL→FSM） */
 void auth_fsm_submit_pin(const char * pin);            /* PIN 通道入口（主页键盘） */
 void auth_fsm_submit_otp(const char * code);           /* 动态码页提交 */
 void auth_fsm_cancel_otp(void);
@@ -54,3 +63,4 @@ void auth_fsm_note_failure(const char * detail);       /* 失败计数 + 设备�
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif
+

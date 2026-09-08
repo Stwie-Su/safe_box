@@ -48,7 +48,8 @@
 
 /* ---------------- 全局 ---------------- */
 static char g_dir[512] = {0};          /* 数据目录（store_set_dir 覆盖） */
-static safe_policy_t g_policy = { 4, 8, 5, 30, 85, 60 };  /* pin_min/max/max_failed/lock_seconds/score_high/score_mid */
+static safe_policy_t g_policy = { 4, 8, 5, 30, 3, 10, true };
+/* pin_min/max/max_failed/lock_seconds/face_otp_after/face_verify_timeout_s/virtual_pin_enable */
 
 /* DESIGN.md §9：g_policy 被主线程(user_policy)与后台 worker(user_policy_set/load_users)
  * 交叉访问，加一把小锁；文件读写仍由 worker 单线程持有，无需全局锁。 */
@@ -515,9 +516,9 @@ static int load_users(safe_user_t **list, int *count, bool *ok)
         if (js_get_int(pol, "pin_max_len", &v) && v >= 4) g_policy.pin_max_len = (int)v;
         if (js_get_int(pol, "max_failed", &v) && v >= 1)  g_policy.max_failed = (int)v;
         if (js_get_int(pol, "lock_seconds", &v) && v >= 1) g_policy.lock_seconds = (int)v;
-        /* 阈值有合理范围才采纳：high∈[60,100]，mid∈[20,high) */
-        if (js_get_int(pol, "score_high", &v) && v >= 60 && v <= 100) g_policy.score_high = (int)v;
-        if (js_get_int(pol, "score_mid", &v) && v >= 20 && v < g_policy.score_high) g_policy.score_mid = (int)v;
+        /* 阈值有合理范围才采纳；旧版 score_high/score_mid 字段直接忽略（兼容读取） */
+        if (js_get_int(pol, "face_otp_after", &v) && v >= 1 && v <= 10) g_policy.face_otp_after = (int)v;
+        if (js_get_int(pol, "face_verify_timeout_s", &v) && v >= 3 && v <= 120) g_policy.face_verify_timeout_s = (int)v;
         pthread_mutex_unlock(&g_policy_mutex);
     }
 
@@ -552,8 +553,10 @@ static bool save_users(const safe_user_t *us, int n)
     const safe_policy_t *p = &g_policy;
     o += (size_t)snprintf(buf + o, cap - o,
         "{\n  \"version\": 1,\n  \"policy\": {\"pin_min_len\": %d, \"pin_max_len\": %d, "
-        "\"max_failed\": %d, \"lock_seconds\": %d, \"score_high\": %d, \"score_mid\": %d},\n  \"users\": [\n",
-        p->pin_min_len, p->pin_max_len, p->max_failed, p->lock_seconds, p->score_high, p->score_mid);
+        "\"max_failed\": %d, \"lock_seconds\": %d, \"face_otp_after\": %d, "
+        "\"face_verify_timeout_s\": %d, \"virtual_pin_enable\": %s},\n  \"users\": [\n",
+        p->pin_min_len, p->pin_max_len, p->max_failed, p->lock_seconds,
+        p->face_otp_after, p->face_verify_timeout_s, p->virtual_pin_enable ? "true" : "false");
     for (int i = 0; i < n; i++) {
         char one[600];
         user_to_json(&us[i], one, sizeof(one));
@@ -734,11 +737,11 @@ void user_policy_set(int max_failed, int lock_seconds)
     user_list_free(us);
 }
 
-void user_policy_set_score(int high, int mid)
+void user_policy_set_face(int otp_after, int timeout_s)
 {
     pthread_mutex_lock(&g_policy_mutex);
-    if (high >= 60 && high <= 100) g_policy.score_high = high;
-    if (mid  >= 20 && mid  < g_policy.score_high) g_policy.score_mid = mid;
+    if (otp_after >= 1 && otp_after <= 10)      g_policy.face_otp_after = otp_after;
+    if (timeout_s >= 3  && timeout_s <= 120)    g_policy.face_verify_timeout_s = timeout_s;
     pthread_mutex_unlock(&g_policy_mutex);
     safe_user_t *us = NULL;
     int n = 0;
@@ -1050,3 +1053,4 @@ bool store_init(void)
     log_append("setting_change", "system", 1, "bootstrap: default admin created");
     return true;
 }
+

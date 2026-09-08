@@ -38,6 +38,11 @@ unlock_result_t backend_verify_pin(const char *pin, char *out_user, size_t user_
 /* 动态码开锁：校验某用户的 TOTP（含 ±1 窗口容忍 + 防重放 + 失败计数 + 通道开关）。 */
 auth_result_t backend_verify_totp(const char *user, const char *code);
 
+/* 身份未定动态码（人脸连续 NO_MATCH 转入 WAIT_OTP 时 pending_user 为空）：
+ * 在「任一启用 + TOTP 开启 + 未锁定 + 临时授权有效」的用户上校验 code。
+ * 成功时 out_user 填命中用户名。失败不累加用户级计数（防误伤），由 FSM 设备级计数兜底。 */
+auth_result_t backend_verify_totp_any(const char *code, char *out_user, size_t user_cap);
+
 /* 管理员动态码二次确认：在「任一启用且开启 TOTP 的管理员」上验证 otp。
  * 用于 FR-3 敏感操作 / 远程开锁强制 TOTP。成功返回 AUTH_OK。 */
 auth_result_t backend_admin_verify_totp(const char *code);
@@ -51,3 +56,4 @@ int backend_lock_remaining(void);
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif
+

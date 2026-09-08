@@ -188,12 +188,12 @@ const face_result_t * face_service_last_result(void)
     return s_has_last ? &s_last : NULL;
 }
 
-safe_err_t face_service_inject(int32_t face_id, int32_t score)
+safe_err_t face_service_inject(int32_t face_id, face_reason_t reason)
 {
     if(s_backend == NULL) return SAFE_ERR_STATE;
     if(!(s_backend->caps & FACE_CAP_INJECT)) return SAFE_ERR_UNSUP;
     if(s_backend->inject == NULL) return SAFE_ERR_UNSUP;
-    return s_backend->inject(face_id, score);
+    return s_backend->inject(face_id, reason);
 }
 
 /* 兼容层：旧同步轮询接口。事件驱动改造完成后删除。 */
@@ -207,6 +207,18 @@ int face_service_poll_compat(face_result_t * out)
 }
 
 /* ---------------- 后端上报入口 ---------------- */
+
+const char * face_reason_name(face_reason_t r)
+{
+    switch(r) {
+        case FACE_RES_OK:           return "ok";
+        case FACE_RES_NO_MATCH:     return "no_match";
+        case FACE_RES_LIVENESS_FAIL:return "liveness_fail";
+        case FACE_RES_TIMEOUT:      return "timeout";
+        case FACE_RES_ERROR:        return "error";
+        default:                    return "unknown";
+    }
+}
 
 void face_service_emit(face_event_t ev, const void * payload)
 {
@@ -225,3 +237,4 @@ void face_service_emit(face_event_t ev, const void * payload)
         if(s_subs[i].cb) s_subs[i].cb(ev, payload, s_subs[i].user);
     }
 }
+

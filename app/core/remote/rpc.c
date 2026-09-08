@@ -58,7 +58,7 @@ static char *build_status(int code, const char *msg, const char *req_id)
     cJSON_AddNumberToObject(j, "ts", (double)hal_time());
     cJSON_AddStringToObject(j, "state", auth_fsm_state_name(auth_fsm_state()));
     cJSON_AddNumberToObject(j, "lockout_remain", auth_fsm_lock_remaining());
-    cJSON_AddNumberToObject(j, "last_score", auth_fsm_last_score());
+    cJSON_AddStringToObject(j, "last_reason", face_reason_name(auth_fsm_last_reason()));
     cJSON_AddStringToObject(j, "last_user", auth_fsm_pending_user());
     cJSON_AddNumberToObject(j, "user_count", n);
     cJSON_AddStringToObject(j, "time_src", hal_time_source() == TIME_SRC_RTC ? "rtc" : "sys");
@@ -90,6 +90,17 @@ void rpc_publish_event(const char *evt, const char *user, const char *detail, in
     if (s) { mqtt_publish("safe/log", s, 1, 0); free(s); }
     cJSON_Delete(j);
     if (g_evt_hook) g_evt_hook(evt, user, detail, res);
+}
+
+/* 原因码字符串 → 枚举；非法返回 -1 */
+static int parse_face_reason(const char *s)
+{
+    if (strcmp(s, "ok") == 0)            return (int)FACE_RES_OK;
+    if (strcmp(s, "no_match") == 0)      return (int)FACE_RES_NO_MATCH;
+    if (strcmp(s, "liveness_fail") == 0) return (int)FACE_RES_LIVENESS_FAIL;
+    if (strcmp(s, "timeout") == 0)       return (int)FACE_RES_TIMEOUT;
+    if (strcmp(s, "error") == 0)         return (int)FACE_RES_ERROR;
+    return -1;
 }
 
 /* 校验管理操作是否需要 otp。返回 true 表示已校验通过（或不需要）。 */
@@ -204,12 +215,19 @@ static void dispatch(const char *payload)
         return;
     }
 
-    /* ---- set_threshold（敏感） ---- */
-    if (strcmp(c, "set_threshold") == 0) {
+    /* ---- set_face_policy（敏感，取代旧 set_threshold） ---- */
+    if (strcmp(c, "set_face_policy") == 0) {
         if (!check_otp_required(root, true, req_id)) { cJSON_Delete(root); return; }
-        int v = params && cJSON_GetObjectItem(params, "value") ? cJSON_GetObjectItem(params, "value")->valueint : 0;
-        if (v >= 60 && v <= 100) user_policy_set_score(v, v - 25);
-        ack(req_id, v >= 60 && v <= 100 ? 0 : 1001, "ok");
+        int otp_after = params && cJSON_GetObjectItem(params, "face_otp_after")
+                        ? cJSON_GetObjectItem(params, "face_otp_after")->valueint : 0;
+        int timeout   = params && cJSON_GetObjectItem(params, "face_verify_timeout_s")
+                        ? cJSON_GetObjectItem(params, "face_verify_timeout_s")->valueint : 0;
+        if (otp_after >= 1 || timeout >= 3) {
+            user_policy_set_face(otp_after, timeout);
+            ack(req_id, 0, "ok");
+        } else {
+            ack(req_id, 1001, "缺少有效参数");
+        }
         cJSON_Delete(root);
         return;
     }
@@ -240,12 +258,17 @@ static void dispatch(const char *payload)
         return;
     }
 
-    /* ---- inject_score（调试用，无需 otp） ---- */
-    if (strcmp(c, "inject_score") == 0) {
-        int score = params && cJSON_GetObjectItem(params, "score") ? cJSON_GetObjectItem(params, "score")->valueint : 0;
+    /* ---- inject_face（调试用，无需 otp，取代旧 inject_score） ---- */
+    if (strcmp(c, "inject_face") == 0) {
+        cJSON *rs = params ? cJSON_GetObjectItem(params, "reason") : NULL;
         int fid = params && cJSON_GetObjectItem(params, "face_id") ? cJSON_GetObjectItem(params, "face_id")->valueint : -1;
-        face_service_inject(fid, score);
-        ack(req_id, 0, "injected");
+        face_reason_t reason = parse_face_reason(cJSON_IsString(rs) && rs->valuestring ? rs->valuestring : "");
+        if (reason < 0) {
+            ack(req_id, 1001, "invalid reason");
+        } else {
+            face_service_inject(fid, reason);
+            ack(req_id, 0, "injected");
+        }
         cJSON_Delete(root);
         return;
     }
@@ -271,3 +294,4 @@ bool rpc_take_local_otp(char *req_id, size_t cap)
     g_local_otp_req[0] = '\0';
     return true;
 }
+

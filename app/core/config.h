@@ -20,11 +20,12 @@ extern "C" {
 #define APP_CFG_DATA_DIR_MAX    256
 
 typedef struct {
-    /* 认证与锁定（FR-2 / FR-4） */
-    int  score_high;        /* 置信度 >= 此值直接开锁 */
-    int  score_mid;         /* 置信度 >= 此值走动态码，低于则拒绝 */
-    int  max_failed;        /* 连续失败锁定阈值 */
-    int  lock_seconds;      /* 锁定时长 */
+    /* 认证与锁定（FR-2 / FR-4 / FR-7） */
+    int  face_otp_after;        /* 人脸连续未匹配达此值转动态码 */
+    int  face_verify_timeout_s; /* 人脸验证过程超时（秒） */
+    bool virtual_pin_enable;    /* 虚位密码开关（FR-18） */
+    int  max_failed;            /* 连续失败锁定阈值 */
+    int  lock_seconds;          /* 锁定时长 */
 
     /* 日志（FR 日志保留） */
     int  log_max_entries;   /* 保留条数上限，超出滚动转存 */
@@ -53,3 +54,4 @@ void app_config_reload_policy(void);
 #ifdef __cplusplus
 }
 #endif
+

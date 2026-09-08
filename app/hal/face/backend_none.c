@@ -26,9 +26,9 @@ static safe_err_t none_delete(int32_t face_id)
     return SAFE_ERR_UNSUP;
 }
 
-static safe_err_t none_inject(int32_t face_id, int32_t score)
+static safe_err_t none_inject(int32_t face_id, face_reason_t reason)
 {
-    (void)face_id; (void)score;
+    (void)face_id; (void)reason;
     return SAFE_ERR_UNSUP;
 }
 
@@ -50,3 +50,4 @@ const face_backend_t * face_backend_none(void)
 {
     return &backend;
 }
+

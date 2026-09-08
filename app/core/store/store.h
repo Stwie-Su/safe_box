@@ -17,12 +17,13 @@ extern "C" {
 
 /* ---------------- 安全策略（users.json 顶层 policy） ---------------- */
 typedef struct {
-    int pin_min_len;    /* PIN 最短长度 */
-    int pin_max_len;    /* PIN 最长长度 */
-    int max_failed;     /* 连续失败锁定阈值 */
-    int lock_seconds;   /* 锁定时长（秒） */
-    int score_high;     /* 置信度 ≥ 此值直接开锁（FR-2） */
-    int score_mid;      /* 置信度 ≥ 此值走动态码；< 此值直接拒绝（FR-2） */
+    int  pin_min_len;        /* PIN 最短长度 */
+    int  pin_max_len;        /* PIN 最长长度 */
+    int  max_failed;         /* 连续失败锁定阈值 */
+    int  lock_seconds;       /* 锁定时长（秒） */
+    int  face_otp_after;     /* 人脸连续未匹配达此值转动态码（FR-2 按原因分流） */
+    int  face_verify_timeout_s; /* 人脸验证过程超时（秒，DETECTING 停留上限） */
+    bool virtual_pin_enable; /* 虚位密码开关（FR-18，键盘层消费） */
 } safe_policy_t;
 
 /* ---------------- 用户数据模型（DESIGN.md §2.2，阶段 1 扩展） ---------------- */
@@ -76,7 +77,7 @@ int pin_hash(const char *pin, uint8_t *salt_out, char *hash_hex_out);  /* 生成
 int pin_check(const char *pin, const char *salt_hex, const char *hash_hex); /* 0=匹配 */
 const safe_policy_t * user_policy(void);                 /* 返回当前策略指针（内部静态） */
 void user_policy_set(int max_failed, int lock_seconds);   /* 修改安全策略并落盘 */
-void user_policy_set_score(int high, int mid);            /* 修改置信度阈值（FR-2）并落盘 */
+void user_policy_set_face(int otp_after, int timeout_s);  /* 修改人脸策略（FR-2/FR-7）并落盘 */
 int  user_next_id(void);                                  /* 分配下一个用户 id */
 void user_list_free(safe_user_t *list);
 
@@ -95,3 +96,4 @@ int devkey_get(uint8_t *key, size_t *len);   /* 0=成功 */
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif
+
