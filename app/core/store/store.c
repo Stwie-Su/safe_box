@@ -19,10 +19,14 @@
 
 #if defined(_WIN32)
   #include <direct.h>
+  #include <io.h>
   #define MKDIR(p) _mkdir(p)
   #define localtime_r(tp, tmp) localtime_s(tmp, tp)
+  #define fileno(f) _fileno(f)      /* 原子写需要的文件描述符 / 落盘原语（MSVC 命名） */
+  #define fsync(fd) _commit(fd)
 #else
   #include <unistd.h>
+  #include <fcntl.h>
   #include <limits.h>
   #include <sys/stat.h>
   #include <pthread.h>
@@ -132,13 +136,62 @@ static char *read_file_alloc(const char *path)
     return buf;
 }
 
+/* fsync 父目录：rename 只改了内存里的目录项，目录本身不落盘的话掉电后可能
+ * 既看不到新文件也看不到旧文件。POSIX 要求显式同步父目录才能保住 rename。 */
+static void fsync_parent_dir(const char *path)
+{
+#if defined(_WIN32)
+    (void)path;                      /* Windows 没有目录 fsync 语义，保持空实现 */
+#else
+    char dup[600];
+    size_t n = strlen(path);
+    if(n == 0 || n >= sizeof(dup)) return;
+    memcpy(dup, path, n + 1);
+    char *slash = strrchr(dup, '/');
+    if(!slash) return;               /* 没有目录成分，无法定位父目录 */
+    if(slash == dup) dup[1] = '\0';  /* "/xxx" 的父目录是根 "/" */
+    else            *slash = '\0';
+    int fd = open(dup, O_RDONLY);
+    if(fd < 0) return;
+    fsync(fd);
+    close(fd);
+#endif
+}
+
+/* 原子替换写：tmp → fsync → rename → fsync(父目录)。
+ *
+ * 为什么不能直接 fwrite 覆盖：覆盖写存在一个"只写了一半"的时间窗，掉电或进程
+ * 崩溃后 users.json 会变成截断的 JSON，全库解析失败等于全员无法开锁
+ * （技术路线规约 §10 风险项 R1，最高优先）。
+ *
+ * rename 在同一文件系统内是原子的：任意时刻读目标路径，要么拿到完整旧内容，
+ * 要么拿到完整新内容，没有中间态。两次 fsync 分别保证"数据落盘"与"目录项落盘"，
+ * 缺任何一个都保不住 rename 的结果。
+ *
+ * users.json 与 network.json 共用本函数；落盘由后台 worker 串行调用，
+ * 因此临时文件名可以用固定的 .tmp 后缀（崩溃残留会在下次写时被覆盖）。 */
 static bool write_file_all(const char *path, const char *data, size_t len)
 {
-    FILE *f = fopen(path, "wb");
-    if (!f) return false;
-    size_t w = fwrite(data, 1, len, f);
-    fclose(f);
-    return w == len;
+    if(!path || !data) return false;
+
+    char tmp[600];
+    int n = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    if(n < 0 || (size_t)n >= sizeof(tmp)) return false;
+
+    FILE *f = fopen(tmp, "wb");
+    if(!f) return false;
+
+    bool ok = (fwrite(data, 1, len, f) == len);
+    /* 顺序不能变：先 flush 到内核，再 fsync 落盘，最后关闭。
+     * 只 fclose 的话数据还留在页缓存里，掉电即丢。 */
+    if(ok && fflush(f) != 0) ok = false;
+    if(ok && fsync(fileno(f)) != 0) ok = false;
+    if(fclose(f) != 0) ok = false;
+
+    if(!ok) { remove(tmp); return false; }
+    if(rename(tmp, path) != 0) { remove(tmp); return false; }
+    fsync_parent_dir(path);
+    return true;
 }
 
 /* ==================================================================
@@ -279,6 +332,7 @@ static const char *js_arr_at(const char *arr, int idx)
         if (*p == ']') return NULL;
         if (cur == idx) return p;
         p = js_skip(p);
+        if (!p) return NULL;     /* 截断的 JSON：js_skip 扫不到闭合符会返回 NULL，必须挡住再解引用 */
         if (*p == ',') p++;
         cur++;
     }
@@ -295,6 +349,7 @@ static int js_arr_count(const char *arr)
         if (*p == '[') { p++; continue; }
         if (*p == ']') return n;
         p = js_skip(p);
+        if (!p) return n;        /* 同上：文件被截断时按已数到的个数返回，由上层按"条数不符"判坏 */
         if (*p == ',') p++;
         n++;
     }
