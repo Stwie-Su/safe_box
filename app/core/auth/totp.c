@@ -13,6 +13,7 @@
  */
 #include "core/auth/totp.h"
 #include "core/support/sha1.h"
+#include "hal/hal_time.h"       /* R2：时间源统一走 HAL，不直接读系统时钟 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,7 +83,7 @@ static void fill_random(uint8_t * buf, size_t len)
         fclose(f);
         if (rd == len) return;
     }
-    srand((unsigned)time(NULL) ^ (unsigned)(uintptr_t)&f);
+    srand((unsigned)hal_time() ^ (unsigned)(uintptr_t)&f);
     for (size_t i = 0; i < len; i++) buf[i] = (uint8_t)(rand() & 0xFF);
 }
 

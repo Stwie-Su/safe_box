@@ -11,6 +11,7 @@
  */
 #include "core/store/store.h"
 #include "core/support/crypto.h"
+#include "hal/hal_time.h"        /* R2：时间源统一走 HAL，业务层不直接读系统时钟 */
 #include "app_version.h"          /* SAFE_DATA_DIR：编译期数据目录 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -421,7 +422,7 @@ int pin_hash(const char *pin, uint8_t *salt_out, char *hash_hex_out)
         (void)fread(salt, 1, sizeof(salt), f);
         fclose(f);
     } else {
-        srand((unsigned)time(NULL));
+        srand((unsigned)hal_time());
         for (size_t i = 0; i < sizeof(salt); i++) salt[i] = (uint8_t)rand();
     }
     uint8_t dk[32];
@@ -755,7 +756,7 @@ int user_verify_pin(const char *name, const char *pin)
     int n = 0;
     if (load_users(&us, &n, NULL) != 0 || n <= 0) { user_list_free(us); return -1; }
 
-    long now = (long)time(NULL);
+    long now = (long)hal_time();
     int ret = -1;
     for (int i = 0; i < n; i++) {
         if (strcmp(us[i].name, name) != 0) continue;
@@ -903,7 +904,7 @@ int log_append(const char *evt, const char *user, int res, const char *detail)
     file_path(LOG_FILE, path, sizeof(path));
     ensure_dir(store_dir());
 
-    time_t now = time(NULL);
+    time_t now = (time_t)hal_time();
     struct tm tmv;
     localtime_r(&now, &tmv);
     char ts[24];
@@ -1037,7 +1038,7 @@ bool store_init(void)
     boot.face_enable = true;
     boot.totp_enable = true;
     strncpy(boot.totp_secret, "JBSWY3DPEHPK3PXP", sizeof(boot.totp_secret) - 1);
-    time_t now = time(NULL);
+    time_t now = (time_t)hal_time();
     struct tm tmv;
     localtime_r(&now, &tmv);
     strftime(boot.created_at, sizeof(boot.created_at), "%Y-%m-%dT%H:%M:%S", &tmv);

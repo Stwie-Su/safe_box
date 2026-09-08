@@ -13,6 +13,7 @@
 #include "core/support/async_store.h"
 #include "core/support/worker.h"
 #include "core/auth/unlock_backend.h"   /* backend_admin_verify_totp：改管理员密码动态码二次确认 */
+#include "hal/hal_time.h"               /* R2：时间源统一走 HAL，不直接读系统时钟 */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -628,7 +629,7 @@ static void add_user_worker(void * p)
     uint8_t salt[16];
     pin_hash(a->pin, salt, u.pin_hash);
     salt_to_hex(salt, u.pin_salt);
-    time_t now = time(NULL);
+    time_t now = (time_t)hal_time();
     struct tm tmv;
     localtime_r(&now, &tmv);
     strftime(u.created_at, sizeof(u.created_at), "%Y-%m-%dT%H:%M:%S", &tmv);

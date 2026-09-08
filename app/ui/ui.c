@@ -13,7 +13,8 @@
  *   - 选中态用 accent 蓝文字 + 顶一矩形高亮指示，非胶囊填充
  */
 #include "ui/ui.h"
-#include <time.h>            /* localtime / strftime / struct tm */
+#include "hal/hal_time.h"    /* R2：时间源统一走 HAL，不直接读系统时钟 */
+#include <time.h>            /* localtime / strftime / struct tm（只做格式化，不取时） */
 #include "hal/hal_actuator.h"    /* actuator_get_state */
 #include "core/auth/auth_fsm.h"    /* 顶栏解锁显示：执行器高电平 OR FSM_UNLOCKED */
 #include "core/remote/mqtt_client.h" /* mqtt_is_connected：顶栏连接状态点 */
@@ -508,7 +509,7 @@ static void status_timer_cb(lv_timer_t * t)
     (void)t;
 
     char buf[32];
-    time_t now = time(NULL);
+    time_t now = (time_t)hal_time();
     struct tm * tmv = localtime(&now);
     if (tmv) {
         strftime(buf, sizeof(buf), "%H:%M", tmv);

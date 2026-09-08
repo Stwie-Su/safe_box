@@ -9,6 +9,7 @@
 #include "core/store/store.h"
 #include "core/support/async_store.h"
 #include "core/support/worker.h"
+#include "hal/hal_time.h"      /* R2：时间源统一走 HAL，不直接读系统时钟 */
 #include <string.h>
 #include <time.h>
 #include <stdio.h>
@@ -214,7 +215,7 @@ static void clock_timer_cb(lv_timer_t * t)
 {
     (void)t;
     char buf[40];
-    time_t now = time(NULL);
+    time_t now = (time_t)hal_time();
     struct tm * tmv = localtime(&now);
     if (tmv) {
         strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tmv);

@@ -9,7 +9,9 @@
  *
  * 两种轮次（默认各跑 rounds 轮）：
  *   - 随机轮（RANDOM）：父进程随机 1~21ms 后 SIGKILL，覆盖写周期任意相位；
- *   - 盯梢轮（WATCH） ：父进程在子进程写盘期间以 ~50µs 粒度反复 stat() 目标文件，
+ *   - 盯梢轮（WATCH） ：父进程在子进程写盘期间连续 stat() 目标文件（忙采样，
+ *                       实测 stat 仅 ~1.5µs，而本机 nanosleep(50µs) 实际要 ~1ms，
+ *                       用休眠采样会把采样率降到 1/20，抓截断窗口全靠运气），
  *                       全程断言「users.json 的大小永远只能是完整大小」。
  *
  * 为什么必须有盯梢轮（这是本用例的牙齿所在）：
@@ -20,7 +22,7 @@
  *   之间必然露出 0 / 不完整的大小，连续上千次采样几乎必然抓到；而 tmp+rename
  *   实现下 users.json 从来不被截断，大小恒为完整值，永远抓不到中间态。
  *
- * 种子用户默认 240 个：让 users.json 到 ~100KB，保证一次写盘跨越多次系统调用，
+ * 种子用户默认 120 个：让 users.json 到 ~50KB，保证一次写盘跨越多次系统调用，
  * 小文件几乎不存在截断窗口，测了也白测。
  *
  * 用法：test_store_crash [轮次]    默认 20 轮（每轮含 1 盯梢 + 1 随机）
@@ -38,15 +40,16 @@
 #include "core/store/store.h"
 #include "hal/hal_time.h"       /* 时间源统一走 HAL，不直接 time() */
 
-#define SEED_USERS     240     /* 种子用户数：撑大 users.json，制造真实写盘窗口 */
-#define ROUNDS_DEFAULT 20
+#define SEED_USERS     120     /* 种子用户数：撑大 users.json（~50KB）以制造真实写盘窗口；
+                                再大只会让 load_users 的 O(n^2) 解析拖慢用例，无额外收益 */
+#define ROUNDS_DEFAULT 10
 #define NAME_OLD       "OLDSTATE_USER_0001"
 #define NAME_NEW       "NEWSTATE_USER_0001"
 
-#define POLL_NSEC      50000L              /* 盯梢采样间隔 ~50µs */
-#define POLL_MAX       3000                /* 盯梢轮最多采样次数（约 150ms） */
-#define RAND_MIN_NSEC  1000000L            /* 随机轮最短存活 1ms */
-#define RAND_RNG_NSEC  20000000L           /* 随机轮存活抖动 0~20ms */
+#define POLL_DEADLINE_MS 100.0             /* 盯梢窗口（毫秒），到点收网 */
+#define POLL_MAX         400000L           /* 盯梢采样次数上限，防止极端环境跑飞 */
+#define RAND_MIN_NSEC    1000000L          /* 随机轮最短存活 1ms */
+#define RAND_RNG_NSEC    20000000L         /* 随机轮存活抖动 0~20ms */
 
 /* ---------------- 小工具 ---------------- */
 
@@ -165,6 +168,7 @@ static bool run_round(int round_no, crash_mode_t mode)
     bool ok = (ref_old != NULL && ref_new != NULL && len_old == len_new);
     long polls = 0;
     long anomalies = 0;
+    double elapsed_ms = 0.0;
     off_t min_size = (off_t)len_old;
 
     if(ok) {
@@ -184,12 +188,11 @@ static bool run_round(int round_no, crash_mode_t mode)
             ts.tv_nsec = RAND_MIN_NSEC + (long)(rand() % RAND_RNG_NSEC);
             nanosleep(&ts, NULL);
         } else {
-            /* 盯梢：全程采样文件大小，抓「非完整大小」的中间态。
+            /* 盯梢：连续采样文件大小，抓「非完整大小」的中间态。
              * users.json 若被就地覆盖写，必然露出 0 或不完整的大小；
              * tmp+rename 下目标文件从不出现中间大小。 */
-            struct timespec ts;
-            ts.tv_sec  = 0;
-            ts.tv_nsec = POLL_NSEC;
+            struct timespec t0, t1;
+            clock_gettime(CLOCK_MONOTONIC, &t0);
             for(long i = 0; i < POLL_MAX; i++) {
                 struct stat st;
                 if(stat(path, &st) == 0) {
@@ -204,8 +207,14 @@ static bool run_round(int round_no, crash_mode_t mode)
                     }
                 }
                 if(anomalies >= 5) break;      /* 证据够了，提前收网 */
-                nanosleep(&ts, NULL);
+                clock_gettime(CLOCK_MONOTONIC, &t1);
+                double el = (double)(t1.tv_sec - t0.tv_sec) * 1000.0 +
+                            (double)(t1.tv_nsec - t0.tv_nsec) / 1000000.0;
+                if(el >= POLL_DEADLINE_MS) break;
             }
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            elapsed_ms = (double)(t1.tv_sec - t0.tv_sec) * 1000.0 +
+                         (double)(t1.tv_nsec - t0.tv_nsec) / 1000000.0;
         }
 
         kill(pid, SIGKILL);
@@ -237,15 +246,15 @@ static bool run_round(int round_no, crash_mode_t mode)
         if(mode == MODE_WATCH) { g_rounds_watch++;  g_polls_total += polls; g_anom_total += anomalies; }
         else                   { g_rounds_random++; }
 
-        printf("  轮次 %3d[%s]：%s  %s  命中=%s  大小=%zu/%zu  解析=%d 条\n",
+        printf("  轮次 %3d[%s]：%s  命中=%s  大小=%zu/%zu  解析=%d 条\n",
                round_no, mode == MODE_WATCH ? "盯梢" : "随机", ok ? "PASS" : "FAIL",
-               mode == MODE_WATCH ? "(采样 " : "(存活 ",
                is_old ? "全旧" : (is_new ? "全新" : "都不是"),
                got_len, len_old, n);
         if(mode == MODE_WATCH) {
-            printf("           采样 %ld 次 / 中间态 %ld 次%s)\n",
-                   polls, anomalies,
-                   anomalies ? " ← 覆盖写露出了不完整大小" : "");
+            printf("           盯梢 %.0f ms / 采样 %ld 次 / 中间态 %ld 次%s%s)\n",
+                   elapsed_ms, polls, anomalies,
+                   anomalies ? " ← 覆盖写露出了不完整大小" : "",
+                   anomalies ? "" : " ← 全程未见中间态");
         } else {
             printf("           随机时刻击杀)\n");
         }

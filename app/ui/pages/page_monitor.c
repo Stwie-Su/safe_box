@@ -28,6 +28,7 @@
 #include "core/support/worker.h"
 #include "core/auth/auth_fsm.h"
 #include "hal/hal_actuator.h"
+#include "hal/hal_time.h"     /* R2：时间源统一走 HAL，不直接读系统时钟 */
 #include <time.h>
 #include <string.h>
 #include <stdio.h>
@@ -269,7 +270,7 @@ static int count_today_events(void)
     int n = 0;
     if (log_query(NULL, -1, &entries, &n) != 0) return 0;
 
-    time_t now = time(NULL);
+    time_t now = (time_t)hal_time();
     struct tm tm_now;
     localtime_r(&now, &tm_now);
     char today[12];

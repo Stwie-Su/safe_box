@@ -26,7 +26,7 @@ unlock_result_t backend_verify_pin(const char *pin, char *out_user, size_t user_
         return UNLOCK_FAIL;
     }
 
-    const long now = (long)time(NULL);
+    const long now = (long)hal_time();
     const int max_failed = user_policy()->max_failed;
     const int lock_secs  = user_policy()->lock_seconds;
     int active = 0;      /* 未锁定启用用户数 */
@@ -143,7 +143,7 @@ auth_result_t backend_admin_verify_totp(const char *code)
 
 bool backend_is_locked(void)
 {
-    const long now = (long)time(NULL);
+    const long now = (long)hal_time();
     safe_user_t *us = NULL;
     int n = 0;
     bool locked = false;
@@ -158,7 +158,7 @@ bool backend_is_locked(void)
 
 int backend_lock_remaining(void)
 {
-    const long now = (long)time(NULL);
+    const long now = (long)hal_time();
     long max_left = 0;
     safe_user_t *us = NULL;
     int n = 0;
