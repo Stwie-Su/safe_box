@@ -21,6 +21,7 @@
  *   UNLOCKED 30s / DENY 2s / LOCKOUT lock_seconds。
  */
 #include "core/auth/auth_fsm.h"
+#include "core/event_bus.h"
 #include "core/store/store.h"
 #include "core/auth/totp.h"
 #include "core/auth/unlock_backend.h"
@@ -45,9 +46,9 @@ static fsm_t s_fsm;
 static auth_ui_hook_t   s_ui_hook   = NULL;
 static auth_event_cb_t  s_evt_cb    = NULL;
 
-/* 人脸事件入口：由 face_service 在主线程回调，等价于旧的 tick 轮询 */
+/* 人脸事件入口：face_service_emit → event_bus(EV_FACE_EVENT) → 本回调（主线程） */
 static void handle_face_result(int32_t face_id, face_reason_t reason);
-static void on_face_event(face_event_t ev, const void * payload, void * user);
+static void on_face_event(ev_topic_t topic, const void * payload, void * user);
 static void do_unlock(const char * user, const char * via);
 static bool bump_fail_streak(const char * user, const char * detail);
 static void emit_event(const char * evt, const char * user, const char * detail, int res);
@@ -78,8 +79,10 @@ void auth_fsm_init(void)
     s_fsm.state = FSM_IDLE;
     s_fsm.last_reason = FACE_RES_ERROR;
 
-    /* 人脸通道：初始化后端并订阅识别结果。后端是模拟器还是 FM225，
-     * 由构建选项决定，这里不做任何区分。 */
+    /* 人脸通道（步骤 3a / R6 接线）：订阅总线 EV_FACE_EVENT。
+     * 后端结果由 face_service_emit 广播（主线程 publish 同步派发），
+     * 后端是模拟器还是 FM225 由构建选项决定，这里不做任何区分。 */
+    event_bus_subscribe(EV_FACE_EVENT, on_face_event, NULL);
 }
 
 /* 人脸结果分流：核心原则是「绝不重放旧识别」
@@ -119,12 +122,15 @@ static void handle_face_result(int32_t face_id, face_reason_t reason)
     /* 其余状态：丢弃 */
 }
 
-static void on_face_event(face_event_t ev, const void * payload, void * user)
+/* 人脸事件回调（总线签名）：payload 为 ev_face_event_t（POD，步骤 3a），
+ * 由 face_service_emit → event_bus_publish 在主线程同步派发。 */
+static void on_face_event(ev_topic_t topic, const void * payload, void * user)
 {
     (void)user;
-    if(ev != FACE_EV_DETECT || payload == NULL) return;
-    const face_result_t * fr = (const face_result_t *)payload;
-    handle_face_result(fr->face_id, fr->reason);
+    if(topic != EV_FACE_EVENT || payload == NULL) return;
+    const ev_face_event_t * e = (const ev_face_event_t *)payload;
+    if(e->ev != FACE_EV_DETECT) return;   /* ENROLL/DELETE/ERROR 与认证状态机无关 */
+    handle_face_result(e->res.face_id, e->res.reason);
 }
 
 void auth_fsm_set_ui_hook(auth_ui_hook_t hook) { s_ui_hook = hook; }
@@ -370,7 +376,7 @@ void auth_fsm_tick(void)
 {
     const uint32_t now = hal_time();
 
-    /* 识别结果不再在这里轮询，改由 face_service 的事件回调驱动（见 handle_detect_frame）。
+    /* 识别结果不再在这里轮询，改由总线 EV_FACE_EVENT 事件驱动（见 on_face_event）。
      * tick 只负责状态超时推进。 */
     uint32_t elapsed = now - s_fsm.ts_enter;
     switch (s_fsm.state) {

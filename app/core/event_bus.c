@@ -18,6 +18,11 @@
 #define QUEUE_DEPTH         32
 #define PAYLOAD_MAX_BYTES   128
 
+/* payload 结构体尺寸拘束：超过总线拷贝上限会在编译期报错（C11 _Static_assert
+ * 也适用于 C99 扩展，GCC/Clang 均支持）。新增 payload 时同步维护。 */
+_Static_assert(sizeof(ev_auth_result_t) <= PAYLOAD_MAX_BYTES, "ev_auth_result_t exceeds bus payload cap");
+_Static_assert(sizeof(ev_face_event_t)  <= PAYLOAD_MAX_BYTES, "ev_face_event_t exceeds bus payload cap");
+
 typedef struct {
     ev_handler_t handler;
     void *       user;

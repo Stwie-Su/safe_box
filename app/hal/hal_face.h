@@ -58,14 +58,16 @@ typedef struct {
 
 /* ---------------- 事件 ---------------- */
 
+/* 人脸事件不再走本模块的自有订阅接口（v1.3 §5.18：全工程只留 worker + event_bus
+ * 两套通知机制）。后端结果经 face_service_emit() → event_bus(EV_FACE_EVENT) 广播，
+ * payload 为 ev_face_event_t（core/event_bus.h，POD 按值拷贝）。
+ * FACE_EV_ERROR 的描述文本放在该结构的 msg[64] 定长数组里。 */
 typedef enum {
-    FACE_EV_DETECT = 0,   /* 识别结果：payload = const face_result_t * */
-    FACE_EV_ENROLL_DONE,  /* 录入完成：payload = const face_enroll_result_t * */
-    FACE_EV_DELETE_DONE,  /* 删除完成：payload = const face_delete_result_t * */
-    FACE_EV_ERROR,        /* 后端异常：payload = const char * */
+    FACE_EV_DETECT = 0,   /* 识别结果：ev_face_event_t.res */
+    FACE_EV_ENROLL_DONE,  /* 录入完成：ev_face_event_t.enroll */
+    FACE_EV_DELETE_DONE,  /* 删除完成：ev_face_event_t.del */
+    FACE_EV_ERROR,        /* 后端异常：ev_face_event_t.msg */
 } face_event_t;
-
-typedef void (*face_event_cb_t)(face_event_t ev, const void * payload, void * user);
 
 /* ---------------- 能力 ---------------- */
 
@@ -89,11 +91,6 @@ safe_err_t face_service_deinit(void);
 
 /* 主线程周期驱动（20ms 级）。后端需要轮询硬件时在此处理。 */
 void face_service_tick(uint32_t now_ms);
-
-/* ---------------- 订阅 ---------------- */
-
-safe_err_t face_service_subscribe(face_event_cb_t cb, void * user);
-void       face_service_unsubscribe(face_event_cb_t cb, void * user);
 
 /* ---------------- 查询与控制 ---------------- */
 

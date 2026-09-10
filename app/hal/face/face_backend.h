@@ -39,7 +39,9 @@ const face_backend_t * face_backend_fake(void);
 const face_backend_t * face_backend_fm225(void);
 const face_backend_t * face_backend_none(void);
 
-/* 后端向服务层上报结果（只有后端实现可以调用） */
+/* 后端向服务层上报结果（只有后端实现可以调用）。
+ * 事件经 event_bus(EV_FACE_EVENT) 广播（步骤 3a）；FACE_EV_ERROR 的
+ * const char* 描述由 emit 拷进 ev_face_event_t.msg[64] 定长数组，无跨线程悬空。 */
 void face_service_emit(face_event_t ev, const void * payload);
 
 #ifdef __cplusplus

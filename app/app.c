@@ -10,6 +10,8 @@
 #include "app.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "core/config.h"
 #include "core/auth/auth_fsm.h"
@@ -30,14 +32,16 @@ static uint32_t s_tick_ms;
 
 /* 认证结果同时进总线与远程通道：
  * 走总线是为了让 UI 顶栏、告警等后续订阅方不用再改状态机；
- * 走远程通道是因为 MQTT 上报的契约来自需求文档，独立实现更清楚。 */
+ * 走远程通道是因为 MQTT 上报的契约来自需求文档，独立实现更清楚。
+ * 总线 payload 为 POD（evt/user/detail 定长数组，步骤 3a），栈变量即可。 */
 static void on_auth_event(const char * evt, const char * user, const char * detail, int res)
 {
     ev_auth_result_t p;
-    p.evt    = evt    ? evt    : "";
-    p.user   = user   ? user   : "";
-    p.detail = detail ? detail : "";
-    p.res    = res;
+    memset(&p, 0, sizeof(p));
+    strncpy(p.evt,    evt    ? evt    : "", sizeof(p.evt)    - 1);
+    strncpy(p.user,   user   ? user   : "", sizeof(p.user)   - 1);
+    strncpy(p.detail, detail ? detail : "", sizeof(p.detail) - 1);
+    p.res = res;
     event_bus_publish(EV_AUTH_RESULT, &p);
 
     rpc_publish_event(evt, user, detail, res);
@@ -67,6 +71,16 @@ void app_main(void)
     ui_init();
 
     event_bus_subscribe(EV_AUTH_RESULT, on_bus_auth_result, NULL);
+
+    /* 人脸通道接线（步骤 3a / R6）：init 绑定后端（构建期默认 SAFE_FACE_BACKEND，
+     * 环境变量 SAFE_FACE_BACKEND 运行时可覆盖，face_service_init 内部处理），
+     * start 打开采集。识别结果经 event_bus(EV_FACE_EVENT) 广播，
+     * auth_fsm 在自己的 init 里订阅。 */
+    const char * face_backend = getenv("SAFE_FACE_BACKEND");
+    if(face_backend == NULL || *face_backend == '\0') face_backend = NULL;   /* NULL = 构建期默认 */
+    face_service_init(face_backend);
+    face_service_start();
+
     auth_fsm_init();
     auth_fsm_set_event_cb(on_auth_event);
 

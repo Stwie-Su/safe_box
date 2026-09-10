@@ -4,23 +4,22 @@
  *
  * 业务层只跟本文件打交道，不直接碰后端。
  * 换硬件时改的是构建选项，不是这里的代码。
+ *
+ * 事件通道（步骤 3a）：自有订阅数组已拆除，结果统一经
+ * event_bus(EV_FACE_EVENT) 广播（POD payload ev_face_event_t，§5.18 两套机制收敛）。
+ * 当前 emit 均发生在主线程（后端 tick 由 app_tick_fast 驱动），走 publish 同步派发；
+ * 3b 引入 face 线程后，线程侧改调 event_bus_post。
  */
 
 #include "hal/hal_face.h"
 #include "face_backend.h"
+#include "core/event_bus.h"
 
 #include <string.h>
 
-#define MAX_FACE_SUBS   4
 #define ENROLL_TIMEOUT_MS  30000
 
-typedef struct {
-    face_event_cb_t cb;
-    void *          user;
-} face_sub_t;
-
 static const face_backend_t * s_backend = NULL;
-static face_sub_t             s_subs[MAX_FACE_SUBS];
 static face_result_t          s_last;
 static bool                   s_has_last;
 static bool                   s_running;
@@ -96,32 +95,6 @@ void face_service_tick(uint32_t now_ms)
             s_enroll_pending = false;
             face_enroll_result_t r = { -1, SAFE_ERR_TIMEOUT };
             face_service_emit(FACE_EV_ENROLL_DONE, &r);
-        }
-    }
-}
-
-safe_err_t face_service_subscribe(face_event_cb_t cb, void * user)
-{
-    if(cb == NULL) return SAFE_ERR_PARAM;
-    for(int i = 0; i < MAX_FACE_SUBS; i++) {
-        if(s_subs[i].cb == cb && s_subs[i].user == user) return SAFE_OK;
-    }
-    for(int i = 0; i < MAX_FACE_SUBS; i++) {
-        if(s_subs[i].cb == NULL) {
-            s_subs[i].cb   = cb;
-            s_subs[i].user = user;
-            return SAFE_OK;
-        }
-    }
-    return SAFE_ERR_NOMEM;
-}
-
-void face_service_unsubscribe(face_event_cb_t cb, void * user)
-{
-    for(int i = 0; i < MAX_FACE_SUBS; i++) {
-        if(s_subs[i].cb == cb && (user == NULL || s_subs[i].user == user)) {
-            s_subs[i].cb   = NULL;
-            s_subs[i].user = NULL;
         }
     }
 }
@@ -220,21 +193,38 @@ const char * face_reason_name(face_reason_t r)
     }
 }
 
+/* emit：后端结果的唯一出口，组装 ev_face_event_t 后经总线广播。
+ * FACE_EV_ERROR 的 payload 为 const char *（错误描述），拷进 msg[64] 截断。 */
 void face_service_emit(face_event_t ev, const void * payload)
 {
+    ev_face_event_t e;
+    memset(&e, 0, sizeof(e));
+    e.ev = ev;
+
     if(ev == FACE_EV_DETECT && payload != NULL) {
         s_last     = *(const face_result_t *)payload;
         s_last.seq = ++s_seq;
         s_has_last = true;
-        payload    = &s_last;       /* 订阅者拿到的是带序号的副本 */
+        e.res      = s_last;      /* 订阅者拿到的是带序号的副本 */
+    }
+    else if(ev == FACE_EV_ENROLL_DONE && payload != NULL) {
+        e.enroll = *(const face_enroll_result_t *)payload;
+    }
+    else if(ev == FACE_EV_DELETE_DONE && payload != NULL) {
+        e.del = *(const face_delete_result_t *)payload;
+    }
+    else if(ev == FACE_EV_ERROR && payload != NULL) {
+        const char * msg = (const char *)payload;
+        strncpy(e.msg, msg, sizeof(e.msg) - 1);   /* 定长截断，msg 已零初始化保 NUL 结尾 */
+    }
+    else {
+        return;   /* 未知事件类型或缺少 payload：不上总线 */
     }
 
     if(ev == FACE_EV_ENROLL_DONE || ev == FACE_EV_DELETE_DONE) {
         s_enroll_pending = false;
     }
 
-    for(int i = 0; i < MAX_FACE_SUBS; i++) {
-        if(s_subs[i].cb) s_subs[i].cb(ev, payload, s_subs[i].user);
-    }
+    event_bus_publish(EV_FACE_EVENT, &e);
 }
 
