@@ -54,11 +54,17 @@ static void take_shot(const char * path)
     if(getenv("SAFE_TEST_UNLOCK")) {
         auth_fsm_note_unlock("admin");
     }
-    /* 真实等 1200ms 让 status_timer_cb (500ms) + monitor_timer_cb (1000ms) 都跑一次 */
-    usleep(1200 * 1000);
-    /* 再让 lv_tick_inc + 多次 handler 处理其它（数字、动画） */
-    lv_tick_inc(100);
-    for(int i = 0; i < 5; i++) lv_timer_handler();
+    /* 等 1500ms 让 status_timer_cb (500ms) + monitor_timer_cb (1000ms) + FPS 滑窗 (500ms) 都跑。
+     * 期间每 30ms 推 lv_tick + handler 一次（不能只 usleep，否则 lvgl tick 不动 timer 不触发）。 */
+    {
+        const int step_ms = 30;
+        const int total_ms = 3000;
+        for(int waited = 0; waited < total_ms; waited += step_ms) {
+            usleep(step_ms * 1000);
+            lv_tick_inc(step_ms);
+            lv_timer_handler();
+        }
+    }
 
     lv_draw_buf_t * s = lv_snapshot_take(lv_screen_active(), LV_COLOR_FORMAT_RGB565);
     if(s == NULL) return;
