@@ -64,6 +64,11 @@ static pthread_mutex_t s_fb_lock = PTHREAD_MUTEX_INITIALIZER;
 /* io 锁：串起「在途采集临界区」与「request_stop 静默」，保证关 fd 前无采集在读 mmap。 */
 static pthread_mutex_t s_io_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* 「分辨率不符」告警去重：记住上次已告警的协商分辨率（初值 0 保证首次不符必打印），
+ * 仅当本次协商值与上次不同才再打印一次，避免每帧刷屏。仅本线程（采集临界区内）读写。 */
+static unsigned s_warn_w = 0;
+static unsigned s_warn_h = 0;
+
 /* ---------------- 采集 ---------------- */
 
 /* 取一帧：camera 后端内部完成 DQBUF(只转最新) + YUYV->RGB565；
@@ -77,15 +82,32 @@ static void face_capture_once(void)
         memset(&info, 0, sizeof(info));
         safe_err_t e = hal_camera_frame(&src, &info);
         if (e == SAFE_OK && src != NULL) {
-            int slot = s_fb_pub ^ 1;
-            memcpy(s_fb[slot], src, FB_BYTES);   /* 写非发布块，不打断消费者 */
-            hal_camera_release_frame();
+            /* src 的实际有效长度 = info.width*info.height*2，而 FB_BYTES 是编译期定长
+             * （预览缓冲）。仅当驱动协商出的分辨率与预览缓冲一致时才拷贝，否则按定长
+             * FB_BYTES 读取会越过 src 末端（读穿 mmap），故必须前置校验。 */
+            if (info.width == FACE_THREAD_PREVIEW_W &&
+                info.height == FACE_THREAD_PREVIEW_H) {
+                int slot = s_fb_pub ^ 1;
+                memcpy(s_fb[slot], src, FB_BYTES);   /* 写非发布块，不打断消费者 */
+                hal_camera_release_frame();
 
-            pthread_mutex_lock(&s_fb_lock);
-            s_fb_pub  = slot;
-            s_fb_info = info;
-            s_fb_seq++;
-            pthread_mutex_unlock(&s_fb_lock);
+                pthread_mutex_lock(&s_fb_lock);
+                s_fb_pub  = slot;
+                s_fb_info = info;
+                s_fb_seq++;
+                pthread_mutex_unlock(&s_fb_lock);
+            } else {
+                /* 不符：先按 §5.13 契约释放帧（不释放后端会停更），丢弃该帧（不拷贝，
+                 * 杜绝越界读），并限频告警一次——仅在分辨率较上次记录变化时打印。 */
+                hal_camera_release_frame();
+                if (info.width != s_warn_w || info.height != s_warn_h) {
+                    s_warn_w = info.width;
+                    s_warn_h = info.height;
+                    printf("[FACE-THREAD] 协商分辨率 %ux%u 与预览缓冲 %dx%d 不符，丢弃该帧\n",
+                           (unsigned)info.width, (unsigned)info.height,
+                           (unsigned)FACE_THREAD_PREVIEW_W, (unsigned)FACE_THREAD_PREVIEW_H);
+                }
+            }
         }
     }
     pthread_mutex_unlock(&s_io_lock);
@@ -205,3 +227,5 @@ bool face_thread_get_preview(uint16_t * dst, hal_camera_frame_info_t * info)
     pthread_mutex_unlock(&s_fb_lock);
     return ok;
 }
+
+
