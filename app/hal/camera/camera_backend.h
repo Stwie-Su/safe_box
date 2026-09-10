@@ -14,4 +14,5 @@ typedef struct {
     safe_err_t (*stop)(void);
     safe_err_t (*frame)(const uint8_t ** rgb565, hal_camera_frame_info_t * info);
     void       (*release)(void);
+    int        (*fd)(void);   /* 采集 fd（face 线程 poll 用，§5.13）；无则返回 -1 */
 } hal_camera_backend_t;

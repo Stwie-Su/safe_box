@@ -27,6 +27,11 @@ static safe_err_t null_frame(const uint8_t ** rgb565, hal_camera_frame_info_t * 
     return SAFE_ERR_UNSUP;
 }
 
+static int null_fd(void)
+{
+    return -1;   /* 无采集 fd：face 线程 poll 时跳过 */
+}
+
 const hal_camera_backend_t hal_camera_backend_null = {
     "null",
     null_ok,
@@ -35,4 +40,5 @@ const hal_camera_backend_t hal_camera_backend_null = {
     null_ok,
     null_frame,
     NULL,
+    null_fd,
 };

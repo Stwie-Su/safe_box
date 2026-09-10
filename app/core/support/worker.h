@@ -32,6 +32,10 @@ void worker_post(worker_fn_t fn, void * arg, worker_done_t done);
 /* 主线程轮询：把已完成的作业逐个派发（done 回调）。应在 LVGL 定时器里周期性调用。 */
 void worker_poll(void);
 
+/* 退出清理（规约 §5.7 / §3.2）：置内部退出标志、唤醒 worker、pthread_join。
+ * 由 app_shutdown 调用，保证不丢在途作业。幂等。 */
+void worker_shutdown(void);
+
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif

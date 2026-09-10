@@ -34,6 +34,9 @@ safe_err_t hal_camera_stop(void);
 safe_err_t hal_camera_frame(const uint8_t ** rgb565, hal_camera_frame_info_t * info);
 void       hal_camera_release_frame(void);
 
+/* 采集 fd，供 face 线程 poll() 复用（规约 §3.4 / §5.13）。无相机 / 未就绪返回 -1。 */
+int        hal_camera_fd(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -37,6 +37,9 @@ static job_t * g_done_head,   * g_done_tail;
 /* 线程退出标志位 (true 时通知后台线程退出循环) */
 static bool    g_stop = false;
 
+/* 是否已启动（防止重复 init / 未 init 就 shutdown） */
+static bool    g_inited = false;
+
 /**
  * @brief 后台工作线程的主循环函数
  * 
@@ -94,7 +97,30 @@ static void * worker_main(void * p)
  */
 void worker_init(void)
 {
+    if (g_inited) return;
     pthread_create(&g_thread, NULL, worker_main, NULL);
+    g_inited = true;
+}
+
+/**
+ * @brief 退出后台 worker（规约 §5.7 / §3.2）
+ *
+ * 置退出标志、唤醒阻塞在 cond_wait 的 worker 线程，再 pthread_join。
+ * worker_main 会先把 pending 队列里在途作业处理完再退出（不丢作业）。
+ * 幂等：未初始化或已退出时为空操作。
+ */
+void worker_shutdown(void)
+{
+    if (!g_inited) return;
+
+    pthread_mutex_lock(&g_lock);
+    g_stop = true;
+    pthread_cond_signal(&g_cond);   /* 唤醒可能阻塞在 cond_wait 的 worker */
+    pthread_mutex_unlock(&g_lock);
+
+    pthread_join(g_thread, NULL);   /* 等 worker 清空在途作业并退出 */
+    g_inited = false;
+    g_stop   = false;
 }
 
 /**

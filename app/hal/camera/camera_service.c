@@ -98,3 +98,9 @@ void hal_camera_release_frame(void)
     if (s_backend->release) s_backend->release();
 }
 
+/* 采集 fd（规约 §3.4 / §5.13）：供 face 线程 poll() 复用。无相机 / 未初始化返回 -1。 */
+int hal_camera_fd(void)
+{
+    if (!s_inited) return -1;
+    return s_backend->fd ? s_backend->fd() : -1;
+}

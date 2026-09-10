@@ -5,6 +5,7 @@
 
 set(SAFE_HAL_SRC
     face/face_service.c
+    face/face_thread.c
     face/backend_fake.c
     face/backend_fm225.c
     face/backend_none.c
@@ -27,4 +28,3 @@ target_link_libraries(safe_hal PUBLIC safe_thirdparty Threads::Threads)
 if(WERROR)
     target_compile_options(safe_hal PRIVATE -Werror)
 endif()
-

@@ -225,6 +225,7 @@ void face_service_emit(face_event_t ev, const void * payload)
         s_enroll_pending = false;
     }
 
-    event_bus_publish(EV_FACE_EVENT, &e);
+    /* 统一走 post 入队：脸结果可能来自 face 线程（3c），由主线程 event_bus_pump()
+     * 派发（规约 §3.4）；主线程调用亦安全，仅延迟一拍。payload 为 POD 按值拷贝。 */
+    event_bus_post(EV_FACE_EVENT, &e, sizeof(e));
 }
-

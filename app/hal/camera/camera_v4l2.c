@@ -264,24 +264,37 @@ static void yuyv_row_to_565(const uint8_t * src, uint16_t * dst, int pixels)
 }
 
 /* 取一帧 RGB565。无新帧（EAGAIN）返回 SAFE_ERR_BUSY；
- * 上一帧未 release 返回 SAFE_ERR_BUSY（§5.13 契约：漏调 release 后端停更）。 */
+ * 上一帧未 release 返回 SAFE_ERR_BUSY（§5.13 契约：漏调 release 后端停更）。
+ *
+ * 只转最新帧（规约 §3.4 / b2）：把驱动队列里已就绪的缓冲全部取出，除最后一帧外
+ * 一律直接 QBUF 还回（不转换），只对最后一帧做 YUYV->RGB565——避免为已过期的帧做
+ * 无用转换而拖慢串口响应。转换只在 face 线程被调用（步骤 3b 起）。 */
 static safe_err_t v4l2_frame(const uint8_t ** rgb565, hal_camera_frame_info_t * info)
 {
     if (!s_streaming || s_out == NULL) return SAFE_ERR_STATE;
     if (s_held) return SAFE_ERR_BUSY;
 
-    struct v4l2_buffer b;
-    memset(&b, 0, sizeof(b));
-    b.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    b.memory = V4L2_MEMORY_MMAP;
-    if (xioctl(s_fd, VIDIOC_DQBUF, &b) < 0) {
-        if (errno == EAGAIN) return SAFE_ERR_BUSY;   /* 摄像头还没出下一帧 */
-        printf("[CAMERA] DQBUF 失败: %s\n", strerror(errno));
-        return SAFE_ERR_FAIL;
+    struct v4l2_buffer latest;
+    memset(&latest, 0, sizeof(latest));
+    bool got = false;
+    for (;;) {
+        struct v4l2_buffer b;
+        memset(&b, 0, sizeof(b));
+        b.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        b.memory = V4L2_MEMORY_MMAP;
+        if (xioctl(s_fd, VIDIOC_DQBUF, &b) < 0) {
+            if (errno == EAGAIN) break;               /* 队列已取空 */
+            printf("[CAMERA] DQBUF 失败: %s\n", strerror(errno));
+            return SAFE_ERR_FAIL;
+        }
+        if (got) xioctl(s_fd, VIDIOC_QBUF, &latest);  /* 旧帧直接还回，不转换 */
+        latest = b;
+        got    = true;
     }
+    if (!got) return SAFE_ERR_BUSY;                   /* 摄像头还没出下一帧 */
 
-    /* 转换：逐行处理，行内按宏像素展开（无浮点、无除法） */
-    const uint8_t * src = (const uint8_t *)s_bufs[b.index].start;
+    /* 只对最新一帧做转换：逐行处理，行内按宏像素展开（无浮点、无除法） */
+    const uint8_t * src = (const uint8_t *)s_bufs[latest.index].start;
     uint16_t * dst = (uint16_t *)s_out;
     for (uint32_t y = 0; y < s_cap_h; y++) {
         yuyv_row_to_565(src + (size_t)y * s_cap_w * 2,
@@ -289,7 +302,7 @@ static safe_err_t v4l2_frame(const uint8_t ** rgb565, hal_camera_frame_info_t * 
                         (int)s_cap_w);
     }
 
-    xioctl(s_fd, VIDIOC_QBUF, &b);   /* 立即还回驱动，转完即还 */
+    xioctl(s_fd, VIDIOC_QBUF, &latest);   /* 立即还回驱动，转完即还 */
 
     if (rgb565) *rgb565 = s_out;
     if (info) {
@@ -307,6 +320,12 @@ static void v4l2_release(void)
     s_held = false;
 }
 
+/* 采集 fd：供 face 线程 poll() 复用（§5.13）。未打开时返回 -1。 */
+static int v4l2_fd(void)
+{
+    return s_fd;
+}
+
 const hal_camera_backend_t hal_camera_backend_v4l2 = {
     "v4l2",
     v4l2_init,
@@ -315,5 +334,5 @@ const hal_camera_backend_t hal_camera_backend_v4l2 = {
     v4l2_stop,
     v4l2_frame,
     v4l2_release,
+    v4l2_fd,
 };
-

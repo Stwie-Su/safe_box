@@ -22,6 +22,7 @@
 #include "core/support/worker.h"
 #include "hal/hal_actuator.h"
 #include "hal/hal_camera.h"
+#include "hal/face/face_thread.h"
 #include "hal/hal_face.h"
 #include "hal/hal_time.h"
 #include "platform/platform.h"
@@ -68,6 +69,11 @@ void app_main(void)
     hal_camera_init();
     hal_camera_start(320, 240);
 
+    /* face 线程（步骤 3b，规约 §3.4）：由它 poll 相机 fd 取帧 + 转换（只转最新帧），
+     * 主线程不再直接拉帧（page_face 改读本线程的双帧缓冲）。
+     * UART fd 由 3c 的 fm225 后端经 face_thread_set_uart_fd() 在 start 前接入。 */
+    face_thread_start();
+
     ui_init();
 
     event_bus_subscribe(EV_AUTH_RESULT, on_bus_auth_result, NULL);
@@ -99,6 +105,8 @@ void app_tick_fast(void)
     worker_poll();
     event_bus_pump();
     rpc_poll();
+    /* face_service_tick 保留在主线程作后端驱动（b3 取简，理由见 face_thread.c 头注释）；
+     * 相机采集与格式转换已移入 face 线程，主线程不再做帧转换。 */
     face_service_tick(s_tick_ms);
 }
 
@@ -114,9 +122,24 @@ void app_tick_periodic(void)
 
 void app_shutdown(void)
 {
-    hal_camera_stop();
-    hal_camera_deinit();
-    face_service_deinit();
-    mqtt_stop();
+    /* 优雅退出链（规约 §3.2 / b4 / b5）。退出顺序：
+     * 先 STREAMOFF 停流 -> 再 close(fd) -> 最后 pthread_join，避免 DQBUF 把线程卡住。 */
+    face_thread_request_stop();   /* 置退出标志 + STREAMOFF 停流 + 静默在途采集 */
+    hal_camera_stop();            /* 幂等：已 STREAMOFF 则 no-op */
+    hal_camera_deinit();          /* munmap + close(fd) */
+    face_thread_join();           /* 回收 face 线程（线程数回落） */
+
+    face_service_stop();
+    face_service_deinit();        /* §3.2：人脸服务收尾 */
+
+    mqtt_stop();                  /* §3.2：远程通道 */
+
+    worker_shutdown();            /* §3.2：置退出标志 + 唤醒 + pthread_join，不丢在途作业 */
+
+    /* §3.2：store 脏数据 flush。当前 store 为同步原子落盘（R1，无内存缓存/脏标记，
+     * R4/R5 未落地），凭据与日志每次落盘均走 tmp->fsync->rename 原子替换，无需额外 flush。 */
+
+    platform_shutdown();          /* §3.2：平台收尾 */
 }
+
 

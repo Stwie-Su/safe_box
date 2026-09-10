@@ -14,7 +14,7 @@
  *     运算，无浮点），得到最大 4:3 矩形，居中放置，四周填面板底色。
  *     满足「图像尽可能大」+「人脸在正中心」+「别拉伸比例」三个要求。
  *   - **双 FPS 分别显示**：
- *       · 视频 fps = hal_camera_frame() 成功返回的帧数（摄像头真实出帧率）
+ *       · 视频 fps = face_thread_get_preview() 成功取到的帧数（摄像头真实出帧率）
  *       · UI   fps = LV_EVENT_REFR_READY 事件计数（LVGL 真实渲染帧率）
  *     二者 500ms 滑窗独立统计，右上角徽章两行显示。
  *   - **性能优化（流畅）**：预计算 x/y 映射表（rebuild_maps，SIZE_CHANGED 时
@@ -38,6 +38,7 @@
 #include "ui/icons.h"
 #include "core/auth/auth_fsm.h"
 #include "hal/hal_camera.h"
+#include "hal/face/face_thread.h"
 #include "hal/hal_time.h"
 #include <stdlib.h>
 #include <string.h>
@@ -81,7 +82,7 @@ static lv_obj_t * s_corners[CORNER_OBJ_COUNT];
 
 /* ---- 双 FPS 计数（各自 500ms 滑窗，独立统计） ---- */
 static uint32_t s_fps_win_start;      /* hal_time_ms() 窗口起点（ms） */
-static uint32_t s_video_frames;       /* 窗口内 hal_camera_frame() 成功帧数 */
+static uint32_t s_video_frames;       /* 窗口内 face_thread_get_preview() 成功帧数 */
 static uint32_t s_ui_frames;          /* 窗口内 LV_EVENT_REFR_READY 计数 */
 static int      s_video_fps;          /* 上次报告的视频 fps */
 static int      s_ui_fps;             /* 上次报告的 UI fps */
@@ -517,12 +518,12 @@ static void frame_timer_cb(lv_timer_t * t)
     if (!s_canvas || s_canvas_w <= 0 || s_canvas_h <= 0) return;
     if (s_vid_w <= 0 || s_vid_h <= 0) return;
 
-    const uint8_t * frame = NULL;
+    /* 预览帧由 face 线程采集 + 转换（步骤 3b / 规约 §3.4），这里只取最新一帧渲染；
+     * 本回调运行在主线程，取回后可直接操作 LVGL，不跨线程。无新帧时保持上一帧。
+     * 不再直接调 hal_camera_frame()/release()——相机缓冲归 face 线程所有。 */
     hal_camera_frame_info_t info;
-    safe_err_t e = hal_camera_frame(&frame, &info);
-    if (e == SAFE_OK && frame != NULL) {
-        /* 1. 拷贝 320×240 源到临时缓冲 */
-        memcpy(s_cap_buf, frame, sizeof(s_cap_buf));
+    if (face_thread_get_preview(s_cap_buf, &info)) {
+        /* 1. 帧已在 s_cap_buf（face 线程双帧缓冲拷贝而来），无需再拷贝 */
 
         /* 2. 最近邻缩放 320×240 → 居中 4:3 矩形（查表，绘制期零除法） */
         int32_t dst_stride = s_canvas_w;
@@ -560,9 +561,7 @@ static void frame_timer_cb(lv_timer_t * t)
             for (int32_t x = s_vid_x + s_vid_w; x < dst_stride; x++) dst_row[x] = bg565;
         }
 
-        hal_camera_release_frame();
-
-        /* 3. 统计视频帧 */
+        /* 3. 统计视频帧（face 线程成功取帧且被主线程消费的计数） */
         s_video_frames++;
 
         /* 4. 隐藏占位 */
@@ -578,15 +577,9 @@ static void frame_timer_cb(lv_timer_t * t)
         a.y2 = a.y1 + s_vid_h - 1;
         lv_obj_invalidate_area(s_canvas, &a);
     }
-    else if (e == SAFE_ERR_BUSY) {
-        /* 摄像头帧率落后于拉帧周期：保持上一帧，正常现象 */
-    }
-    else {
-        /* 未启动 / 后端不支持：保持占位文字可见 */
-        hal_camera_release_frame();
-    }
+    /* 无新帧（face 线程还没产出 / 无摄像头）时保持上一帧或占位文字。 */
 
-    /* 无论有无视频帧，都按窗口推进 FPS 标签（UI fps 需要持续更新） */
+    /* 无论有无新帧，都按窗口推进 FPS 标签（UI fps 需要持续更新） */
     fps_label_update_if_due();
 }
 
