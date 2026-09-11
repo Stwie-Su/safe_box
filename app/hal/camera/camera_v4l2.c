@@ -12,7 +12,8 @@
  *  4. 本步（步骤 2）转换发生在调用方线程（LVGL 主循环 20ms tick）；
  *     步骤 3 引入 face 线程后由 face 线程 poll 该 fd（§3.4）。
  *
- * 设备：默认 /dev/video0，可用环境变量 SAFE_CAMERA_DEV 覆盖。
+ * 设备：自动探测 /dev/video0..15 中第一个支持采集 + 流式的节点（板子上 video0 常是 PxP 这类
+ *       非采集节点，真摄像头落在 video1+）；可用环境变量 SAFE_CAMERA_DEV 显式覆盖。
  * 采集帧率：S_PARM 请求 30fps，驱动按能力收敛（实测 UVC 摄像头 YUYV@320x240 为 20fps）。
  */
 
@@ -94,36 +95,77 @@ static int xioctl(int fd, unsigned long req, void * arg)
     return r;
 }
 
+/* 是否为「可采集 + 支持流式」的摄像头。
+ * 现代驱动在 capabilities 置 V4L2_CAP_DEVICE_CAPS 时必须看 device_caps（V4L2 约定），
+ * 否则退回 capabilities。板子上的 PxP 是 M2M 图像处理节点，只有 VIDEO_OUTPUT，
+ * 无 VIDEO_CAPTURE，会被正确排除。 */
+static bool is_capture_dev(const struct v4l2_capability * cap)
+{
+    uint32_t caps = (cap->capabilities & V4L2_CAP_DEVICE_CAPS)
+                  ? cap->device_caps : cap->capabilities;
+    return (caps & V4L2_CAP_VIDEO_CAPTURE) && (caps & V4L2_CAP_STREAMING);
+}
+
+/* 选设备：SAFE_CAMERA_DEV 显式指定优先；否则按 /dev/video0..15 顺序探测，
+ * 取**第一个真正支持采集**的节点。
+ * 为什么必须探测：开发板上 /dev/video0 往往是 PxP / M2M 这类非采集节点，
+ * USB 摄像头插上后落在 video1+，写死 video0 的表现就是「人脸页没画面」。 */
+static int open_camera_dev(char * path_out, size_t path_cap)
+{
+    const char * dev = getenv("SAFE_CAMERA_DEV");
+    if (dev && *dev) {
+        snprintf(path_out, path_cap, "%s", dev);
+        return open(path_out, O_RDWR | O_NONBLOCK);
+    }
+
+    for (int i = 0; i < 16; i++) {
+        char p[CAM_DEV_PATH_MAX];
+        snprintf(p, sizeof(p), "/dev/video%d", i);
+        int fd = open(p, O_RDWR | O_NONBLOCK);
+        if (fd < 0) continue;                       /* 节点不存在，换下一个 */
+
+        struct v4l2_capability cap;
+        if (xioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) { close(fd); continue; }
+        if (!is_capture_dev(&cap)) {
+            printf("[CAMERA] 跳过 %s（%s，非采集设备 cap=0x%x）\n",
+                   p, cap.card, cap.capabilities);
+            close(fd);
+            continue;
+        }
+        snprintf(path_out, path_cap, "%s", p);
+        return fd;
+    }
+    path_out[0] = '\0';
+    return -1;
+}
+
 static safe_err_t v4l2_init(void)
 {
     /* 打开放在 init：fd 生命周期 = init..deinit；start/stop 只控流。
      * 设备不存在不视为致命——camera_service 会降级到 null 后端。 */
     if (s_fd >= 0) return SAFE_OK;
 
-    const char * dev = getenv("SAFE_CAMERA_DEV");
-    char path[CAM_DEV_PATH_MAX];
-    snprintf(path, sizeof(path), "%s", (dev && *dev) ? dev : "/dev/video0");
-
     build_tables();
-    s_fd = open(path, O_RDWR | O_NONBLOCK);
+
+    char path[CAM_DEV_PATH_MAX];
+    s_fd = open_camera_dev(path, sizeof(path));
     if (s_fd < 0) {
-        printf("[CAMERA] 打开 %s 失败: %s\n", path, strerror(errno));
+        printf("[CAMERA] 未找到支持采集的摄像头（可用 SAFE_CAMERA_DEV 指定）\n");
         return SAFE_ERR_FAIL;
     }
 
     struct v4l2_capability cap;
     if (xioctl(s_fd, VIDIOC_QUERYCAP, &cap) < 0) {
-        printf("[CAMERA] QUERYCAP 失败\n");
+        printf("[CAMERA] %s QUERYCAP 失败\n", path);
         close(s_fd); s_fd = -1;
         return SAFE_ERR_FAIL;
     }
-    if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE) ||
-        !(cap.capabilities & V4L2_CAP_STREAMING)) {
+    if (!is_capture_dev(&cap)) {          /* 仅在显式指定了一个非采集节点时走到 */
         printf("[CAMERA] %s 不支持采集流（cap=0x%x）\n", path, cap.capabilities);
         close(s_fd); s_fd = -1;
         return SAFE_ERR_UNSUP;
     }
-    printf("[CAMERA] %s: %s\n", path, cap.card);
+    printf("[CAMERA] 选中 %s: %s\n", path, cap.card);
     return SAFE_OK;
 }
 
