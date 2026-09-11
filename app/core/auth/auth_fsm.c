@@ -430,3 +430,10 @@ int auth_fsm_lock_remaining(void)
     return left < 0 ? 0 : left;
 }
 
+/* 设备级连续失败计数（只读，规约 §5.2 / UI 现代化 ui1）。
+ * UI 只在本接口上展示「未匹配（n/face_otp_after）」，不得据此改状态。 */
+int auth_fsm_fail_streak(void)
+{
+    return s_fsm.fail_streak;
+}
+

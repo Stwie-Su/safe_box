@@ -52,6 +52,12 @@ face_reason_t    auth_fsm_last_reason(void);       /* 取代旧 last_score（FM2
 const char *     auth_fsm_pending_user(void);
 int              auth_fsm_lock_remaining(void);    /* 0 = 无锁定 */
 
+/* 设备级连续失败计数（只读查询，规约 §5.2）。
+ * UI 现代化 ui1 新增：横幅「未匹配（n/face_otp_after）」需要展示当前连败数，
+ * 而 fail_streak 原为 auth_fsm.c 内部静态、未暴露。本接口只读取，不修改状态；
+ * 成功开锁与进入 LOCKOUT 时该计数由状态机自行清零。 */
+int              auth_fsm_fail_streak(void);
+
 void auth_fsm_submit_face(int32_t face_id, face_reason_t reason);  /* 注入一次人脸结果（HAL→FSM） */
 void auth_fsm_submit_pin(const char * pin);            /* PIN 通道入口（主页键盘） */
 void auth_fsm_submit_otp(const char * code);           /* 动态码页提交 */

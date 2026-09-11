@@ -229,6 +229,30 @@ int main(void)
     auth_fsm_submit_pin("0000");
     CHECK(auth_fsm_state() == FSM_DENY);
 
+    /* ---- 1.10 auth_fsm_fail_streak() 只读连败计数（UI 现代化 ui1 / 规约 §5.2） ----
+     * 横幅「未匹配（n/face_otp_after）」直接读它，接口必须与实际计数一致，
+     * 且成功开锁与进入 LOCKOUT 后都归零。 */
+    fsm_reset();
+    CHECK(auth_fsm_fail_streak() == 0);
+    auth_fsm_submit_face(-1, FACE_RES_NO_MATCH);
+    CHECK(auth_fsm_fail_streak() == 1);
+    auth_fsm_submit_face(-1, FACE_RES_NO_MATCH);
+    CHECK(auth_fsm_fail_streak() == 2);
+    auth_fsm_submit_face(7, FACE_RES_OK);           /* 成功开锁 → 连败清零 */
+    CHECK(auth_fsm_fail_streak() == 0);
+
+    fsm_reset();
+    for(int i = 0; i < 5; i++) auth_fsm_submit_face(-1, FACE_RES_NO_MATCH);
+    CHECK(auth_fsm_state() == FSM_LOCKOUT);         /* 达 max_failed 进锁定 */
+    CHECK(auth_fsm_fail_streak() == 0);             /* 进入锁定时同时清零 */
+    CHECK(auth_fsm_lock_remaining() > 0);
+
+    /* TIMEOUT / ERROR 不计数（与 1.6 同源，这里专门锁住 fail_streak 不被污染） */
+    fsm_reset();
+    auth_fsm_submit_face(7, FACE_RES_TIMEOUT);
+    auth_fsm_submit_face(7, FACE_RES_ERROR);
+    CHECK(auth_fsm_fail_streak() == 0);
+
     TEST_RESULT();
 }
 

@@ -35,6 +35,7 @@
 #include "ui/ui.h"
 #include "ui/theme.h"
 #include "ui/ui_scale.h"
+#include "ui/ui_anim.h"
 #include "ui/icons.h"
 #include "core/auth/auth_fsm.h"
 #include "hal/hal_camera.h"
@@ -80,6 +81,19 @@ static uint16_t * s_map_y = NULL;     /* s_vid_h 个，值域 [0, CAP_H) */
 #define CORNER_OBJ_COUNT 8
 static lv_obj_t * s_corners[CORNER_OBJ_COUNT];
 
+/* ---- 扫描框状态染色（UI 现代化 spec §3 后半） ----
+ * 状态 → 主题色角色查表；FAIL 为瞬时反馈，UI_ANIM_SCAN_FAIL_MS 后自动回 IDLE。
+ * s_scan_revert_timer 是一次性 timer 的句柄，用完即清（LVGL 不会自动置空）。 */
+static page_face_scan_t s_scan_state = PAGE_FACE_SCAN_IDLE;
+static lv_timer_t * s_scan_revert_timer = NULL;
+
+static const theme_role_t SCAN_ROLE[PAGE_FACE_SCAN_COUNT] = {
+    TH_ACCENT,   /* PAGE_FACE_SCAN_IDLE */
+    TH_OK,       /* PAGE_FACE_SCAN_OK   */
+    TH_DANGER,   /* PAGE_FACE_SCAN_FAIL */
+    TH_WARN,     /* PAGE_FACE_SCAN_WARN */
+};
+
 /* ---- 双 FPS 计数（各自 500ms 滑窗，独立统计） ---- */
 static uint32_t s_fps_win_start;      /* hal_time_ms() 窗口起点（ms） */
 static uint32_t s_video_frames;       /* 窗口内 face_thread_get_preview() 成功帧数 */
@@ -107,6 +121,78 @@ static void rebuild_maps(void);
 static void reposition_corners_and_beam(int32_t w, int32_t h);
 static void fps_label_update_if_due(void);
 static void ui_refr_ready_cb(lv_event_t * e);
+/* 扫描框状态染色（spec §3 后半） */
+static void scan_apply_color(void);
+static void scan_revert_timer_cb(lv_timer_t * t);
+static void scan_arm_revert(uint32_t ms);
+static void scan_refresh_theme(int idx);
+
+/* ================================================================
+ *  扫描框状态染色（UI 现代化 spec §3 后半）
+ *  四角扫描框（8 段）+ 扫描光带统一按当前状态取主题色。
+ *  实现要点：
+ *   - 枚举 + 查表（SCAN_ROLE），不用 if-else 嵌套；
+ *   - FAIL 是瞬时反馈：一次性 lv_timer 到点后自动回 IDLE，避免红色长期滞留；
+ *   - 主题切换时按当前状态重染色（挂在 theme_change_cb 链上）。
+ *  性能：只改 9 个对象的 bg_color，无动画、无堆分配。
+ * ================================================================ */
+
+/* 按当前状态把颜色刷到 8 个角 + 光带 */
+static void scan_apply_color(void)
+{
+    lv_color_t c = theme_color(SCAN_ROLE[s_scan_state]);
+    for (int i = 0; i < CORNER_OBJ_COUNT; i++) {
+        if (s_corners[i]) lv_obj_set_style_bg_color(s_corners[i], c, 0);
+    }
+    if (s_scan_beam) lv_obj_set_style_bg_color(s_scan_beam, c, 0);
+}
+
+/* FAIL 态自动回 IDLE（一次性 timer 到点） */
+static void scan_revert_timer_cb(lv_timer_t * t)
+{
+    (void)t;
+    s_scan_revert_timer = NULL;
+    if (s_scan_state == PAGE_FACE_SCAN_FAIL) {
+        s_scan_state = PAGE_FACE_SCAN_IDLE;
+        scan_apply_color();
+    }
+}
+
+/* 装填/撤销自动回弹 timer。ms==0 表示不回弹（OK/WARN/IDLE）。 */
+static void scan_arm_revert(uint32_t ms)
+{
+    if (s_scan_revert_timer != NULL) {
+        lv_timer_delete(s_scan_revert_timer);
+        s_scan_revert_timer = NULL;
+    }
+    if (ms == 0) return;
+    s_scan_revert_timer = lv_timer_create(scan_revert_timer_cb, ms, NULL);
+    if (s_scan_revert_timer != NULL) {
+        lv_timer_set_repeat_count(s_scan_revert_timer, 1);
+    }
+}
+
+/* 主题切换：按当前状态重新取色（本地颜色覆盖不会随主题自动变） */
+static void scan_refresh_theme(int idx)
+{
+    (void)idx;
+    scan_apply_color();
+}
+
+void page_face_set_scan_state(page_face_scan_t st)
+{
+    if (st >= PAGE_FACE_SCAN_COUNT) return;
+    s_scan_state = st;
+    scan_apply_color();
+    /* 只有 FAIL 需要自动回弹：它是「刚才那次没过」的瞬时反馈，
+     * 不能让红色一直挂在扫描框上误导用户（spec §3：FAIL 态 600ms 后回 IDLE）。 */
+    scan_arm_revert((st == PAGE_FACE_SCAN_FAIL) ? UI_ANIM_SCAN_FAIL_MS : 0);
+}
+
+page_face_scan_t page_face_scan_state(void)
+{
+    return s_scan_state;
+}
 
 /**
  * @brief 在指定位置画一个填充矩形（L 形角的一段），返回对象指针便于 SIZE_CHANGED 重定位
@@ -322,6 +408,9 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_display_add_event_cb(lv_display_get_default(), ui_refr_ready_cb,
                             LV_EVENT_REFR_READY, NULL);
 
+    /* 扫描框染色随主题切换重刷（第 3 个主题回调，上限 4） */
+    theme_register_change_cb(scan_refresh_theme);
+
     /* 拉帧定时器（20fps）：回调内部判断页面可见性，隐藏时空转不拉帧 */
     if (s_frame_timer == NULL) {
         s_frame_timer = lv_timer_create(frame_timer_cb, PREVIEW_MS, NULL);
@@ -489,6 +578,9 @@ static void reposition_corners_and_beam(int32_t w, int32_t h)
 
     /* 占位文字重新居中（panel 缩放后位置失效） */
     if (s_ph_label) lv_obj_center(s_ph_label);
+
+    /* 重定位不影响颜色，但画布重建后统一按当前状态刷一次，保证状态色不丢 */
+    scan_apply_color();
 }
 
 /* ===== 双 FPS 窗口更新：每 500ms 各算一次，更新角标 ===== */
@@ -594,6 +686,8 @@ static void back_cb(lv_event_t * e)
 {
     (void)e;
     lv_anim_delete(s_scan_beam, NULL);
+    /* 离开人脸页：状态复位（否则下次进来还会挂着上一次的红/绿） */
+    page_face_set_scan_state(PAGE_FACE_SCAN_IDLE);
     ui_switch_page(PAGE_HOME);
 }
 

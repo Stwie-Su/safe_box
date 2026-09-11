@@ -84,12 +84,16 @@ void app_main(void)
      * 与 FM225 UART fd（fm225 后端在上面 start 时已接入），主线程不再直接拉帧。 */
     face_thread_start();
 
+    /* 状态机必须在界面之前初始化（UI 现代化 ui1）：
+     * auth_fsm 与 ui_feedback 都订阅 EV_FACE_EVENT，总线按订阅顺序派发。
+     * 先让 core（auth_fsm）消费并 bump fail_streak，UI 后读到的才是「本次失败后」
+     * 的连败数；反过来会让横幅首帧显示 0/3。auth_fsm_init 不清 ui hook，安全。 */
+    auth_fsm_init();
+    auth_fsm_set_event_cb(on_auth_event);
+
     ui_init();
 
     event_bus_subscribe(EV_AUTH_RESULT, on_bus_auth_result, NULL);
-
-    auth_fsm_init();
-    auth_fsm_set_event_cb(on_auth_event);
 
     const app_config_t * cfg = app_config();
     if(cfg->mqtt_enabled) {

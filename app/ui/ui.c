@@ -20,6 +20,8 @@
 #include "core/remote/mqtt_client.h" /* mqtt_is_connected：顶栏连接状态点 */
 #include "ui/theme.h"        /* st_screen, theme_init */
 #include "ui/ui_scale.h"     /* SX/SY 自适应缩放 */
+#include "ui/ui_anim.h"      /* 动效常量集中地（UI 现代化 spec §5.2） */
+#include "ui/ui_feedback.h"  /* 反馈中枢：横幅（spec §1） */
 #include "ui/icons.h"        /* 矢量图标库 */
 #include "ui/pages/page_monitor.h"
 #include "ui/pages/page_logs.h"
@@ -73,6 +75,7 @@ static const page_desc_t s_pages[PAGE_COUNT] = {
 
 /* --- 全局 UI 控件句柄 --- */
 static lv_obj_t * s_content;                 // 中间内容区的根容器
+static lv_obj_t * s_overlay;                 // 横幅浮层（常驻、透明、不挡触摸；ui_feedback 的宿主）
 static lv_obj_t * s_page_roots[PAGE_COUNT];  // 存放所有初始化后的页面根节点（为了实现显隐切换）
 /* 底栏 4 个 tab 按钮对象 + 它们的图标 + 文字（换主题时刷新） */
 static lv_obj_t * s_tab_btn[4];
@@ -97,6 +100,7 @@ static int32_t s_tabbar_h;
 static void build_shell(void);
 static void build_topbar(lv_obj_t * parent);
 static void build_tabbar(lv_obj_t * parent);
+static void build_overlay(void);
 static void switch_page(ui_page_t page);
 static void tab_click_cb(lv_event_t * e);
 static void status_timer_cb(lv_timer_t * t);
@@ -149,6 +153,10 @@ void ui_init(void)
 
     // 7. 默认切入主页（PAGE_HOME）
     switch_page(PAGE_HOME);
+
+    // 8. 反馈中枢（最后初始化：依赖上面的 overlay，且要在 auth_fsm 之后订阅总线，
+    //    才能保证读到的 fail_streak 已被 core 更新——见 ui_feedback.c 文件头顺序约束）
+    ui_feedback_init(s_overlay);
 }
 
 /* FSM 状态变化 → UI 切换
@@ -248,6 +256,35 @@ static void build_shell(void)
     // 6. 填充顶栏和底栏的具体 UI 元素
     build_topbar(top);
     build_tabbar(tab);
+
+    // 7. 横幅浮层（最上层）：常驻、透明、不挡触摸，供 ui_feedback 挂反馈条
+    build_overlay();
+}
+
+/**
+ * @brief 横幅浮层（spec §1「overlay 横幅容器（常驻、默认空、不挡触摸）」）。
+ *
+ * 实现取舍：不占纵向布局空间——用绝对定位浮在内容区顶部，而不是插进纵向
+ * flex 里（插进去会让内容区在横幅出现/消失时整体抖动，且空态也要吃掉 ~64px）。
+ * 容器与横幅都去掉 CLICKABLE，触摸事件穿透到下面的页面。
+ */
+static void build_overlay(void)
+{
+    lv_obj_t * scr = lv_screen_active();
+    lv_display_t * disp = lv_display_get_default();
+    int32_t w = disp ? lv_display_get_horizontal_resolution(disp) : 1024;
+
+    s_overlay = lv_obj_create(scr);
+    lv_obj_set_size(s_overlay, w, SY(UI_ANIM_BANNER_H_BASE) + SY(12));
+    lv_obj_align(s_overlay, LV_ALIGN_TOP_MID, 0, s_topbar_h + SY(6));
+    lv_obj_set_style_bg_opa(s_overlay, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_overlay, 0, 0);
+    lv_obj_set_style_outline_width(s_overlay, 0, 0);
+    lv_obj_set_style_pad_all(s_overlay, 0, 0);
+    lv_obj_set_flex_flow(s_overlay, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_overlay, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_clickable(s_overlay, false);
+    lv_obj_set_scrollable(s_overlay, false);
 }
 
 static void build_topbar(lv_obj_t * parent)
