@@ -75,6 +75,10 @@ static unsigned s_warn_h = 0;
  * 拷贝到双帧缓冲的非发布块后发布。整段在 io 锁内，保证 request_stop 能等到它收尾。 */
 static void face_capture_once(void)
 {
+    bool     warn   = false;            /* 本次是否需要打印「分辨率不符」告警 */
+    unsigned warn_w = 0;                /* 待打印的协商分辨率（锁内记下，解锁后用） */
+    unsigned warn_h = 0;
+
     pthread_mutex_lock(&s_io_lock);
     if (!s_quit) {
         const uint8_t * src = NULL;
@@ -98,19 +102,29 @@ static void face_capture_once(void)
                 pthread_mutex_unlock(&s_fb_lock);
             } else {
                 /* 不符：先按 §5.13 契约释放帧（不释放后端会停更），丢弃该帧（不拷贝，
-                 * 杜绝越界读），并限频告警一次——仅在分辨率较上次记录变化时打印。 */
+                 * 杜绝越界读）。去重状态 s_warn_w/s_warn_h 只在临界区内更新（仅本线程写，
+                 * 无竞态），但告警 printf 本身留到解锁之后执行——§3.1 明文要求「临界区内
+                 * 不做重计算、不持锁调用外部函数」：printf 可能因 stdio 锁/缓冲 flush 阻塞，
+                 * 持 s_io_lock 阻塞会推迟 request_stop() 的静默收尾，属已知反模式。 */
                 hal_camera_release_frame();
                 if (info.width != s_warn_w || info.height != s_warn_h) {
                     s_warn_w = info.width;
                     s_warn_h = info.height;
-                    printf("[FACE-THREAD] 协商分辨率 %ux%u 与预览缓冲 %dx%d 不符，丢弃该帧\n",
-                           (unsigned)info.width, (unsigned)info.height,
-                           (unsigned)FACE_THREAD_PREVIEW_W, (unsigned)FACE_THREAD_PREVIEW_H);
+                    warn     = true;
+                    warn_w   = info.width;
+                    warn_h   = info.height;
                 }
             }
         }
     }
     pthread_mutex_unlock(&s_io_lock);
+
+    /* 解锁后再打印：不持 io 锁调用可能阻塞的 stdio（§3.1）。 */
+    if (warn) {
+        printf("[FACE-THREAD] 协商分辨率 %ux%u 与预览缓冲 %dx%d 不符，丢弃该帧\n",
+               warn_w, warn_h,
+               (unsigned)FACE_THREAD_PREVIEW_W, (unsigned)FACE_THREAD_PREVIEW_H);
+    }
 }
 
 /* ---------------- FM225 UART（3c 接入点） ---------------- */
@@ -227,5 +241,6 @@ bool face_thread_get_preview(uint16_t * dst, hal_camera_frame_info_t * info)
     pthread_mutex_unlock(&s_fb_lock);
     return ok;
 }
+
 
 
