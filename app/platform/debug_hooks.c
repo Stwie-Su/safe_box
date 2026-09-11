@@ -65,6 +65,9 @@ static ui_page_t page_from_name(const char * name)
  * 走真实的 event_bus_publish(EV_FACE_EVENT) 路径：auth_fsm 与 ui_feedback 都会收到，
  * 与真机链路一致（真机是 face 线程 event_bus_post → 主线程 pump）。 */
 
+/* 推 ms 毫秒的 lv_tick + timer（不能只 usleep，否则 lvgl tick 不动、动效不推进） */
+static void pump_ms(int step_ms, int total_ms);
+
 static void post_detect(int32_t face_id, face_reason_t reason)
 {
     ev_face_event_t e;
@@ -110,9 +113,13 @@ static bool inject_face_from_env(void)
     }
     else if(strcmp(spec, "no_match") == 0)     post_detect(-1, FACE_RES_NO_MATCH);
     else if(strcmp(spec, "no_match3") == 0) {
-        /* 连续三次：FSM 按 face_otp_after=3 转 WAIT_OTP，验证自动切页也带动效 */
+        /* 连续三次 → FSM 按 face_otp_after=3 转 WAIT_OTP。
+         * 每次未匹配会先进 DENY（2s）暂态，期间事件被丢弃（防重放旧识别），
+         * 所以要在两次注入之间把 DENY 等过期——这也正是真机上的真实节奏。 */
         post_detect(-1, FACE_RES_NO_MATCH);
+        pump_ms(30, 2100);
         post_detect(-1, FACE_RES_NO_MATCH);
+        pump_ms(30, 2100);
         post_detect(-1, FACE_RES_NO_MATCH);
     }
     else if(strcmp(spec, "liveness") == 0)     post_detect(-1, FACE_RES_LIVENESS_FAIL);
@@ -135,13 +142,16 @@ static bool inject_face_from_env(void)
     return true;
 }
 
-/* 推 ms 毫秒的 lv_tick + timer（不能只 usleep，否则 lvgl tick 不动、动效不推进） */
+/* 推 ms 毫秒的 lv_tick + timer（不能只 usleep，否则 lvgl tick 不动、动效不推进）。
+ * 同时手动推 auth_fsm_tick()：业务定时器 timer_slow 在 debug_hooks_apply 之后才创建，
+ * 不推的话 DENY（2s）暂态永远不会过期，多次注入会被状态机当旧识别丢弃。 */
 static void pump_ms(int step_ms, int total_ms)
 {
     for(int waited = 0; waited < total_ms; waited += step_ms) {
         usleep(step_ms * 1000);
         lv_tick_inc(step_ms);
         lv_timer_handler();
+        auth_fsm_tick();
     }
 }
 
@@ -167,9 +177,15 @@ static void take_shot(const char * path)
     }
 
     /* 人脸事件放在稳定之后注入：横幅淡入 250ms + 停留 ≤2s，
-     * 注入后再推 400ms 抓屏，保证截图里横幅处于完全显示状态。 */
+     * 注入后再推 400ms 抓屏，保证截图里横幅处于完全显示状态。
+     * SAFE_TEST_SHOT_MS 可覆盖这段等待：设成 40~120ms 可抓到过渡/淡入的中间帧，
+     * 用于实证「动画真的在跑」而不是直接跳到终态（默认 400ms = 动效已结束）。 */
     if(inject_face_from_env()) {
-        pump_ms(30, 400);
+        int settle = 400;
+        const char * ms = getenv("SAFE_TEST_SHOT_MS");
+        if(ms && *ms) settle = atoi(ms);
+        if(settle < 0) settle = 0;
+        pump_ms(30, settle);
     }
 
     lv_draw_buf_t * s = lv_snapshot_take(lv_screen_active(), LV_COLOR_FORMAT_RGB565);

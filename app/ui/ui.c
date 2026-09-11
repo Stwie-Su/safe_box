@@ -77,6 +77,9 @@ static const page_desc_t s_pages[PAGE_COUNT] = {
 static lv_obj_t * s_content;                 // 中间内容区的根容器
 static lv_obj_t * s_overlay;                 // 横幅浮层（常驻、透明、不挡触摸；ui_feedback 的宿主）
 static lv_obj_t * s_page_roots[PAGE_COUNT];  // 存放所有初始化后的页面根节点（为了实现显隐切换）
+/* 当前「名义可见」的页面（过渡动画的目标页）。-1 = 尚未切过页（ui_init 首切）。
+ * 快速连点时以它为准：旧目标页也按普通退场处理，不会留下半透明的孤儿页。 */
+static int s_vis_page = -1;
 /* 底栏 4 个 tab 按钮对象 + 它们的图标 + 文字（换主题时刷新） */
 static lv_obj_t * s_tab_btn[4];
 static lv_obj_t * s_tab_icon[4];
@@ -102,6 +105,14 @@ static void build_topbar(lv_obj_t * parent);
 static void build_tabbar(lv_obj_t * parent);
 static void build_overlay(void);
 static void switch_page(ui_page_t page);
+/* 页面切换过渡（UI 现代化 spec §2） */
+static void page_translate_y_cb(void * obj, int32_t v);
+static void page_opa_cb(void * obj, int32_t v);
+static void page_faded_out_cb(lv_anim_t * a);
+static void page_reset(lv_obj_t * pg);
+static void page_anim_out(lv_obj_t * pg);
+static void page_anim_in(lv_obj_t * pg);
+static void ui_page_transition_to(ui_page_t page);
 static void tab_click_cb(lv_event_t * e);
 static void status_timer_cb(lv_timer_t * t);
 /* 阶段 1：状态机心跳 / RPC 指令泵 / 状态周期上报 + FSM→UI 桥接 */
@@ -109,6 +120,8 @@ static void fsm_ui_hook(fsm_state_t st, const char *user, const char *detail);
 /* 主题切换回调：刷新顶栏本地颜色覆盖（定义在 build_topbar 之后） */
 static void topbar_refresh_theme(int idx);
 static void tabbar_refresh_theme(int idx);
+/* 页签高亮渐变：把 st_tab_hl（150ms 颜色过渡载体）挂到图标的所有子形状上 */
+static lv_obj_tree_walk_res_t tab_hl_walk_cb(lv_obj_t * obj, void * user_data);
 
 /* "当前是否开锁"判定（与 page_monitor.c::is_unlocked_now 一致）：
  *   物理执行器 500ms 高电平 OR FSM UNLOCKED 30s 语义窗口 */
@@ -417,6 +430,15 @@ static void topbar_refresh_theme(int idx)
     if (s_mqtt_text)   lv_obj_set_style_text_color(s_mqtt_text, mqtt_on ? theme_color(TH_TEXT) : theme_color(TH_DANGER), 0);
 }
 
+/* 页签高亮渐变：图标由「容器 + 多个几何子对象」组成，颜色是逐个设置的，
+ * 因此过渡样式也要挂到每个子对象上才整体平滑（spec §3：tab checked 150ms） */
+static lv_obj_tree_walk_res_t tab_hl_walk_cb(lv_obj_t * obj, void * user_data)
+{
+    (void)user_data;
+    lv_obj_add_style(obj, &st_tab_hl, 0);
+    return LV_OBJ_TREE_WALK_NEXT;
+}
+
 /**
  * @brief v3 底部导航栏：单条连续白色面板 + 4 个等宽 tab。
  * 每个 tab 由上方矢量图标 + 下方文字 + 顶部一矩形高亮指示条组成，
@@ -462,11 +484,13 @@ static void build_tabbar(lv_obj_t * parent)
         lv_obj_set_style_radius(ind, SX(2), 0);
         lv_obj_set_style_border_width(ind, 0, 0);
         lv_obj_set_style_outline_width(ind, 0, 0);
+        lv_obj_add_style(ind, &st_tab_hl, 0);              /* 高亮切换 150ms 渐变 */
         s_tab_indicator[i] = ind;
 
-        /* 矢量图标 */
+        /* 矢量图标（子形状逐个挂过渡样式） */
         lv_obj_t * icon = ui_icon_create(btn, TABS[i].icon, SX(22),
                                          theme_color(TH_TEXT_MUT));
+        lv_obj_tree_walk(icon, tab_hl_walk_cb, NULL);
         s_tab_icon[i] = icon;
 
         /* 文字标签 */
@@ -474,6 +498,7 @@ static void build_tabbar(lv_obj_t * parent)
         lv_label_set_text(lbl, TABS[i].label);
         lv_obj_set_style_text_font(lbl, app_font_scaled(13), 0);
         lv_obj_set_style_text_color(lbl, theme_color(TH_TEXT_MUT), 0);
+        lv_obj_add_style(lbl, &st_tab_hl, 0);              /* 高亮切换 150ms 渐变 */
         s_tab_label[i] = lbl;
 
         lv_obj_add_event_cb(btn, tab_click_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
@@ -517,6 +542,135 @@ static int tab_index_of(ui_page_t page)
     }
 }
 
+/* ================================================================
+ *  页面切换过渡（UI 现代化 spec §2）
+ *
+ * 旧页：translate_y 0 → -24px + opa 255 → 0，150ms ease-in（退场加速）
+ * 新页：translate_y 24px → 0 + opa 0 → 255，200ms ease-out（入场减速）
+ *
+ * 结构与性能要点：
+ *  - 页面 roots 常驻（ui_init 一次性实例化），动画只动 translate_y / opa 两个
+ *    样式属性，不销毁、不重建对象（A7 单核：局部重绘 content 区）；
+ *  - 快速连点：每个对象同一属性只留一条动画——起动画前先 lv_anim_delete 清旧，
+ *    并把「上一个目标页」也按退场处理，杜绝半透明孤儿页；
+ *  - FSM 自动切页（fsm_ui_hook）走同一路径，自动获得动画；
+ *  - 常量集中 ui_anim.h，A7 上调参只改那里。
+ * ================================================================ */
+
+/* 动画执行回调：只改一个样式属性，便于 lv_anim_delete 按 cb 精确清理 */
+static void page_translate_y_cb(void * obj, int32_t v)
+{
+    if (obj == NULL) return;
+    lv_obj_set_style_translate_y((lv_obj_t *)obj, v, 0);
+}
+
+static void page_opa_cb(void * obj, int32_t v)
+{
+    if (obj == NULL) return;
+    lv_obj_set_style_opa((lv_obj_t *)obj, (lv_opa_t)v, 0);
+}
+
+/* 旧页淡出结束：隐藏 + 复位样式（下次入场从干净状态开始） */
+static void page_faded_out_cb(lv_anim_t * a)
+{
+    (void)a;
+    /* lv_anim 的 var 就是页面根节点 */
+    lv_obj_t * pg = (lv_obj_t *)a->var;
+    if (pg == NULL) return;
+    lv_obj_set_style_translate_y(pg, 0, 0);
+    lv_obj_set_style_opa(pg, LV_OPA_COVER, 0);
+    lv_obj_set_hidden(pg, true);
+}
+
+/* 删动画 + 复位样式 + 隐藏（用于与本次切换无关的页面，保证状态确定） */
+static void page_reset(lv_obj_t * pg)
+{
+    if (pg == NULL) return;
+    lv_anim_delete(pg, page_translate_y_cb);
+    lv_anim_delete(pg, page_opa_cb);
+    lv_obj_set_style_translate_y(pg, 0, 0);
+    lv_obj_set_style_opa(pg, LV_OPA_COVER, 0);
+    lv_obj_set_hidden(pg, true);
+}
+
+/* 旧页退场：从当前样式值出发（可能是上次动画进行到一半的值），平滑滑出 */
+static void page_anim_out(lv_obj_t * pg)
+{
+    if (pg == NULL) return;
+    lv_anim_delete(pg, page_translate_y_cb);
+    lv_anim_delete(pg, page_opa_cb);
+
+    int32_t y0 = lv_obj_get_style_translate_y(pg, 0);
+    int32_t o0 = (int32_t)lv_obj_get_style_opa(pg, 0);
+    lv_obj_set_hidden(pg, false);   /* 可能在上一次过渡里已被隐藏，先亮出来退场 */
+
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, pg);
+    lv_anim_set_exec_cb(&a, page_translate_y_cb);
+    lv_anim_set_values(&a, y0, -UI_ANIM_TRANSLATE_PX);
+    lv_anim_set_duration(&a, UI_ANIM_PAGE_OUT_MS);
+    lv_anim_set_path_cb(&a, UI_ANIM_PAGE_EASE_IN);
+    lv_anim_start(&a);
+
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, pg);
+    lv_anim_set_exec_cb(&a, page_opa_cb);
+    lv_anim_set_values(&a, o0, LV_OPA_TRANSP);
+    lv_anim_set_duration(&a, UI_ANIM_PAGE_OUT_MS);
+    lv_anim_set_path_cb(&a, UI_ANIM_PAGE_EASE_IN);
+    lv_anim_set_completed_cb(&a, page_faded_out_cb);
+    lv_anim_start(&a);
+}
+
+/* 新页入场：从下方 24px 滑入 + 淡入 */
+static void page_anim_in(lv_obj_t * pg)
+{
+    if (pg == NULL) return;
+    lv_anim_delete(pg, page_translate_y_cb);
+    lv_anim_delete(pg, page_opa_cb);
+
+    lv_obj_set_style_translate_y(pg, UI_ANIM_TRANSLATE_PX, 0);
+    lv_obj_set_style_opa(pg, LV_OPA_TRANSP, 0);
+    lv_obj_set_hidden(pg, false);
+
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, pg);
+    lv_anim_set_exec_cb(&a, page_translate_y_cb);
+    lv_anim_set_values(&a, UI_ANIM_TRANSLATE_PX, 0);
+    lv_anim_set_duration(&a, UI_ANIM_PAGE_IN_MS);
+    lv_anim_set_path_cb(&a, UI_ANIM_PAGE_EASE_OUT);
+    lv_anim_start(&a);
+
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, pg);
+    lv_anim_set_exec_cb(&a, page_opa_cb);
+    lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_duration(&a, UI_ANIM_PAGE_IN_MS);
+    lv_anim_set_path_cb(&a, UI_ANIM_PAGE_EASE_OUT);
+    lv_anim_start(&a);
+}
+
+/**
+ * @brief 带过渡的页面切换。同页重复点击不重放动画（避免无意义的闪动）。
+ */
+static void ui_page_transition_to(ui_page_t page)
+{
+    if (page < 0 || page >= PAGE_COUNT) return;
+    int prev = s_vis_page;
+    s_vis_page = (int)page;
+    if (prev == (int)page) return;   /* 同页重复点击 */
+
+    /* 与本次切换无关的页面：立即清场（删动画/复位/隐藏），状态确定 */
+    for (int i = 0; i < PAGE_COUNT; i++) {
+        if (i == (int)page || i == prev) continue;
+        page_reset(s_page_roots[i]);
+    }
+    if (prev >= 0 && prev != (int)page) page_anim_out(s_page_roots[prev]);
+    page_anim_in(s_page_roots[page]);
+}
+
 static void switch_page(ui_page_t page)
 {
     int i;
@@ -529,9 +683,7 @@ static void switch_page(ui_page_t page)
             else    lv_obj_remove_state(s_tab_btn[i], LV_STATE_CHECKED);
         }
     }
-    for (i = 0; i < PAGE_COUNT; i++) {
-        lv_obj_set_hidden(s_page_roots[i], i != (int)page);
-    }
+    ui_page_transition_to(page);
     tabbar_refresh_theme(0);
 }
 

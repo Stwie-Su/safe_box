@@ -63,6 +63,8 @@ extern lv_style_t st_warn_text;     /* 警示色文字 */
 extern lv_style_t st_danger_text;   /* 危险色文字 */
 extern lv_style_t st_tab_btn;       /* 底部 Tab（未选中） */
 extern lv_style_t st_tab_btn_checked; /* 底部 Tab（选中） */
+extern lv_style_t st_btn_press;     /* 全局按压态（theme 钩子自动挂到所有 lv_button） */
+extern lv_style_t st_tab_hl;        /* 页签高亮渐变载体（只带 transition，无颜色） */
 
 /* 初始化样式并应用默认主题（月白）。app_start 调用一次。 */
 void theme_init(void);
@@ -81,6 +83,15 @@ const char * theme_name(int idx);
 
 /* 便捷取色（canvas 绘制等特殊场景；普通控件请用样式） */
 lv_color_t theme_color(theme_role_t role);
+
+/**
+ * @brief 安装全局按压手感主题钩子（UI 现代化 spec §3 前半）。
+ *
+ * 用 LVGL 的 theme apply 回调给【每一个】lv_button 挂上 st_btn_press
+ * （LV_STATE_PRESSED），后续动态创建的按钮也自动生效——调用方无需逐个接线。
+ * theme_init() 末尾自动调用一次；重复调用幂等。
+ */
+void theme_press_install(void);
 
 #ifdef __cplusplus
 } /*extern "C"*/

@@ -1,8 +1,18 @@
 /**
  * @file theme.c
  * 主题实现（DESIGN.md §6）。
+ *
+ * UI 现代化（spec §3 前半）：
+ *   - 按压手感：过渡属性集扩为 {BG_COLOR, TEXT_COLOR, SHADOW_WIDTH,
+ *     SHADOW_OFFSET_Y, TRANSFORM_WIDTH, TRANSFORM_HEIGHT}；进按压 120ms /
+ *     回弹 180ms（进快出慢）。常态阴影由 accent/ghost/danger 按钮样式提供，
+ *     按压时收紧（width 8→3、ofs_y 3→1、opa 20→12）+ 微缩（-6/-3 px）。
+ *   - 全局性：st_btn_press 经 lv_theme apply 回调挂到每一个 lv_button 上，
+ *     页面代码零改动（theme_press_install，见文件尾）。
+ *   - 页签高亮切换：st_tab_hl 只带 150ms 颜色过渡，由 ui.c 挂到 tab 图标/文字/指示条。
  */
 #include "theme.h"
+#include "ui/ui_anim.h"
 #include <string.h>
 
 /* ---------------- 四套色板（DESIGN.md §6.1 原表） ---------------- */
@@ -55,9 +65,13 @@ lv_style_t st_warn_text;
 lv_style_t st_danger_text;
 lv_style_t st_tab_btn;
 lv_style_t st_tab_btn_checked;
+lv_style_t st_btn_press;        /* 全局按压态（theme 钩子自动挂） */
+lv_style_t st_tab_hl;           /* 页签高亮渐变载体 */
 
 static int g_idx = 1;   /* 默认主题索引：0 石墨黑 / 1 月白 / 2 蓝白 / 3 松石青 / 4 浅蓝 */
-static lv_style_transition_dsc_t s_trans;  /* 按钮按下过渡描述符（apply_theme 内初始化） */
+static lv_style_transition_dsc_t s_trans;    /* 松开回弹过渡（180ms） */
+static lv_style_transition_dsc_t s_trans_pr; /* 按下过渡（120ms） */
+static lv_style_transition_dsc_t s_trans_tab;/* 页签高亮渐变（150ms） */
 
 /* 依据当前主题刷新全部样式内容 */
 static void apply_theme(void)
@@ -99,6 +113,11 @@ static void apply_theme(void)
     lv_style_set_border_width(&st_accent_btn, 0);
     lv_style_set_pad_hor(&st_accent_btn, 20);
     lv_style_set_pad_ver(&st_accent_btn, 10);
+    /* 常态浅阴影：给「按下去阴影收紧」一个可感知的起点 */
+    lv_style_set_shadow_width(&st_accent_btn, UI_ANIM_IDLE_SHADOW_W);
+    lv_style_set_shadow_ofs_y(&st_accent_btn, UI_ANIM_IDLE_SHADOW_Y);
+    lv_style_set_shadow_opa(&st_accent_btn, UI_ANIM_IDLE_SHADOW_OPA);
+    lv_style_set_shadow_color(&st_accent_btn, p->c[TH_TEXT]);
 
     lv_style_set_bg_color(&st_accent_btn_pr, lv_color_darken(p->c[TH_ACCENT], LV_OPA_30));
     lv_style_set_text_color(&st_accent_btn_pr, p->c[TH_ACCENT_INK]);
@@ -114,6 +133,10 @@ static void apply_theme(void)
     lv_style_set_radius(&st_ghost_btn, 10);
     lv_style_set_pad_hor(&st_ghost_btn, 20);
     lv_style_set_pad_ver(&st_ghost_btn, 10);
+    lv_style_set_shadow_width(&st_ghost_btn, UI_ANIM_IDLE_SHADOW_W);
+    lv_style_set_shadow_ofs_y(&st_ghost_btn, UI_ANIM_IDLE_SHADOW_Y);
+    lv_style_set_shadow_opa(&st_ghost_btn, UI_ANIM_IDLE_SHADOW_OPA);
+    lv_style_set_shadow_color(&st_ghost_btn, p->c[TH_TEXT]);
 
     lv_style_set_bg_color(&st_danger_btn, p->c[TH_DANGER]);
     lv_style_set_text_color(&st_danger_btn, lv_color_white());
@@ -121,6 +144,10 @@ static void apply_theme(void)
     lv_style_set_border_width(&st_danger_btn, 0);
     lv_style_set_pad_hor(&st_danger_btn, 20);
     lv_style_set_pad_ver(&st_danger_btn, 10);
+    lv_style_set_shadow_width(&st_danger_btn, UI_ANIM_IDLE_SHADOW_W);
+    lv_style_set_shadow_ofs_y(&st_danger_btn, UI_ANIM_IDLE_SHADOW_Y);
+    lv_style_set_shadow_opa(&st_danger_btn, UI_ANIM_IDLE_SHADOW_OPA);
+    lv_style_set_shadow_color(&st_danger_btn, p->c[TH_TEXT]);
 
     lv_style_set_text_color(&st_ok_text, p->c[TH_OK]);
     lv_style_set_text_color(&st_warn_text, p->c[TH_WARN]);
@@ -138,13 +165,42 @@ static void apply_theme(void)
     lv_style_set_border_width(&st_tab_btn_checked, 0);
     lv_style_set_pad_all(&st_tab_btn_checked, 8);
 
-    /* 交互过渡：按钮/页签按下平滑变色（美观增强，150ms，v9 过渡描述符 API） */
-    static const lv_style_prop_t trans_props[] = { LV_STYLE_BG_COLOR, LV_STYLE_TEXT_COLOR, 0 };
-    lv_style_transition_dsc_init(&s_trans, trans_props, NULL, 150, 0, NULL);
+    /* ---- 全局按压态（spec §3 前半）----
+     * 微缩（≈2%）+ 阴影收紧：只动 transform / shadow 这类绘制期属性，
+     * 不改布局（不影响 flex），LVGL 内建 transition，无额外 anim 对象。 */
+    lv_style_set_transform_width(&st_btn_press, UI_ANIM_PRESS_SHRINK_W);
+    lv_style_set_transform_height(&st_btn_press, UI_ANIM_PRESS_SHRINK_H);
+    lv_style_set_shadow_width(&st_btn_press, UI_ANIM_PRESS_SHADOW_W);
+    lv_style_set_shadow_ofs_y(&st_btn_press, UI_ANIM_PRESS_SHADOW_Y);
+    lv_style_set_shadow_opa(&st_btn_press, UI_ANIM_PRESS_SHADOW_OPA);
+    lv_style_set_shadow_color(&st_btn_press, p->c[TH_TEXT]);
+
+    /* ---- 页签高亮渐变载体：只带 transition，不带任何颜色 ---- */
+    lv_style_set_transition(&st_tab_hl, &s_trans_tab);
+
+    /* ---- 交互过渡（spec §3）----
+     * 属性集扩为 BG/TEXT 颜色 + 阴影宽偏移 + transform 宽高；
+     * 基础样式挂「回弹 180ms」，按压态挂「按下 120ms」——进快出慢。 */
+    static const lv_style_prop_t trans_props[] = {
+        LV_STYLE_BG_COLOR, LV_STYLE_TEXT_COLOR,
+        LV_STYLE_SHADOW_WIDTH, LV_STYLE_SHADOW_OFFSET_Y,
+        LV_STYLE_TRANSFORM_WIDTH, LV_STYLE_TRANSFORM_HEIGHT, 0
+    };
+    lv_style_transition_dsc_init(&s_trans, trans_props, UI_ANIM_PAGE_EASE_OUT,
+                                 UI_ANIM_PRESS_OUT_MS, 0, NULL);
+    lv_style_transition_dsc_init(&s_trans_pr, trans_props, UI_ANIM_PAGE_EASE_OUT,
+                                 UI_ANIM_PRESS_IN_MS, 0, NULL);
+    static const lv_style_prop_t tab_props[] = {
+        LV_STYLE_TEXT_COLOR, LV_STYLE_BG_COLOR, LV_STYLE_BG_OPA, 0
+    };
+    lv_style_transition_dsc_init(&s_trans_tab, tab_props, UI_ANIM_PAGE_EASE_OUT,
+                                 UI_ANIM_TAB_MS, 0, NULL);
     lv_style_set_transition(&st_accent_btn, &s_trans);
+    lv_style_set_transition(&st_accent_btn_pr, &s_trans_pr);
     lv_style_set_transition(&st_ghost_btn, &s_trans);
     lv_style_set_transition(&st_danger_btn, &s_trans);
     lv_style_set_transition(&st_tab_btn, &s_trans);
+    lv_style_set_transition(&st_btn_press, &s_trans_pr);
 }
 
 void theme_init(void)
@@ -166,8 +222,11 @@ void theme_init(void)
     lv_style_init(&st_danger_text);
     lv_style_init(&st_tab_btn);
     lv_style_init(&st_tab_btn_checked);
+    lv_style_init(&st_btn_press);
+    lv_style_init(&st_tab_hl);
     g_idx = 4;          /* 默认主题：浅蓝（用户偏好浅蓝色系） */
     apply_theme();
+    theme_press_install();   /* 全局按压手感钩子（样式就绪后再挂） */
 }
 
 /* ---- 主题切换回调（最多 4 个） ---- */
@@ -210,6 +269,33 @@ lv_color_t theme_color(theme_role_t role)
 {
     if (role < 0 || role >= TH_ROLE_MAX) role = TH_TEXT;
     return THEMES[g_idx].pal.c[role];
+}
+
+/* ---------------- 全局按压手感（LVGL theme apply 钩子） ---------------- */
+
+static lv_theme_t * s_press_theme = NULL;
+
+/**
+ * LVGL 在每个对象构造时会调 lv_theme_apply(obj) → 本回调。
+ * 只给 lv_button 挂按压态样式，其余控件一概不动——这是「全工程按钮统一获得
+ * 按压反馈」且页面代码零改动、动态创建按钮也自动生效的最省事做法。
+ */
+static void press_theme_apply_cb(lv_theme_t * th, lv_obj_t * obj)
+{
+    (void)th;
+    if (obj == NULL) return;
+    if (lv_obj_check_type(obj, &lv_button_class)) {
+        lv_obj_add_style(obj, &st_btn_press, LV_STATE_PRESSED);
+    }
+}
+
+void theme_press_install(void)
+{
+    if (s_press_theme != NULL) return;   /* 幂等：只装一次 */
+    s_press_theme = lv_theme_create();
+    if (s_press_theme == NULL) return;
+    lv_theme_set_apply_cb(s_press_theme, press_theme_apply_cb);
+    lv_display_set_theme(lv_display_get_default(), s_press_theme);
 }
 
 
