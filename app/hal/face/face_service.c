@@ -7,14 +7,16 @@
  *
  * 事件通道（步骤 3a）：自有订阅数组已拆除，结果统一经
  * event_bus(EV_FACE_EVENT) 广播（POD payload ev_face_event_t，§5.18 两套机制收敛）。
- * 当前 emit 均发生在主线程（后端 tick 由 app_tick_fast 驱动），走 publish 同步派发；
- * 3b 引入 face 线程后，线程侧改调 event_bus_post。
+ * emit 统一走 post 入队（3b 起）；调用方可以是主线程（fake 后端 tick）也可以是
+ * face 线程（fm225 后端在 face 线程解析识别结果，步骤 3c）——s_last/s_seq 的
+ * 读写由 s_last_lock 保护（§5.11 并发条款），锁外 post 无跨线程悬空。
  */
 
 #include "hal/hal_face.h"
 #include "face_backend.h"
 #include "core/event_bus.h"
 
+#include <pthread.h>
 #include <string.h>
 
 #define ENROLL_TIMEOUT_MS  30000
@@ -26,6 +28,12 @@ static bool                   s_running;
 static bool                   s_enroll_pending;
 static uint32_t               s_enroll_start_ms;
 static uint32_t               s_seq;
+
+/* 最近结果锁（步骤 3c，规约 §5.11 并发条款）：emit 可能来自 face 线程（fm225 后端
+ * 在 face 线程解析识别结果），而 last_result / poll_compat 在主线程被 UI/RPC 调用——
+ * s_last / s_seq / s_has_last 的读写须持本锁。锁只覆盖字段读写，不含 event_bus_post
+ * （§3.1 不持锁调回调；post 自身有队列锁，无需外层保护）。 */
+static pthread_mutex_t s_last_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* ---------------- 后端注册表 ---------------- */
 
@@ -158,7 +166,12 @@ safe_err_t face_service_delete_async(int32_t face_id)
 
 const face_result_t * face_service_last_result(void)
 {
-    return s_has_last ? &s_last : NULL;
+    pthread_mutex_lock(&s_last_lock);
+    static face_result_t snap;             /* 快照：返回指针归本模块所有，解锁后仍有效 */
+    bool has = s_has_last;
+    if(has) snap = s_last;
+    pthread_mutex_unlock(&s_last_lock);
+    return has ? &snap : NULL;
 }
 
 safe_err_t face_service_inject(int32_t face_id, face_reason_t reason)
@@ -173,10 +186,12 @@ safe_err_t face_service_inject(int32_t face_id, face_reason_t reason)
 int face_service_poll_compat(face_result_t * out)
 {
     if(out == NULL) return 0;
-    if(!s_has_last) return 0;
-    *out = s_last;
+    pthread_mutex_lock(&s_last_lock);
+    int has = s_has_last ? 1 : 0;
+    if(has) *out = s_last;
     s_has_last = false;             /* 取走即清，避免同一结果被消费两次 */
-    return 1;
+    pthread_mutex_unlock(&s_last_lock);
+    return has;
 }
 
 /* ---------------- 后端上报入口 ---------------- */
@@ -202,10 +217,14 @@ void face_service_emit(face_event_t ev, const void * payload)
     e.ev = ev;
 
     if(ev == FACE_EV_DETECT && payload != NULL) {
+        /* 最近结果读写持锁（§5.11）：emit 可能来自 face 线程，与主线程
+         * last_result / poll_compat 并发。e.res 取锁内快照，post 放锁外（§3.1）。 */
+        pthread_mutex_lock(&s_last_lock);
         s_last     = *(const face_result_t *)payload;
         s_last.seq = ++s_seq;
         s_has_last = true;
         e.res      = s_last;      /* 订阅者拿到的是带序号的副本 */
+        pthread_mutex_unlock(&s_last_lock);
     }
     else if(ev == FACE_EV_ENROLL_DONE && payload != NULL) {
         e.enroll = *(const face_enroll_result_t *)payload;

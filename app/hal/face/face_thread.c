@@ -5,7 +5,8 @@
  * 职责：单线程 poll() 收敛两路节拍不同的 IO。
  *   - V4L2 video fd：可读 -> 取最新帧 -> YUYV->RGB565（转换在 camera 后端内完成）
  *     -> 拷贝进双帧缓冲发布（新帧覆盖旧帧，满则丢最旧，绝不阻塞采集）；
- *   - FM225 UART fd：可读 -> 读走字节喂协议状态机（3c 实现，本步仅留接入点，可为 -1）。
+ *   - FM225 UART fd（3c 已接入）：可读 -> 读走字节 -> backend_fm225 的
+ *     fm225_backend_feed() 喂协议状态机 -> 帧回调 emit -> event_bus_post 交主线程。
  *
  * 线程交接：
  *   - 预览帧：写双帧缓冲，主线程 page_face 经 face_thread_get_preview() 取最新；
@@ -127,18 +128,20 @@ static void face_capture_once(void)
     }
 }
 
-/* ---------------- FM225 UART（3c 接入点） ---------------- */
+/* ---------------- FM225 UART（步骤 3c 接入） ---------------- */
 
-/* 3c：把读到的字节喂 FM225 协议状态机，识别结果经 event_bus_post(EV_FACE_EVENT) 上报。
- * 本步仅把字节读走丢弃，避免串口缓冲涨满；未接入（fd<0）时不会走到这里。 */
+/* 后端提供的字节流入口（backend_fm225.c）：喂协议状态机后由后端帧回调
+ * emit 识别结果（event_bus_post 交主线程）。fd 只借用，归后端所有。 */
+void fm225_backend_feed(const uint8_t * buf, size_t n);
+
 static void face_uart_drain(void)
 {
     if (s_uart_fd < 0) return;
-    uint8_t buf[128];
+    uint8_t buf[256];
     for (;;) {
         ssize_t n = read(s_uart_fd, buf, sizeof(buf));
-        if (n <= 0) break;      /* EAGAIN / EINTR / EOF：状态机在 3c 处理 */
-        /* TODO-FM225(3c)：fm225_proto_feed(ctx, buf, n) -> face_service_emit(...) */
+        if (n <= 0) break;      /* EAGAIN（非阻塞 fd）/ EINTR / EOF */
+        fm225_backend_feed((const uint8_t *)buf, (size_t)n);
     }
 }
 

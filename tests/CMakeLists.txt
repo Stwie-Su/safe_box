@@ -15,6 +15,7 @@ endmacro()
 safe_add_test(test_totp)
 safe_add_test(test_auth_fsm)
 safe_add_test(test_event_bus)
+safe_add_test(test_fm225_proto)
 safe_add_test(test_store)
 # 崩溃一致性自测（R1）：循环写盘期间 kill -9，校验 users.json 可解析且非旧即新。
 # 默认 20 轮，长跑用 tools/crash_consistency_test.sh <更大轮次>。
