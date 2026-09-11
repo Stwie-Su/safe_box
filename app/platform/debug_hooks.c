@@ -11,7 +11,7 @@
 
 #include "platform/debug_hooks.h"
 
-#if defined(SAFE_PLATFORM_PC)
+#if defined(SAFE_PLATFORM_PC) || defined(SAFE_ENABLE_DEBUG_HOOKS)
 
 #include <stdio.h>
 #include <stdlib.h>

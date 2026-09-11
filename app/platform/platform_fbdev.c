@@ -24,6 +24,8 @@
 
 #include "driver_backends.h"
 
+#include "lvgl.h"
+
 #define KEEPALIVE_POLL_MS    200
 #define KEEPALIVE_FRESH_MS   400
 

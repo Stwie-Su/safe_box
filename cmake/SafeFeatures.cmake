@@ -22,6 +22,7 @@ endif()
 option(SAFE_FEATURE_MQTT "MQTT 远程通道（需要 paho-mqtt3a + cJSON）" ${_mqtt_default})
 option(SAFE_FEATURE_JSON "JSON 存储后端（需要 cJSON）" ON)
 option(SAFE_BUILD_TESTS  "构建单元测试" ${_tests_default})
+option(SAFE_DEBUG_HOOKS "板子构建也编译调试钩子(切页/截图/开弹窗)，仅验证固件用" OFF)
 
 # ---------------- 运行时数据目录 ----------------
 if(CMAKE_CROSSCOMPILING)

@@ -32,3 +32,10 @@ target_link_libraries(safe_platform PUBLIC safe_ui safe_core lvgl_linux)
 if(WERROR)
     target_compile_options(safe_platform PRIVATE -Werror)
 endif()
+
+# 板子构建默认关闭调试钩子（切页/截图/开弹窗）；验证固件用 -DSAFE_DEBUG_HOOKS=ON 打开，
+# 正式固件保持关闭，避免在生产镜像里留测试后门。
+if(SAFE_DEBUG_HOOKS)
+    target_compile_definitions(safe_platform PRIVATE SAFE_ENABLE_DEBUG_HOOKS=1)
+    message(STATUS "[feature] 调试钩子已启用（板子验证固件）")
+endif()
