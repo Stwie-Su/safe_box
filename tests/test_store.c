@@ -63,6 +63,46 @@ int main(void)
     /* ---- 管理员保护：删除最后一个启用管理员必须失败 ---- */
     CHECK(user_del(admin.id) != 0);
 
+    /* ---- 人脸绑定单字段写 user_face_set（UI 现代化 ui3 / 规约 §5.6）----
+     * 录入成功写回模板号、删除写 -1、同模板号跨用户去重、不存在用户报错。
+     * 必须放在「旧数据兼容」段之前：那段会把 users.json 整体替换成只剩 olduser，
+     * 之后 carol2/admin 都不再存在。 */
+    {
+        const int admin_id = admin.id;             /* 先固定，避免被后续查询结果覆盖 */
+        CHECK(user_find_by_name("carol2", &u) == 0);
+        const int carol_id = u.id;
+        /* 调用方直接 user_add 时 face_id 取结构体原值（本用例是 memset 的 0）；
+         * 这里显式清绑定，让后续断言只针对 user_face_set 的行为本身。 */
+        CHECK(user_face_set(carol_id, -1) == 0);
+        CHECK(user_find_by_id(carol_id, &u) == 0);
+        CHECK(u.face_id == -1);                    /* 初始未录入 */
+
+        CHECK(user_face_set(carol_id, 21) == 0);
+        CHECK(user_find_by_id(carol_id, &got) == 0);
+        CHECK(got.face_id == 21);                  /* 写回成功 */
+        CHECK(user_find_by_face(21, &got) == 0);   /* 能按模板号反查到 */
+        CHECK(got.id == carol_id);
+
+        /* 模板号唯一性：把同一模板号绑到 admin，carol2 应被清成 -1 */
+        CHECK(user_face_set(admin_id, 21) == 0);
+        CHECK(user_find_by_id(carol_id, &got) == 0);
+        CHECK(got.face_id == -1);
+        CHECK(user_find_by_id(admin_id, &got) == 0);
+        CHECK(got.face_id == 21);
+
+        /* 清除（-1）与错误入参 */
+        CHECK(user_face_set(admin_id, -1) == 0);
+        CHECK(user_find_by_id(admin_id, &got) == 0);
+        CHECK(got.face_id == -1);
+        CHECK(user_face_set(-12345, 5) != 0);      /* 用户不存在 */
+
+        /* 其它字段不被波及（整记录落盘不能把 PIN 哈希/角色冲掉） */
+        CHECK(user_find_by_id(carol_id, &u) == 0);
+        CHECK(strcmp(u.role, "user") == 0);
+        CHECK(u.pin_hash[0] != '\0');
+        CHECK(pin_check("8888", u.pin_salt, u.pin_hash) == 0);
+    }
+
     /* ---- 旧数据兼容：缺人脸/TOTP 字段的 JSON 反序列化给默认值 ---- */
     {
         char path[256];

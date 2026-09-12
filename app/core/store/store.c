@@ -713,6 +713,35 @@ int user_update(const safe_user_t *u)
     return ok ? 0 : -1;
 }
 
+/* 人脸模板绑定单字段写（规约 §5.5 / UI 现代化 ui3）。
+ * 读整表 → 定位 → 改 face_id → 整表原子落盘，读改写收在 store 一处，
+ * 避免调用方「查→改→写回」三步在并发写下丢失更新。
+ * face_id >= 0 时顺带把其它用户身上相同的模板号清成 -1：FM225 一个模板只属于
+ * 一个用户，防御性去重保证 user_find_by_face 的映射保持唯一。 */
+int user_face_set(int user_id, int face_id)
+{
+    safe_user_t *us = NULL;
+    int n = 0;
+    if (load_users(&us, &n, NULL) != 0 || n <= 0) { user_list_free(us); return -1; }
+
+    int idx = -1;
+    for (int i = 0; i < n; i++) {
+        if (us[i].id == user_id) { idx = i; break; }
+    }
+    if (idx < 0) { user_list_free(us); return -1; }   /* 用户不存在 */
+
+    if (face_id >= 0) {
+        for (int i = 0; i < n; i++) {
+            if (i != idx && us[i].face_id == face_id) us[i].face_id = -1;
+        }
+    }
+    us[idx].face_id = face_id;
+
+    bool ok = save_users(us, n);
+    user_list_free(us);
+    return ok ? 0 : -1;
+}
+
 const safe_policy_t * user_policy(void)
 {
     /* 返回静态快照，避免调用者持有 &g_policy 与后台写入竞争 */

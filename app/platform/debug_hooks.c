@@ -5,7 +5,7 @@
  * 环境变量：
  *   SAFE_TEST_PAGE  = HOME | LOGS | SETTINGS | USERS | NETWORK | SYSTEM | KEYPAD | FACE | OTP
  *   SAFE_TEST_THEME = 0..3
- *   SAFE_TEST_DLG   = add_user | auth | change_pwd
+ *   SAFE_TEST_DLG   = add_user | auth | change_pwd | otp | face
  *   SAFE_TEST_SHOT  = 截图输出路径（原始 RGB565，截图后直接退出）
  *   SAFE_TEST_FACE  = 注入一次人脸事件后截图（UI 现代化 ui1 验收用），取值：
  *       match[<n>]       识别成功（face_id=n，默认 1）→ 「欢迎回来，{用户名}」+ 扫描框绿
@@ -39,6 +39,7 @@
 #include "ui/pages/page_monitor.h"
 #include "core/auth/auth_fsm.h"
 #include "core/event_bus.h"
+#include "core/support/worker.h"
 #include "hal/hal_face.h"
 #include "hal/hal_time.h"
 
@@ -47,6 +48,7 @@ extern void page_users_test_open_add_dlg(void);
 extern void page_users_test_open_auth_dlg(void);
 extern void page_users_test_open_change_pwd_dlg(void);
 extern void page_users_test_open_otp_dlg(void);
+extern void page_users_test_open_face_dlg(void);
 
 static ui_page_t page_from_name(const char * name)
 {
@@ -143,14 +145,18 @@ static bool inject_face_from_env(void)
 }
 
 /* 推 ms 毫秒的 lv_tick + timer（不能只 usleep，否则 lvgl tick 不动、动效不推进）。
- * 同时手动推 auth_fsm_tick()：业务定时器 timer_slow 在 debug_hooks_apply 之后才创建，
- * 不推的话 DENY（2s）暂态永远不会过期，多次注入会被状态机当旧识别丢弃。 */
+ * 同时手动推：
+ *   - worker_poll()：业务 timer_fast 在 debug_hooks_apply 之后才创建，不推的话
+ *     astore_* 的完成回调永不执行 → 截图里用户/日志列表空白（进度文档 §5 登记的
+ *     「截图时序假象」）。在此补推一次即可让列表数据就位，UI 现代化 ui3 验收需要。
+ *   - auth_fsm_tick()：DENY（2s）暂态不过期会导致多次人脸注入被当旧识别丢弃。 */
 static void pump_ms(int step_ms, int total_ms)
 {
     for(int waited = 0; waited < total_ms; waited += step_ms) {
         usleep(step_ms * 1000);
         lv_tick_inc(step_ms);
         lv_timer_handler();
+        worker_poll();
         auth_fsm_tick();
     }
 }
@@ -165,16 +171,11 @@ static void take_shot(const char * path)
         auth_fsm_note_unlock("admin");
     }
     /* 等 1500ms 让 status_timer_cb (500ms) + monitor_timer_cb (1000ms) + FPS 滑窗 (500ms) 都跑。
-     * 期间每 30ms 推 lv_tick + handler 一次（不能只 usleep，否则 lvgl tick 不动 timer 不触发）。 */
-    {
-        const int step_ms = 30;
-        const int total_ms = 3000;
-        for(int waited = 0; waited < total_ms; waited += step_ms) {
-            usleep(step_ms * 1000);
-            lv_tick_inc(step_ms);
-            lv_timer_handler();
-        }
-    }
+     * 期间每 30ms 推 lv_tick + handler 一次（不能只 usleep，否则 lvgl tick 不动 timer 不触发）。
+     * 复用 pump_ms：它额外推 worker_poll()（消费 astore_* 的完成队列）+ auth_fsm_tick()，
+     * 前者是用户/日志列表能出数据的关键——业务 timer_fast 在 debug_hooks_apply 之后才创建，
+     * 不推的话列表永远空白（进度文档 §5 登记的「截图时序假象」，ui3 验收需真实列表）。 */
+    pump_ms(30, 3000);
 
     /* 人脸事件放在稳定之后注入：横幅淡入 250ms + 停留 ≤2s，
      * 注入后再推 400ms 抓屏，保证截图里横幅处于完全显示状态。
@@ -213,10 +214,12 @@ void debug_hooks_apply(void)
     if(dlg && *dlg && (strcmp(dlg, "add_user") == 0 ||
                        strcmp(dlg, "auth")     == 0 ||
                        strcmp(dlg, "change_pwd") == 0 ||
+                       strcmp(dlg, "face")     == 0 ||
                        strcmp(dlg, "otp")     == 0)) {
         ui_switch_page(PAGE_USERS);
         if(strcmp(dlg, "add_user") == 0)        page_users_test_open_add_dlg();
         else if(strcmp(dlg, "auth") == 0)       page_users_test_open_auth_dlg();
+        else if(strcmp(dlg, "face") == 0)       page_users_test_open_face_dlg();
         else if(strcmp(dlg, "otp") == 0)        page_users_test_open_otp_dlg();
         else                                    page_users_test_open_change_pwd_dlg();
     }

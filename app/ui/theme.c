@@ -139,6 +139,10 @@ static void apply_theme(void)
     lv_style_set_shadow_color(&st_ghost_btn, p->c[TH_TEXT]);
 
     lv_style_set_bg_color(&st_danger_btn, p->c[TH_DANGER]);
+    /* ⚠ 预存在缺陷修复（ui3 顺带）：与 st_accent_btn / st_tab_btn_checked 一样，
+     * 实心按钮必须显式 bg_opa=COVER。此前漏设，danger 红底依赖主题默认态，
+     * 在该 LVGL 构建下默认非 COVER → 「删除」等危险按钮实际画成白底白字不可见。 */
+    lv_style_set_bg_opa(&st_danger_btn, LV_OPA_COVER);
     lv_style_set_text_color(&st_danger_btn, lv_color_white());
     lv_style_set_radius(&st_danger_btn, 10);
     lv_style_set_border_width(&st_danger_btn, 0);

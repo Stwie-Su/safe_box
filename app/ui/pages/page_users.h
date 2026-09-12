@@ -17,6 +17,7 @@ void page_users_test_open_add_dlg(void);
 void page_users_test_open_auth_dlg(void);
 void page_users_test_open_change_pwd_dlg(void);
 void page_users_test_open_otp_dlg(void);
+void page_users_test_open_face_dlg(void);
 
 #ifdef __cplusplus
 } /*extern "C"*/

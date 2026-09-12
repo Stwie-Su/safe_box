@@ -12,7 +12,9 @@
 #include "core/store/store.h"
 #include "core/support/async_store.h"
 #include "core/support/worker.h"
+#include "core/event_bus.h"
 #include "core/auth/unlock_backend.h"   /* backend_admin_verify_totp：改管理员密码动态码二次确认 */
+#include "hal/hal_face.h"               /* face_service_enroll/delete_async + caps（UI 现代化 ui3） */
 #include "hal/hal_time.h"               /* R2：时间源统一走 HAL，不直接读系统时钟 */
 #include <string.h>
 #include <stdio.h>
@@ -52,6 +54,22 @@ static lv_obj_t * s_otp_disp  = NULL;
 static lv_obj_t * s_otp_msg   = NULL;
 static char s_otp_pin[8]      = {0};
 
+/* ---- 人脸录入/删除入口（UI 现代化 ui3）----
+ * 敏感操作走与「删除用户」同一套 admin PIN 二次确认，因此需要记录
+ * 「本次二次确认是为了哪个人脸操作」，auth_result 通过后再分叉。
+ * 录入/删除本身是异步的（face_service_*_async 立即返回），结果经
+ * EV_FACE_EVENT(ENROLL_DONE/DELETE_DONE) 回来：横幅由 ui_feedback 出，
+ * face_id 写回 users.json 与列表刷新由本页负责（只有本页知道操作目标）。 */
+typedef enum {
+    FACE_OP_NONE = 0,     /* 当前二次确认不是人脸操作（删除用户走原路径） */
+    FACE_OP_ENROLL,       /* 录入人脸 */
+    FACE_OP_DELETE,       /* 删除人脸 */
+} face_op_t;
+
+static face_op_t s_face_op          = FACE_OP_NONE;
+static int       s_face_pending_uid = -1;   /* 应答到达后要写回 face_id 的用户 */
+static int       s_face_pending_tpl = -1;   /* 删除路径：要解绑的模板号 */
+
 /* 键盘字号基准（实际字号 = base × ui_scale，见 ui_scale.c app_montserrat_scaled）
  * lv_keyboard 是 lv_buttonmatrix 子类，按键文本属于 LV_PART_ITEMS。
  *  字母/符号模式：板子 1.0x → 32px，PC 1.8x → 48px
@@ -66,13 +84,20 @@ static void add_btn_cb(lv_event_t * e);
 static void row_pwd_cb(lv_event_t * e);
 static void row_tog_cb(lv_event_t * e);
 static void row_del_cb(lv_event_t * e);
+static void row_face_cb(lv_event_t * e);
 static void pwd_btn_cb(lv_event_t * e);
 static void del_btn_cb(lv_event_t * e);
 static void toggle_btn_cb(lv_event_t * e);
+static void face_btn_cb(lv_event_t * e);
+static void face_start_cb(lv_event_t * e);
+static void face_set_worker(void * p);
+static void face_set_done(void * p);
+static void on_face_event_ui(ev_topic_t topic, const void * payload, void * user);
 
 static void dlg_add_user(void);
 static void dlg_change_pwd(void);
 static void dlg_confirm_del(const char *name);
+static void dlg_confirm_face(const char * msg, const char * ok_text);
 static void dlg_tip(const char *text);
 static void close_dlg(void);
 static lv_obj_t * dlg_open(const char *title, int w, int h);
@@ -87,6 +112,7 @@ static void dlg_set_msg(const char *text);
 
 /* 敏感操作二次校验（管理员 PIN） */
 static void auth_show(void);
+static void auth_show_ctx(const char * sub_text);
 static void auth_close(void);
 static void auth_key_cb(lv_event_t * e);
 static void auth_cancel_cb(lv_event_t * e);
@@ -127,6 +153,15 @@ static void salt_to_hex(const uint8_t salt[16], char out[33])
         out[i * 2 + 1] = HEX[salt[i] & 15];
     }
     out[32] = '\0';
+}
+
+/* 人脸后端是否支持录入/删除（SAFE_FACE_BACKEND=none 时按钮置灰，spec §4） */
+static bool face_cap_ok(bool need_enroll)
+{
+    const face_caps_t * caps = face_service_caps();
+    if (caps == NULL) return false;
+    uint32_t need = need_enroll ? FACE_CAP_ENROLL : FACE_CAP_DELETE;
+    return (caps->caps & need) != 0u;
 }
 
 /* ================================================================
@@ -240,6 +275,10 @@ lv_obj_t * page_users_create(lv_obj_t * parent)
     lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
 
     rebuild_list();
+
+    /* 人脸录入/删除的异步应答（UI 现代化 ui3）：本页订阅 ENROLL_DONE / DELETE_DONE，
+     * 负责把模组分配的模板号写回 users.json 并刷新列表；横幅由 ui_feedback 出。 */
+    event_bus_subscribe(EV_FACE_EVENT, on_face_event_ui, NULL);
     return root;
 }
 
@@ -388,6 +427,26 @@ static void users_list_loaded(safe_user_t * us, int n)
         lv_label_set_text(btgl, us[i].enabled ? "停用" : "启用");
         lv_obj_set_style_text_font(btgl, app_font_scaled(12), 0);
         lv_obj_center(btgl);
+
+        /* 人脸 —— 已录入（face_id>=0）显示「删人脸」(danger 边)，未录入显示「录人脸」。
+         * 后端不支持录入/删除时整颗按钮置灰（SAFE_FACE_BACKEND=none）。 */
+        bool has_face = (us[i].face_id >= 0);
+        bool cap_ok = face_cap_ok(!has_face);
+        lv_obj_t * b_face = lv_button_create(row);
+        lv_obj_set_size(b_face, SX(64), SY(34));
+        lv_obj_add_style(b_face, &st_ghost_btn, 0);
+        if (!cap_ok) {
+            lv_obj_add_state(b_face, LV_STATE_DISABLED);
+            lv_obj_set_style_opa(b_face, LV_OPA_40, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_event_cb(b_face, row_face_cb, LV_EVENT_CLICKED,
+                                (void *)(uintptr_t)uid);
+        }
+        lv_obj_t * bfl = lv_label_create(b_face);
+        lv_label_set_text(bfl, has_face ? "删人脸" : "录人脸");
+        lv_obj_set_style_text_font(bfl, app_font_scaled(12), 0);
+        lv_obj_set_style_text_color(bfl, has_face ? theme_color(TH_DANGER) : theme_color(TH_ACCENT), 0);
+        lv_obj_center(bfl);
 
         /* 删除 —— 末位管理员锁死 */
         lv_obj_t * b_del = lv_button_create(row);
@@ -546,6 +605,10 @@ static void dlg_cancel_cb(lv_event_t * e)
 {
     (void)e;
     close_dlg();
+    /* 人脸操作的确认弹窗被取消：复位待办标记（对其它弹窗无副作用，恒为 NONE） */
+    s_face_op = FACE_OP_NONE;
+    s_face_pending_uid = -1;
+    s_face_pending_tpl = -1;
 }
 
 static void dlg_ok_cb(lv_event_t * e)
@@ -626,6 +689,10 @@ static void add_user_worker(void * p)
     strncpy(u.role, "user", sizeof(u.role) - 1);
     strncpy(u.auth_method, "pin", sizeof(u.auth_method) - 1);
     u.enabled = true;
+    /* 新建用户默认未绑定人脸模板：face_id 必须显式置 -1（memset 给的是 0，
+     * 而 UI 用人脸按钮按 face_id>=0 判定「已录入」，不置 -1 会让新用户错显示
+     * 「删人脸」且被 user_find_by_face(0) 误命中）。rpc.c 的 add_user 同样置 -1。 */
+    u.face_id = -1;
     uint8_t salt[16];
     pin_hash(a->pin, salt, u.pin_hash);
     salt_to_hex(salt, u.pin_salt);
@@ -894,6 +961,10 @@ static void auth_cancel_cb(lv_event_t * e)
 {
     (void)e;
     auth_close();
+    /* 二次确认被放弃：人脸待办一并复位（删除用户路径该标记本就是 NONE） */
+    s_face_op = FACE_OP_NONE;
+    s_face_pending_uid = -1;
+    s_face_pending_tpl = -1;
 }
 
 /* PBKDF2 校验在后台线程跑，结果回主线程 */
@@ -901,6 +972,15 @@ static void auth_result(int r)
 {
     if (r == 0) {
         auth_close();
+        /* ★ 分叉：本次二次确认是为哪个人脸操作发起的（UI 现代化 ui3） */
+        if (s_face_op == FACE_OP_ENROLL) {
+            dlg_confirm_face("确认为该用户录入人脸？\n录入期间请正对摄像头保持不动。", "开始录入");
+            return;
+        }
+        if (s_face_op == FACE_OP_DELETE) {
+            dlg_confirm_face("确定删除该用户已绑定的人脸？\n删除后该用户将无法刷脸开锁。", "确认删除");
+            return;
+        }
         astore_load_users(del_check_loaded);   /* 校验通过 → 进入删除确认 */
     } else {
         s_auth_pin[0] = '\0';
@@ -921,7 +1001,9 @@ static void auth_ok_cb(lv_event_t * e)
     astore_verify_admin(s_auth_pin, auth_result);
 }
 
-static void auth_show(void)
+/* 管理员 PIN 二次确认弹窗。sub_text 说明「本次二次确认是为了哪类敏感操作」，
+ * 因为删除用户 / 录入人脸 / 删除人脸 复用同一套弹窗（UI 现代化 ui3）。 */
+static void auth_show_ctx(const char * sub_text)
 {
     auth_close();
     lv_obj_t * scr = lv_screen_active();
@@ -949,7 +1031,8 @@ static void auth_show(void)
     lv_obj_set_pos(t, 0, SY(14));
 
     lv_obj_t * sub = lv_label_create(win);
-    lv_label_set_text(sub, "删除用户需二次验证管理员 PIN");
+    lv_label_set_text(sub, (sub_text && *sub_text) ? sub_text
+                                                   : "删除用户需二次验证管理员 PIN");
     lv_obj_set_style_text_font(sub, app_font_scaled(12), 0);
     lv_obj_set_style_text_color(sub, theme_color(TH_TEXT_MUT), 0);
     lv_obj_set_width(sub, SX(380));
@@ -1014,6 +1097,12 @@ static void auth_show(void)
     lv_obj_add_style(ok, &st_accent_btn_pr, LV_STATE_PRESSED);
 }
 
+/* 兼容旧调用点：不指定副标题时按「删除用户」文案（原行为）。 */
+static void auth_show(void)
+{
+    auth_show_ctx(NULL);
+}
+
 /* ================================================================
  *  删除（保持不变）
  * ================================================================ */
@@ -1049,16 +1138,190 @@ static void del_btn_cb(lv_event_t * e)
     auth_show();
 }
 
-static void dlg_confirm_del(const char *msg)
+/* ================================================================
+ *  确认弹窗底部按钮定位（dlg_confirm_del / dlg_confirm_face 共用）
+ *
+ *  ⚠ 陷阱：不能用 lv_obj_get_width/height(s_win) 反推按钮坐标 —— dlg_open 里
+ *  刚 lv_obj_set_size 完的窗口要到【下一次布局】才有 coords，此处查询恒为 0，
+ *  会让按钮落到负坐标（画不出来）。直接用 dlg_open 的入参尺寸算。
+ *  返回的两个按钮：左「取消」在 x，右「确认」在 x+144，尺寸均 136×44。
+ * ================================================================ */
+static void dlg_bottom_btn_xy(int win_w, int win_h, int32_t * x, int32_t * y)
 {
-    dlg_open("删除确认", 360, 180);  /* 删除确认 */
+    *y = win_h - 16 - 44 - 16;              /* 底边留 16，按钮高 44 */
+    *x = (win_w - 32 - 280) / 2 + 16;       /* 两按钮(136×2)+间距 8 共 280，左右各留 16 */
+}
+
+/* 确认弹窗骨架：文案顶对齐堆叠（否则列居中的文案会被底部按钮压住），
+ * 键盘隐藏（本类弹窗无输入框）。win 已由 dlg_open 建好。 */
+static void dlg_confirm_begin(int win_w, int win_h, const char * title, const char * msg)
+{
+    dlg_open(title, win_w, win_h);
+    /* dlg_open 默认列居中：文案会被底部按钮压住，改成顶部对齐 */
+    lv_obj_set_flex_align(s_win, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    /* dlg_open 会无条件建一张软键盘（供表单弹窗用）；本确认弹窗没有输入框，
+     * 隐藏它以免键盘压住底部按钮（PC 1.8x 下会重叠，见截图验收）。 */
+    if (s_kb) lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_t * m = lv_label_create(s_win);
     lv_label_set_text(m, msg);
     lv_obj_add_style(m, &st_text, 0);
     lv_obj_set_style_text_font(m, app_font_scaled(16), 0);
+    lv_obj_set_width(m, win_w - 32);
+    lv_obj_set_style_text_align(m, LV_TEXT_ALIGN_CENTER, 0);
+}
 
-    const int32_t btn_y = lv_obj_get_height(s_win) - 16 - 44 - 16;
-    const int32_t btn_x = (lv_obj_get_width(s_win) - 32 - 280) / 2 + 16;
+/* ================================================================
+ *  人脸录入 / 删除（UI 现代化 ui3，spec §4）
+ *  链路：行按钮 → admin PIN 二次确认（与删除用户同套弹窗）
+ *       → 确认弹窗 → face_service_enroll_async()/delete_async()（立即返回）
+ *       → EV_FACE_EVENT(ENROLL_DONE/DELETE_DONE)
+ *           ├─ ui_feedback：横幅反馈
+ *           └─ 本页：user_face_set 写回模板号（worker 线程落盘）+ 刷新列表
+ * ================================================================ */
+
+/* 人脸操作确认弹窗（复用 dlg_confirm_del 的版式，按钮语义换成 开始/取消） */
+static void dlg_confirm_face(const char * msg, const char * ok_text)
+{
+    const int32_t win_w = 380, win_h = 200;
+    dlg_confirm_begin(win_w, win_h, "人脸操作确认", msg);
+
+    int32_t btn_x = 0, btn_y = 0;
+    dlg_bottom_btn_xy(win_w, win_h, &btn_x, &btn_y);
+
+    lv_obj_t * cc = lv_button_create(s_win);
+    lv_obj_set_size(cc, 136, 44);
+    lv_obj_set_pos(cc, btn_x, btn_y);
+    lv_obj_add_flag(cc, LV_OBJ_FLAG_FLOATING);
+    lv_obj_add_style(cc, &st_ghost_btn, 0);
+    lv_obj_add_event_cb(cc, dlg_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * ccl = lv_label_create(cc);
+    lv_label_set_text(ccl, "取消");
+    lv_obj_set_style_text_font(ccl, app_font_scaled(14), 0);
+    lv_obj_center(ccl);
+
+    lv_obj_t * yy = ui_icon_text_button(s_win, LV_SYMBOL_OK, ok_text,
+                                        136, 44, &st_accent_btn,
+                                        theme_color(TH_ACCENT_INK),
+                                        face_start_cb, NULL);
+    lv_obj_add_flag(yy, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_pos(yy, btn_x + 144, btn_y);
+}
+
+/* 行内「录/删人脸」按钮：记下操作类型后进 admin PIN 二次确认 */
+static void row_face_cb(lv_event_t * e)
+{
+    s_sel_id = (int)(uintptr_t)lv_event_get_user_data(e);
+    face_btn_cb(e);
+}
+
+static void face_btn_cb(lv_event_t * e)
+{
+    (void)e;
+    if (s_sel_id < 0) return;
+    safe_user_t u;
+    if (user_find_by_id(s_sel_id, &u) != 0) {
+        dlg_tip("用户不存在，请刷新列表");
+        return;
+    }
+    /* 后端能力以点击时为准（构建期 none 后端按钮已置灰，这里再兜一层） */
+    if (!face_cap_ok(u.face_id < 0)) {
+        dlg_tip("当前人脸后端不支持该操作");
+        return;
+    }
+    s_face_op          = (u.face_id >= 0) ? FACE_OP_DELETE : FACE_OP_ENROLL;
+    s_face_pending_uid = u.id;
+    s_face_pending_tpl = u.face_id;
+    /* ★ 敏感操作：与删除用户同一套 admin PIN 二次确认，副标题按本次操作定制 */
+    auth_show_ctx(s_face_op == FACE_OP_DELETE ? "删除人脸需二次验证管理员 PIN"
+                                              : "录入人脸需二次验证管理员 PIN");
+}
+
+/* 二次确认通过：真正发起异步录入/删除 */
+static void face_start_cb(lv_event_t * e)
+{
+    (void)e;
+    safe_err_t r;
+    if (s_face_op == FACE_OP_ENROLL) {
+        r = face_service_enroll_async();          /* hal_face.h:104，立即返回 */
+    } else if (s_face_op == FACE_OP_DELETE) {
+        r = face_service_delete_async(s_face_pending_tpl);   /* hal_face.h:107 */
+    } else {
+        return;
+    }
+    close_dlg();
+    if (r != SAFE_OK) {
+        /* 发起就失败（设备忙/不支持）：不会收到 DONE 事件，这里就地复位并提示 */
+        char buf[96];
+        snprintf(buf, sizeof(buf), "人脸操作发起失败（err=%d）", (int)r);
+        dlg_tip(buf);
+        s_face_op = FACE_OP_NONE;
+        s_face_pending_uid = -1;
+        s_face_pending_tpl = -1;
+    }
+    /* 发起成功：等 EV_FACE_EVENT 应答，由 on_face_event_ui 写回 + 刷新 */
+}
+
+/* face_id 写回 users.json —— 文件 IO 下沉 worker 线程，主线程不阻塞（CLAUDE.md §8） */
+static void face_set_worker(void * p)
+{
+    user_op_job_t * a = (user_op_job_t *)p;
+    a->result = user_face_set(a->id, a->result);   /* 复用 result 传模板号（-1=清除） */
+}
+
+static void face_set_done(void * p)
+{
+    user_op_job_t * a = (user_op_job_t *)p;
+    if (a->result != 0) {
+        dlg_tip("人脸绑定写回失败，请重试");
+    }
+    free(a);
+    rebuild_list();   /* 应答到达后重载该用户条目（现有列表刷新路径，spec §4） */
+}
+
+/* EV_FACE_EVENT 应答：录入成功写回模板号，删除成功写 -1，然后刷新列表 */
+static void on_face_event_ui(ev_topic_t topic, const void * payload, void * user)
+{
+    (void)user;
+    if (topic != EV_FACE_EVENT || payload == NULL) return;
+
+    const ev_face_event_t * e = (const ev_face_event_t *)payload;
+    int tpl = -1;
+
+    if (e->ev == FACE_EV_ENROLL_DONE) {
+        if (s_face_op != FACE_OP_ENROLL) return;      /* 不是本页发起的（如 RPC），只出横幅 */
+        if (e->enroll.err != SAFE_OK) tpl = -2;       /* 失败：不写回 */
+        else tpl = e->enroll.face_id;
+    } else if (e->ev == FACE_EV_DELETE_DONE) {
+        if (s_face_op != FACE_OP_DELETE) return;
+        if (e->del.err != SAFE_OK) tpl = -2;
+        else tpl = -1;                                /* 删除成功：清除绑定 */
+    } else {
+        return;
+    }
+
+    int uid = s_face_pending_uid;
+    s_face_op = FACE_OP_NONE;
+    s_face_pending_uid = -1;
+    s_face_pending_tpl = -1;
+
+    if (tpl == -2 || uid < 0) return;                 /* 失败：横幅已由 ui_feedback 出 */
+
+    user_op_job_t * a = (user_op_job_t *)calloc(1, sizeof(*a));
+    if (a == NULL) return;
+    a->id = uid;
+    a->result = tpl;                                   /* worker 内转成 user_face_set 的入参 */
+    worker_post(face_set_worker, a, face_set_done);
+}
+
+static void dlg_confirm_del(const char *msg)
+{
+    const int32_t win_w = 360, win_h = 200;
+    dlg_confirm_begin(win_w, win_h, "删除确认", msg);
+
+    /* ⚠ 原实现用 lv_obj_get_width/height(s_win) 反推坐标，新建窗口尚未布局、
+     *    查询恒为 0 → 按钮落到负坐标不可见（预存在缺陷，ui3 一并修复）。 */
+    int32_t btn_x = 0, btn_y = 0;
+    dlg_bottom_btn_xy(win_w, win_h, &btn_x, &btn_y);
 
     lv_obj_t * cc = lv_button_create(s_win);
     lv_obj_set_size(cc, 136, 44);
@@ -1321,6 +1584,16 @@ void page_users_test_open_otp_dlg(void)
     s_sel_id = 0;
     s_pwd_is_admin = true;
     pwd_otp_show();
+}
+
+/* ★ 测试钩子：SAFE_TEST_DLG=face 直接打开"人脸操作确认"弹窗（UI 现代化 ui3 截图验收）。
+ * 走「未录入 → 录人脸」分支的文案；只铺弹窗，不发起真实录入。 */
+void page_users_test_open_face_dlg(void)
+{
+    s_face_op          = FACE_OP_ENROLL;
+    s_face_pending_uid = 0;
+    s_face_pending_tpl = -1;
+    dlg_confirm_face("确认为该用户录入人脸？\n录入期间请正对摄像头保持不动。", "开始录入");
 }
 
 

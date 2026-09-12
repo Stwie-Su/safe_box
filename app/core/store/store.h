@@ -69,6 +69,7 @@ int user_load_all(safe_user_t **list, int *count);       /* 0=成功；*list 用
 int user_add(const safe_user_t *u);                      /* 0=成功；失败计数/锁定状态忽略 */
 int user_del(int id);                                    /* 0=成功 */
 int user_update(const safe_user_t *u);                   /* 按 id 整体覆盖；0=成功 */
+int user_face_set(int user_id, int face_id);             /* 单字段便捷写：人脸模板绑定，-1=清除；0=成功 */
 int user_find_by_name(const char *name, safe_user_t *out);/* 0=找到 */
 int user_find_by_id(int id, safe_user_t *out);            /* 0=找到 */
 int user_find_by_face(int face_id, safe_user_t *out);     /* 0=找到（face_id>=0 且已录入） */

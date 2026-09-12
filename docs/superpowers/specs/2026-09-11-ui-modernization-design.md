@@ -14,7 +14,7 @@ Sprint3 3a/3b/3c 已把人脸链路全通（`EV_FACE_EVENT` 总线广播 reason 
 |---|---|---|
 | 识别结果（OK/NO_MATCH/LIVENESS_FAIL/…） | 总线广播 | 人脸页只有视频+光带，**零反馈** |
 | WAIT_OTP / LOCKOUT | FSM → `fsm_ui_hook` | 硬切页；LOCKOUT 无倒计时提示 |
-| 人脸录入/删除 | `face_service_enroll/delete_tpl` + 总线应答 | **UI 无入口**（只能 RPC 注入） |
+| 人脸录入/删除 | `face_service_enroll_async()` / `face_service_delete_async()` + 总线应答 | **UI 无入口**（只能 RPC 注入） |
 | 连败计数（n/3） | `auth_fsm.c` 内部 `fail_streak` | 不可见 |
 | 页面切换 | `ui.c switch_page` → `lv_obj_set_hidden` | 瞬间硬切 |
 | 按压反馈 | theme.c 单一过渡雏形 | 颜色直跳 |
@@ -93,8 +93,10 @@ ui.c 布局（纵向四层，全部常驻同一 screen）：
 
 - 用户条目行加「人脸」操作：
   - `face_id<0` → 「录入人脸」→ 管理员确认（复用现有 admin 确认弹窗模式，
-    与改密同级敏感操作）→ `face_service_enroll()`
-  - `face_id≥0` → 「删除人脸」→ 同上确认 → `face_service_delete_tpl(u->face_id)`
+    与改密同级敏感操作）→ `face_service_enroll_async(void)`
+    （hal_face.h:104，异步：立即返回，结果经 `FACE_EV_ENROLL_DONE` 上报）
+  - `face_id≥0` → 「删除人脸」→ 同上确认 →
+    `face_service_delete_async(int32_t face_id)`（hal_face.h:107）
 - 应答（`EV_FACE_EVENT` ENROLL_DONE/DELETE_DONE）→ ui_feedback 横幅；
   录入成功时把模组分配的 uid 写回该用户的 `face_id`（`safe_user_t.face_id`
   已存在，store.h:43；store.c:475 已兼容老数据缺字段）。
@@ -102,10 +104,12 @@ ui.c 布局（纵向四层，全部常驻同一 screen）：
   「查→改→写回」三步有丢失并发更新风险）——新增便捷接口
   `user_face_set(int user_id, int face_id)`（-1=清除），内部读改写整记录并
   落盘；**接口变更先改《技术路线规约》§5.6 再动代码**。
-  删除路径同用该接口写 -1，并调 `face_service_delete_tpl(u->face_id)`
+  删除路径同用该接口写 -1，并调 `face_service_delete_async(u->face_id)`
 - 页面刷新：应答到达后重载该用户条目（现有列表刷新路径）
 - 后端不支持时（`SAFE_FACE_BACKEND=none`）按钮置灰（`face_service_caps()`
-  查能力，hal_face.h 已有 caps 机制）
+  查能力，hal_face.h:97）
+- 公开 API 全部在 `hal/hal_face.h`（include 即 `#include "hal/hal_face.h"`，
+  无 face_service.h）
 
 ## 5. 分层与纪律
 
