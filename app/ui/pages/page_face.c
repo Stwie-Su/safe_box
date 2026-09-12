@@ -23,6 +23,14 @@
  *
  *   v4（2026-09-10）：预览面板自适应 + 画面填满 + 单 FPS 角标。
  *
+ *   v6（2026-09-12，帧率优化，详见 开发进度.md「帧率优化」小节）：
+ *   - **画布收缩到视频矩形**：v5 的画布满铺面板，每帧都要给视频区之外的留白
+ *     刷一次底色（板上 1008×410 面板下约 20~30 万像素/帧，纯浪费）。v6 画布
+ *     尺寸 = 视频矩形，留白交给 s_preview 的底色承担，每帧零额外开销。
+ *   - **显示放大倍数上限 1.3×**（FACE_MAX_SCALE）：采集源只有 320×240，放大
+ *     超过 1.3× 不增加任何信息，但每多一个显示像素 LVGL 每帧就要多做一次
+ *     565→ARGB8888 转换 + 一次 32bpp 帧缓冲写入 —— 这是板上实测的瓶颈。
+ *
  * 设计约束：
  *   - 摄像头未配置 / 未出帧：显示提示文字；
  *   - 首帧到达后隐藏占位文字；
@@ -50,6 +58,14 @@
 #define CAP_H  240
 #define PREVIEW_MS 50      /* 20fps 拉帧周期；YUYV@320x240 实测上限 20fps */
 
+/* 显示放大倍数上限（千分比，1300 = 1.3×）。
+ * 为什么封顶：LVGL 的绘制耗时与「显示像素数」近似成正比（板上实测 223k 像素 →
+ * 渲染周期 121ms ≈ 8fps；130k 像素 → 23ms ≈ 21.6fps）。而采集源固定 320×240，
+ * 放大 1.3× 之后每个源像素仍被显示（1.3 个显示像素/源像素），继续放大只是最近邻
+ * 复制，不增加任何细节，却线性地吃掉帧率。取 1.3× 是「画面够大」与「UI ≥20fps」
+ * 的实测平衡点；面板比 416×312 还小时按面板自适应（取 min），不会过度放大。 */
+#define FACE_MAX_SCALE 1300
+
 /* FPS 统计滑窗长度 */
 #define FPS_WINDOW_MS 500
 
@@ -65,7 +81,7 @@ static lv_obj_t * s_preview;          // 预览面板（监听 SIZE_CHANGED）
 static lv_obj_t * s_fps_label;        // 双 FPS 角标
 static lv_timer_t * s_frame_timer;
 
-/* 画布帧缓冲（动态大小：跟随预览面板，满铺） */
+/* 画布帧缓冲：尺寸 = **视频矩形**（不是整个面板）。理由见 rebuild_canvas()。 */
 static uint16_t * s_canvas_buf = NULL;
 static int32_t    s_canvas_w   = 0;
 static int32_t    s_canvas_h   = 0;
@@ -445,9 +461,9 @@ static void preview_size_changed_cb(lv_event_t * e)
     int32_t h = lv_obj_get_height(s_preview);
     if (w <= 0 || h <= 0) return;     /* 初始 0 阶段跳过 */
 
-    rebuild_canvas(w, h);
-    compute_video_rect(w, h);
+    compute_video_rect(w, h);      /* 先算视频矩形：画布尺寸/映射表都依赖它 */
     rebuild_maps();
+    rebuild_canvas(w, h);
     reposition_corners_and_beam(w, h);
     /* FPS 角标：右上角，按面板宽度自适配 */
     if (s_fps_label) {
@@ -455,28 +471,47 @@ static void preview_size_changed_cb(lv_event_t * e)
     }
 }
 
-/* 重建画布缓冲：分配新 buffer 并绑定到 canvas（满铺面板） */
+/* 重建画布缓冲：**尺寸 = 视频矩形**（不是整个面板），并把画布定位到居中位置。
+ * 为什么不再满铺面板：满铺时「视频区之外」的留白每帧都要重新刷一次底色（板上
+ * 1008×410 面板下约 20~30 万像素/帧），而这块区域只要在尺寸/主题变化时才需要刷。
+ * 改成画布 = 视频矩形后，留白交给 s_preview 自己的 panel 底色承担，每帧零额外
+ * 开销，画布缓冲也从约 827KB 降到视频矩形大小（416×312×2 ≈ 259KB）。
+ * 注意：本函数必须在 compute_video_rect() 之后调用。 */
 static void rebuild_canvas(int32_t w, int32_t h)
 {
-    if (w == s_canvas_w && h == s_canvas_h && s_canvas_buf != NULL) return;
+    (void)w; (void)h;                 /* 尺寸取自 s_vid_*，面板尺寸不再直接使用 */
+    int32_t cw = s_vid_w;
+    int32_t ch = s_vid_h;
+    if (cw <= 0 || ch <= 0) return;
 
-    size_t bytes = (size_t)w * (size_t)h * 2u;     /* RGB565 */
+    if (cw == s_canvas_w && ch == s_canvas_h && s_canvas_buf != NULL) {
+        /* 尺寸没变：只同步位置（s_vid_x/y 可能随面板尺寸变过），不重新分配 */
+        if (s_canvas) {
+            lv_obj_set_size(s_canvas, cw, ch);
+            lv_obj_set_pos(s_canvas, s_vid_x, s_vid_y);
+        }
+        return;
+    }
+
+    size_t bytes = (size_t)cw * (size_t)ch * 2u;   /* RGB565 */
     uint16_t * nb = (uint16_t *)malloc(bytes);
     if (nb == NULL) {
         printf("[FACE] canvas 缓冲分配失败 (%u bytes)，保持旧尺寸\n", (unsigned)bytes);
         return;
     }
-    /* 初始化为面板底色（视频区外留白用同一底色，视觉上自然） */
+    /* 初始化为面板底色（首帧到达前 / 无摄像头时透出同一底色，视觉上自然） */
     uint16_t bg565 = lv_color_to_u16(theme_color(TH_PANEL));
-    for (size_t i = 0; i < (size_t)w * (size_t)h; i++) nb[i] = bg565;
+    for (size_t i = 0; i < (size_t)cw * (size_t)ch; i++) nb[i] = bg565;
 
     if (s_canvas) {
-        lv_canvas_set_buffer(s_canvas, nb, w, h, LV_COLOR_FORMAT_RGB565);
+        lv_canvas_set_buffer(s_canvas, nb, cw, ch, LV_COLOR_FORMAT_RGB565);
+        lv_obj_set_size(s_canvas, cw, ch);
+        lv_obj_set_pos(s_canvas, s_vid_x, s_vid_y);
     }
     free(s_canvas_buf);
     s_canvas_buf = nb;
-    s_canvas_w   = w;
-    s_canvas_h   = h;
+    s_canvas_w   = cw;
+    s_canvas_h   = ch;
 }
 
 /* 计算 4:3 视频矩形：等比缩放取最大，居中（不拉伸变形）。
@@ -491,6 +526,7 @@ static void compute_video_rect(int32_t cw, int32_t ch)
     int32_t sy = (int32_t)(((int64_t)avail_h * 1000) / CAP_H);
     int32_t scale = (sx < sy) ? sx : sy;
     if (scale < 1) scale = 1;
+    if (scale > FACE_MAX_SCALE) scale = FACE_MAX_SCALE;   /* 放大封顶：见 FACE_MAX_SCALE 注释 */
 
     s_vid_w = (int32_t)(((int64_t)CAP_W * scale) / 1000);
     s_vid_h = (int32_t)(((int64_t)CAP_H * scale) / 1000);
@@ -616,40 +652,28 @@ static void frame_timer_cb(lv_timer_t * t)
     if (face_thread_get_preview(s_cap_buf, &info)) {
         /* 1. 帧已在 s_cap_buf（face 线程双帧缓冲拷贝而来），无需再拷贝 */
 
-        /* 2. 最近邻缩放 320×240 → 居中 4:3 矩形（查表，绘制期零除法） */
+        /* 2. 最近邻缩放 320×240 → 画布（画布 == 居中的 4:3 视频矩形），查表，
+         *    绘制期零除法。画布已收缩到视频矩形，因此**没有留白要填** —— 留白
+         *    是 s_preview 的底色，只在尺寸/主题变化时刷一次。 */
         int32_t dst_stride = s_canvas_w;
-        uint16_t bg565 = lv_color_to_u16(theme_color(TH_PANEL));
-
-        /* 2a. 视频区之外的留白填面板底色（仅填上下两条，避免全画布重绘） */
+        uint16_t * buf = s_canvas_buf;
         for (int32_t y = 0; y < s_canvas_h; y++) {
-            if (y >= s_vid_y && y < s_vid_y + s_vid_h) continue;
-            uint16_t * row = &s_canvas_buf[y * dst_stride];
-            for (int32_t x = 0; x < dst_stride; x++) row[x] = bg565;
-        }
-
-        /* 2b. 视频行：左右留白 + 中间缩放内容 */
-        for (int32_t y = 0; y < s_vid_h; y++) {
-            uint16_t * dst_row = &s_canvas_buf[(s_vid_y + y) * dst_stride];
-            /* 左侧留白 */
-            for (int32_t x = 0; x < s_vid_x; x++) dst_row[x] = bg565;
-            /* 中间内容 */
+            uint16_t * dst_row = &buf[(size_t)y * dst_stride];
             if (s_map_x && s_map_y) {
                 const uint16_t * src_row = &s_cap_buf[(size_t)s_map_y[y] * CAP_W];
-                for (int32_t x = 0; x < s_vid_w; x++) {
-                    dst_row[s_vid_x + x] = src_row[s_map_x[x]];
+                for (int32_t x = 0; x < s_canvas_w; x++) {
+                    dst_row[x] = src_row[s_map_x[x]];
                 }
             }
             else {
                 /* 映射表分配失败时回退：逐像素整型除法 */
-                int32_t sy = (int32_t)(((int64_t)y * CAP_H) / s_vid_h);
+                int32_t sy = (int32_t)(((int64_t)y * CAP_H) / s_canvas_h);
                 const uint16_t * src_row = &s_cap_buf[sy * CAP_W];
-                for (int32_t x = 0; x < s_vid_w; x++) {
-                    int32_t sx = (int32_t)(((int64_t)x * CAP_W) / s_vid_w);
-                    dst_row[s_vid_x + x] = src_row[sx];
+                for (int32_t x = 0; x < s_canvas_w; x++) {
+                    int32_t sx = (int32_t)(((int64_t)x * CAP_W) / s_canvas_w);
+                    dst_row[x] = src_row[sx];
                 }
             }
-            /* 右侧留白 */
-            for (int32_t x = s_vid_x + s_vid_w; x < dst_stride; x++) dst_row[x] = bg565;
         }
 
         /* 3. 统计视频帧（face 线程成功取帧且被主线程消费的计数） */
@@ -659,14 +683,8 @@ static void frame_timer_cb(lv_timer_t * t)
         if (!lv_obj_is_hidden(s_ph_label)) {
             lv_obj_set_hidden(s_ph_label, true);
         }
-        /* 只 invalidate 视频矩形（减少重绘面积，提升流畅度） */
-        lv_area_t obj_area, a;
-        lv_obj_get_coords(s_canvas, &obj_area);
-        a.x1 = obj_area.x1 + s_vid_x;
-        a.y1 = obj_area.y1 + s_vid_y;
-        a.x2 = a.x1 + s_vid_w - 1;
-        a.y2 = a.y1 + s_vid_h - 1;
-        lv_obj_invalidate_area(s_canvas, &a);
+        /* 画布 == 视频矩形，整块 invalidate 即已是最小重绘面积 */
+        lv_obj_invalidate(s_canvas);
     }
     /* 无新帧（face 线程还没产出 / 无摄像头）时保持上一帧或占位文字。 */
 
@@ -694,3 +712,6 @@ static void cancel_cb(lv_event_t * e)
 {
     back_cb(e);
 }
+
+
+
