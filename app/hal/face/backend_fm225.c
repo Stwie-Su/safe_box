@@ -10,8 +10,9 @@
  *   - M>>H NOTE(0x01)：Data = nid + [人脸状态等]，NID_READY(0) 上电就绪通知。
  *
  * 数据流（规约 §5.19 接线）：
- *   主线程 face_service_init("fm225") → fm225_open()（SAFE_FACE_DEV，默认
- *   /tmp/fm225_host；真机 /dev/ttyUSB0）+ termios 115200 8N1；
+ *   主线程 face_service_init("fm225") → fm225_open()（SAFE_FM225_DEV，
+ *   兼容旧名 SAFE_FACE_DEV，默认 /tmp/fm225_host；上板 /dev/ttymxc2）
+ *   + termios 115200 8N1；
  *   face_service_start → fm225_start() 下发 VERIFY 之外还把 fd 经
  *   fm225_uart_fd() 交给 face_thread_set_uart_fd()（start 前调用无竞争）。
  *   face 线程 poll 到 UART 可读 → read → fm225_proto_feed → 帧回调（本文件
@@ -117,8 +118,13 @@ static safe_err_t fm225_send_cmd(uint8_t cmd, const uint8_t * payload, size_t le
 
 static safe_err_t fm225_open(void)
 {
-    const char * dev = getenv("SAFE_FACE_DEV");
-    if(dev == NULL || *dev == '\0') dev = "/tmp/fm225_host";   /* PC：socat 虚拟串口 */
+    /* 设备节点优先级：SAFE_FM225_DEV（上板预备新增，语义明确）
+     *             > SAFE_FACE_DEV（旧名，保持兼容）
+     *             > /tmp/fm225_host（PC：socat 虚拟串口）。
+     * 上板：SAFE_FM225_DEV=/dev/ttymxc2（i.MX6ULL UART3，115200 8N1）。 */
+    const char * dev = getenv("SAFE_FM225_DEV");
+    if(dev == NULL || *dev == '\0') dev = getenv("SAFE_FACE_DEV");
+    if(dev == NULL || *dev == '\0') dev = "/tmp/fm225_host";
 
     s_uart_fd = open(dev, O_RDWR | O_NOCTTY | O_NONBLOCK);
     if(s_uart_fd < 0) {
@@ -138,7 +144,7 @@ static safe_err_t fm225_open(void)
     }
     /* pty 侧 tcsetattr 可能失败（虚拟串口不支持全部参数）——非致命，字节流照通 */
 
-    printf("[fm225] 已打开 %s（fd=%d）\n", dev, s_uart_fd);
+    printf("[fm225] 已打开 %s（fd=%d，115200 8N1）\n", dev, s_uart_fd);
     return SAFE_OK;
 }
 
@@ -423,3 +429,4 @@ const face_backend_t * face_backend_fm225(void)
 {
     return &backend;
 }
+
