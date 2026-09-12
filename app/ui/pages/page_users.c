@@ -1161,7 +1161,7 @@ static void dlg_confirm_begin(int win_w, int win_h, const char * title, const ch
     lv_obj_set_flex_align(s_win, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     /* dlg_open 会无条件建一张软键盘（供表单弹窗用）；本确认弹窗没有输入框，
      * 隐藏它以免键盘压住底部按钮（PC 1.8x 下会重叠，见截图验收）。 */
-    if (s_kb) lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+    if (s_kb) lv_obj_set_hidden(s_kb, true);
     lv_obj_t * m = lv_label_create(s_win);
     lv_label_set_text(m, msg);
     lv_obj_add_style(m, &st_text, 0);
@@ -1191,7 +1191,7 @@ static void dlg_confirm_face(const char * msg, const char * ok_text)
     lv_obj_t * cc = lv_button_create(s_win);
     lv_obj_set_size(cc, 136, 44);
     lv_obj_set_pos(cc, btn_x, btn_y);
-    lv_obj_add_flag(cc, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_floating(cc, true);
     lv_obj_add_style(cc, &st_ghost_btn, 0);
     lv_obj_add_event_cb(cc, dlg_cancel_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * ccl = lv_label_create(cc);
@@ -1203,7 +1203,7 @@ static void dlg_confirm_face(const char * msg, const char * ok_text)
                                         136, 44, &st_accent_btn,
                                         theme_color(TH_ACCENT_INK),
                                         face_start_cb, NULL);
-    lv_obj_add_flag(yy, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_floating(yy, true);
     lv_obj_set_pos(yy, btn_x + 144, btn_y);
 }
 

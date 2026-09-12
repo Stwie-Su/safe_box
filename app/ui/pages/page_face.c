@@ -91,7 +91,6 @@ static const theme_role_t SCAN_ROLE[PAGE_FACE_SCAN_COUNT] = {
     TH_ACCENT,   /* PAGE_FACE_SCAN_IDLE */
     TH_OK,       /* PAGE_FACE_SCAN_OK   */
     TH_DANGER,   /* PAGE_FACE_SCAN_FAIL */
-    TH_WARN,     /* PAGE_FACE_SCAN_WARN */
 };
 
 /* ---- 双 FPS 计数（各自 500ms 滑窗，独立统计） ---- */

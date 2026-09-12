@@ -4,7 +4,7 @@
  *
  * 职责：
  *  1) 订阅 EV_FACE_EVENT + EV_AUTH_RESULT，把事件翻译成顶部横幅文案与档位；
- *  2) 同步驱动人脸页扫描框状态（IDLE/OK/FAIL/WARN）；
+ *  2) 同步驱动人脸页扫描框状态（IDLE/OK/FAIL）；
  *  3) LOCKOUT 期间常驻横幅并每秒刷新倒计时，锁定解除自动淡出。
  *
  * 事件 → 反馈映射（spec §1 表）：

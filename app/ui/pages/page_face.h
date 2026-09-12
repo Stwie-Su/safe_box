@@ -3,7 +3,7 @@
  * 人脸识别全屏页：从主页"人脸识别"卡片进入，展示扫描动效 + 实时视频预览。
  *
  * UI 现代化（spec §3 后半）新增「扫描框状态染色」：
- * 四角扫描框 + 扫描光带按识别结果染色（IDLE=accent / OK=绿 / FAIL=红 / WARN=黄），
+ * 四角扫描框 + 扫描光带按识别结果染色（IDLE=accent / OK=绿 / FAIL=红），
  * 由反馈中枢 ui_feedback 在收到 EV_FACE_EVENT 时调用 page_face_set_scan_state() 驱动。
  */
 #pragma once
@@ -19,7 +19,6 @@ typedef enum {
     PAGE_FACE_SCAN_IDLE = 0,   /* 待机：accent（扫描中） */
     PAGE_FACE_SCAN_OK,         /* 匹配成功：TH_OK 绿 */
     PAGE_FACE_SCAN_FAIL,       /* 未匹配 / 活体失败：TH_DANGER 红（600ms 后自动回 IDLE） */
-    PAGE_FACE_SCAN_WARN,       /* 警示：TH_WARN 黄 */
     PAGE_FACE_SCAN_COUNT
 } page_face_scan_t;
 
