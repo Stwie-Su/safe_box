@@ -17,6 +17,9 @@
  *
  * 降级约定（§5.14 硬要求）：节点不存在 / 打不开 / ioctl 失败时**不崩不卡**——
  * 返回系统时间并打印一条限频（只打一次）的 [time] 告警。
+ *
+ * fd 策略：/dev/rtcN 是**独占**设备（rtc-dev 的 RTC_DEV_BUSY 位，板上实测），
+ * 故首次成功打开后常驻复用，不做「每次读都开关」。详见 §5.14。
  */
 
 #include "time_backend.h"
@@ -101,16 +104,42 @@ static safe_err_t rtc_read_fd(int fd, uint32_t * out_unix)
     return SAFE_OK;
 }
 
+/* 常驻 fd：/dev/rtcN 是独占设备（rtc-dev 的 RTC_DEV_BUSY，见 §5.14），
+ * 首次成功打开后一直持有并复用——若改成每次读都开关，节点一旦被别的进程
+ * 占用（或独占位没能复原），后续每次 hal_time() 都会 EBUSY 而静默退化成
+ * 系统时间。打开失败不缓存「失败」：下次调用仍会重试（驱动后挂也能自愈）。 */
+static int s_fd = -1;
+
+static int rtc_open_fd(void)
+{
+    if(s_fd >= 0) return s_fd;
+
+    const char * dev = time_rtc_dev();
+    int fd = open(dev, O_RDWR);
+    if(fd < 0) return -1;
+    s_fd = fd;
+    return s_fd;
+}
+
+static void rtc_drop_fd(void)
+{
+    if(s_fd < 0) return;
+    close(s_fd);
+    s_fd = -1;
+}
+
 bool time_rtc_available(void)
 {
-    const char * dev = time_rtc_dev();
-    int fd = open(dev, O_RDONLY);
+    const int fd = rtc_open_fd();      /* 探测成功即保留，不再关闭 */
     if(fd < 0) return false;
 
     uint32_t v = 0;
     safe_err_t e = rtc_read_fd(fd, &v);
-    close(fd);
-    return e == SAFE_OK;
+    if(e != SAFE_OK) {
+        rtc_drop_fd();                 /* 能开不能读：当作不可用 */
+        return false;
+    }
+    return true;
 }
 
 /* 运行期读失败限频：RTC 掉了（掉电 / 驱动卸载）时不能每次 hal_time() 都刷一行。 */
@@ -120,7 +149,7 @@ static uint32_t rtc_now(void)
 {
     const char * dev = time_rtc_dev();
 
-    int fd = open(dev, O_RDONLY);
+    const int fd = rtc_open_fd();
     if(fd < 0) {
         if(!s_read_warned) {
             s_read_warned = true;
@@ -131,9 +160,9 @@ static uint32_t rtc_now(void)
 
     uint32_t v = 0;
     safe_err_t e = rtc_read_fd(fd, &v);
-    close(fd);
 
     if(e != SAFE_OK) {
+        rtc_drop_fd();                 /* 丢弃坏 fd，下次调用会重开（驱动重载可自愈） */
         if(!s_read_warned) {
             s_read_warned = true;
             printf("[time] RTC 读失败：ioctl RTC_RD_TIME on %s（%s），本次返回系统时间\n",
@@ -148,7 +177,7 @@ static safe_err_t rtc_set(uint32_t unix_seconds)
 {
     const char * dev = time_rtc_dev();
 
-    int fd = open(dev, O_RDWR);
+    const int fd = rtc_open_fd();
     if(fd < 0) {
         printf("[time] RTC 校时失败：open %s（%s）\n", dev, strerror(errno));
         return SAFE_ERR_IO;
@@ -160,11 +189,10 @@ static safe_err_t rtc_set(uint32_t unix_seconds)
 
     if(ioctl(fd, RTC_SET_TIME, &t) != 0) {
         printf("[time] RTC 校时失败：ioctl RTC_SET_TIME on %s（%s）\n", dev, strerror(errno));
-        close(fd);
+        rtc_drop_fd();
         return SAFE_ERR_PERM;
     }
 
-    close(fd);
     printf("[time] RTC 校时成功：unix=%u 写入 %s\n", unix_seconds, dev);
     return SAFE_OK;
 }
