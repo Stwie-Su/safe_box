@@ -12,6 +12,7 @@ set(SAFE_HAL_SRC
     face/backend_none.c
     time/time_service.c
     time/time_sys.c
+    time/time_rtc.c
     actuator/actuator_service.c
     actuator/actuator_mock.c
     camera/camera_service.c
@@ -29,3 +30,4 @@ target_link_libraries(safe_hal PUBLIC safe_thirdparty Threads::Threads)
 if(WERROR)
     target_compile_options(safe_hal PRIVATE -Werror)
 endif()
+

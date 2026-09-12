@@ -25,6 +25,8 @@
 #include "hal/face/face_thread.h"
 #include "hal/hal_face.h"
 #include "hal/hal_time.h"
+/* 编排层唯一允许包含的时间内部头：只为调用 time_service_init()。 */
+#include "hal/time/time_backend.h"
 #include "platform/platform.h"
 #include "ui/ui.h"
 #include "app_version.h"
@@ -59,6 +61,10 @@ static void on_bus_auth_result(ev_topic_t topic, const void * payload, void * us
 
 void app_main(void)
 {
+    /* 时间后端选择（规约 §5.14）：必须排在最前——TOTP、日志时间戳、
+     * 状态上报、人脸事件时间戳全部依赖它。rtc 不可用时内部自动降级 sys。 */
+    time_service_init();
+
     store_init();
     worker_init();
     hal_actuator_init();
@@ -146,5 +152,6 @@ void app_shutdown(void)
 
     platform_shutdown();          /* §3.2：平台收尾 */
 }
+
 
 
