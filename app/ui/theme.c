@@ -296,10 +296,25 @@ static void press_theme_apply_cb(lv_theme_t * th, lv_obj_t * obj)
 void theme_press_install(void)
 {
     if (s_press_theme != NULL) return;   /* 幂等：只装一次 */
+
+    /* 关键（修回归 D1）：以当前 display 的默认主题为「基主题」。
+     * lv_theme_create() 产出的是空主题（apply_cb / parent 均为 NULL），若直接
+     * lv_display_set_theme() 整体替换 display 主题，会丢失默认主题为每个控件
+     * 提供的默认样式与内边距——SYSTEM 等依赖默认布局的页面因此塌缩、内容上移。
+     * 这里用 lv_theme_set_parent() 把默认主题挂为父级：LVGL 的 apply 递归会
+     * 「先应用父主题样式、再叠加本主题的按压态」，从而在零改页面代码的前提下
+     * 既保留默认外观、又让每个按钮拿到全局按压反馈。lv_theme_copy() 顺带继承
+     * 字体/主色等主题元数据，避免 lv_theme_get_* 读回零值。 */
+    lv_display_t * disp = lv_display_get_default();
     s_press_theme = lv_theme_create();
     if (s_press_theme == NULL) return;
+    lv_theme_t * base = lv_display_get_theme(disp);
+    if (base != NULL) {
+        lv_theme_copy(s_press_theme, base);
+        lv_theme_set_parent(s_press_theme, base);
+    }
     lv_theme_set_apply_cb(s_press_theme, press_theme_apply_cb);
-    lv_display_set_theme(lv_display_get_default(), s_press_theme);
+    lv_display_set_theme(disp, s_press_theme);
 }
 
 
