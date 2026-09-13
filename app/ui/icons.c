@@ -4,6 +4,9 @@
  * 主题切换回调可通过 ui_icon_set_color() 遍历子对象一次性换色。
  */
 #include "icons.h"
+#include "ui/theme.h"                 /* 图标上色只走 token */
+#include "ui/fonts/lv_font_icon.h"   /* 编译进位图图标字体 */
+#include <stdio.h>                   /* 自检打印 */
 #include <stddef.h>
 
 #define UID_MAGIC     0x49434E31u     /* "ICN1" — 标识我们创建的对象 */
@@ -574,3 +577,109 @@ void ui_icon_set_color(lv_obj_t * icon, lv_color_t color)
     if (!icon) return;
     lv_obj_tree_walk(icon, recolor_tree, &color);
 }
+
+/* ================================================================
+ *  图标字体通道（UI 重设计 ui4）
+ *
+ * 与 ui_icon_create()（几何拼装）并存：导航/卡片/列表行/按钮这类「标准线性图标」
+ * 一律走图标字体 —— 字号成体系、颜色跟 token、渲染是字形位图（比逐对象拼装更省）。
+ *
+ * 性能与纪律：
+ *  - 零每帧分配：label 在页面/卡片构造期一次性创建，运行期只改 text_color；
+ *  - 颜色只走 theme_color(role)，四套主题自动跟随，不出现任何 hex；
+ *  - 板子无 FreeType，图标字体是编译进位图（fonts/lv_font_icon_16/20/24/32.c）。
+ * ================================================================ */
+
+/* 码位自检表：与 icons.h 的 ui_glyph_t 一一对应，新增图标必须同时补这里 */
+static const struct {
+    ui_glyph_t g;
+    const char * name;
+} GLYPH_TABLE[] = {
+    { UI_GLYPH_HOME,       "home"      }, { UI_GLYPH_LOCK,      "lock"      },
+    { UI_GLYPH_LOCK_OPEN,  "lock_open" }, { UI_GLYPH_PERSON,    "person"    },
+    { UI_GLYPH_GROUP,      "group"     }, { UI_GLYPH_LIST,      "list"      },
+    { UI_GLYPH_FACE,       "face"      }, { UI_GLYPH_WIFI,      "wifi"      },
+    { UI_GLYPH_SETTINGS,   "settings"  }, { UI_GLYPH_SYSTEM,    "system"    },
+    { UI_GLYPH_FINGER,     "finger"    }, { UI_GLYPH_BELL,      "bell"      },
+    { UI_GLYPH_KEY,        "key"       }, { UI_GLYPH_PLUS,      "plus"      },
+    { UI_GLYPH_CLOSE,      "close"     }, { UI_GLYPH_BACK,      "back"      },
+    { UI_GLYPH_CHEVRON_R,  "chevron_r" }, { UI_GLYPH_SHIELD,    "shield"    },
+    { UI_GLYPH_CAMERA,     "camera"    }, { UI_GLYPH_BATTERY,   "battery"   },
+    { UI_GLYPH_POWER,      "power"     }, { UI_GLYPH_OK,        "ok"        },
+    { UI_GLYPH_WARN,       "warn"      }, { UI_GLYPH_DANGER,    "danger"    },
+    { UI_GLYPH_TIME,       "time"      }, { UI_GLYPH_DATE,      "date"      },
+    { UI_GLYPH_STORAGE,    "storage"   }, { UI_GLYPH_UNDO,      "undo"      },
+    { UI_GLYPH_DELETE,     "delete"    }, { UI_GLYPH_EDIT,      "edit"      },
+    { UI_GLYPH_EYE,        "eye"       }, { UI_GLYPH_BOLT,      "bolt"      },
+    { UI_GLYPH_DONE,       "done"      }, { UI_GLYPH_SEARCH,    "search"    },
+    { UI_GLYPH_LOGOUT,     "logout"    }, { UI_GLYPH_TOGGLE_ON, "toggle_on" },
+    { UI_GLYPH_TOGGLE_OFF, "toggle_off"}, { UI_GLYPH_QR,        "qr"        },
+    { UI_GLYPH_LAN,        "lan"       }, { UI_GLYPH_PIN,       "pin"       },
+};
+
+const lv_font_t * ui_icon_font(int32_t px)
+{
+    if (px <= 16) return &lv_font_icon_16;
+    if (px <= 20) return &lv_font_icon_20;
+    if (px <= 24) return &lv_font_icon_24;
+    return &lv_font_icon_32;
+}
+
+/* 码位 → UTF-8（图标码位全在 U+0800..U+FFFF，固定 3 字节） */
+static void glyph_utf8(uint32_t cp, char out[4])
+{
+    out[0] = (char)(0xE0u | ((cp >> 12) & 0x0Fu));
+    out[1] = (char)(0x80u | ((cp >>  6) & 0x3Fu));
+    out[2] = (char)(0x80u | ( cp        & 0x3Fu));
+    out[3] = '\0';
+}
+
+lv_obj_t * icon_label_colored(lv_obj_t * parent, ui_glyph_t glyph,
+                              int32_t size, theme_role_t role)
+{
+    lv_obj_t * lb = lv_label_create(parent);
+    char s[4];
+    glyph_utf8((uint32_t)glyph, s);
+    lv_label_set_text(lb, s);
+    lv_obj_set_style_text_font(lb, ui_icon_font(size), 0);
+    lv_obj_set_style_text_color(lb, theme_color(role), 0);
+    lv_obj_set_style_text_align(lb, LV_TEXT_ALIGN_CENTER, 0);
+    return lb;
+}
+
+lv_obj_t * icon_label(lv_obj_t * parent, ui_glyph_t glyph, int32_t size)
+{
+    return icon_label_colored(parent, glyph, size, TH_TEXT);
+}
+
+void icon_font_selfcheck(void)
+{
+    static const int32_t SIZES[4] = { 16, 20, 24, 32 };
+    int miss = 0;
+    int total = 0;
+    for (int i = 0; i < 4; i++) {
+        const lv_font_t * f = ui_icon_font(SIZES[i]);
+        if (f == NULL) {
+            printf("[icon] MISS font size=%d (font ptr is NULL)\n", (int)SIZES[i]);
+            miss++;
+            continue;
+        }
+        for (unsigned k = 0; k < sizeof(GLYPH_TABLE) / sizeof(GLYPH_TABLE[0]); k++) {
+            lv_font_glyph_dsc_t d;
+            total++;
+            if (!lv_font_get_glyph_dsc(f, &d, (uint32_t)GLYPH_TABLE[k].g, 0)) {
+                printf("[icon] MISS glyph %s cp=0x%04X size=%d\n",
+                       GLYPH_TABLE[k].name, (unsigned)GLYPH_TABLE[k].g, (int)SIZES[i]);
+                miss++;
+            }
+            else if (i == 3) {
+                /* 只在 32px 档打印一次命中信息，避免日志刷屏 */
+                printf("[icon] ok %-10s cp=0x%04X w=%d h=%d adv=%d\n",
+                       GLYPH_TABLE[k].name, (unsigned)GLYPH_TABLE[k].g,
+                       (int)d.box_w, (int)d.box_h, (int)d.adv_w);
+            }
+        }
+    }
+    printf("[icon] selfcheck done: sizes=16/20/24/32 checks=%d miss=%d\n", total, miss);
+}
+

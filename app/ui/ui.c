@@ -22,6 +22,7 @@
 #include "ui/ui_scale.h"     /* SX/SY 自适应缩放 */
 #include "ui/ui_anim.h"      /* 动效常量集中地（UI 现代化 spec §5.2） */
 #include "ui/ui_feedback.h"  /* 反馈中枢：横幅（spec §1） */
+#include <stdlib.h>            /* getenv */
 #include "ui/icons.h"        /* 矢量图标库 */
 #include "ui/pages/page_monitor.h"
 #include "ui/pages/page_logs.h"
@@ -143,6 +144,8 @@ void ui_init(void)
     // 1. 基础资源初始化（存储与工作线程由 app.c 统一编排）
     app_fonts_init();
     theme_init();
+    /* 图标字体自检：SAFE_ICON_CHECK=1 时逐码位打印命中情况（换字体后自证用） */
+    if (getenv("SAFE_ICON_CHECK")) icon_font_selfcheck();
 
     // 2.5 注册主题切换回调
     theme_register_change_cb(topbar_refresh_theme);
