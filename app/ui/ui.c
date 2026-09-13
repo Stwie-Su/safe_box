@@ -1,16 +1,21 @@
 /**
  * @file ui.c
- * UI 外壳框架：顶部状态栏 + 底部连续导航栏 + 内容容器。
+ * UI 外壳框架：左侧图标导航栏（rail）+ 顶部状态栏 + 内容容器。
  *
  * 布局（设计基准 1024×600，通过 ui_scale 自适应任意窗口）：
- *   顶部状态栏 56px：左 = 锁状态点 + 文本；中 = 实时时钟；右 = MQTT 连接状态点 + WiFi。
- *   内容区：h - TOPBAR_H - TABBAR_H，各页面在此创建。
- *   底部导航 72px（v3：单条连续底栏，4 个图标+文字 tab 当前为 icon + label）。
+ *   左侧 rail 104px：品牌锁徽标 + 7 个导航项（主页/用户/日志/人脸/网络/设置/系统），
+ *     每项 = 图标字体图标 + 小标签，激活项左侧 4px accent 指示条 + accent-soft 底色；
+ *     右侧 1px 分隔线（TH_BORDER）。
+ *   顶部状态栏 56px（位于 rail 右侧）：左 = 锁状态点 + 文本；中 = 实时时钟；
+ *     右 = MQTT 连接状态点 + WiFi。
+ *   内容区：剩余全部空间（w - rail_w，h - topbar_h），各页面在此创建。
  *
- * v3 变更：
- *   - 移除 4 个独立胶囊按钮，改为单个白色连续底栏（更现代 / 更克制）
- *   - 底栏图标全部用 ui_icon_create 矢量绘制
- *   - 选中态用 accent 蓝文字 + 顶一矩形高亮指示，非胶囊填充
+ * v4 变更（UI 重设计 ui4 · 里程碑 M1 后半）：
+ *   - 底部 3 tab 栏 → 左侧 104px 图标 rail（视觉真源 ui_redesign_preview.html）
+ *   - rail 图标全部走编译进固件的图标字体（icon_label_colored + ui_glyph_t），
+ *     颜色一律取 theme.c token，四套主题自动跟随
+ *   - 页面过渡由「纵向 24px 位移」改为「横向 46px 位移 + 淡入淡出」，方向随
+ *     rail 上下顺序切换（向下 = 新页自右滑入，向上 = 新页自左滑入）
  */
 #include "ui/ui.h"
 #include "hal/hal_time.h"    /* R2：时间源统一走 HAL，不直接读系统时钟 */
@@ -23,7 +28,7 @@
 #include "ui/ui_anim.h"      /* 动效常量集中地（UI 现代化 spec §5.2） */
 #include "ui/ui_feedback.h"  /* 反馈中枢：横幅（spec §1） */
 #include <stdlib.h>            /* getenv */
-#include "ui/icons.h"        /* 矢量图标库 */
+#include "ui/icons.h"        /* 矢量图标库 + 图标字体 label */
 #include "ui/pages/page_monitor.h"
 #include "ui/pages/page_logs.h"
 #include "ui/pages/page_settings.h"
@@ -40,7 +45,7 @@
 
 /* 基准尺寸（设计稿像素，运行时 × scale） */
 #define TOPBAR_BASE  56
-#define TABBAR_BASE  72
+#define RAIL_BASE    104
 
 /* 页面描述符结构体：将页面 ID 映射到对应的页面创建函数*/
 typedef struct {
@@ -48,17 +53,23 @@ typedef struct {
     lv_obj_t * (*create)(lv_obj_t * parent);   // 函数指针，指向该页面的初始化函数
 } page_desc_t;
 
-/* 底部 Tab 顺序对应「主页 / 用户 / 日志 / 设置」 */
+/* rail 导航项：图标字体码位 + 中文标签 + 目标页面（顺序 = 视觉从上到下） */
 typedef struct {
     const char * label;
-    ui_icon_kind_t icon;
-    ui_page_t page;
-} tab_def_t;
+    ui_glyph_t   glyph;
+    ui_page_t    page;
+} rail_def_t;
 
-static const tab_def_t TABS[3] = {
-    { "主页", UI_ICON_HOME,     PAGE_HOME },
-    { "日志", UI_ICON_LIST_TAB, PAGE_LOGS },
-    { "设置", UI_ICON_SETTINGS, PAGE_SETTINGS },
+/* 7 个入口（对齐 ui_redesign_preview.html 的 .nav 顺序） */
+#define RAIL_COUNT 7
+static const rail_def_t RAILS[RAIL_COUNT] = {
+    { "主页", UI_GLYPH_HOME,     PAGE_HOME     },
+    { "用户", UI_GLYPH_PERSON,   PAGE_USERS    },
+    { "日志", UI_GLYPH_LIST,     PAGE_LOGS     },
+    { "人脸", UI_GLYPH_FACE,     PAGE_FACE     },
+    { "网络", UI_GLYPH_WIFI,     PAGE_NETWORK  },
+    { "设置", UI_GLYPH_SETTINGS, PAGE_SETTINGS },
+    { "系统", UI_GLYPH_SYSTEM,   PAGE_SYSTEM   },
 };
 
 /* 注册路由表：所有需要被管理的页面都在这里注册 */
@@ -81,11 +92,12 @@ static lv_obj_t * s_page_roots[PAGE_COUNT];  // 存放所有初始化后的页�
 /* 当前「名义可见」的页面（过渡动画的目标页）。-1 = 尚未切过页（ui_init 首切）。
  * 快速连点时以它为准：旧目标页也按普通退场处理，不会留下半透明的孤儿页。 */
 static int s_vis_page = -1;
-/* 底栏 4 个 tab 按钮对象 + 它们的图标 + 文字（换主题时刷新） */
-static lv_obj_t * s_tab_btn[4];
-static lv_obj_t * s_tab_icon[4];
-static lv_obj_t * s_tab_label[4];
-static lv_obj_t * s_tab_indicator[4];
+/* 左侧 rail：7 个导航项（按钮 + 图标字体 label + 文字）+ 唯一激活指示条 */
+static lv_obj_t * s_rail_btn[RAIL_COUNT];
+static lv_obj_t * s_rail_icon[RAIL_COUNT];
+static lv_obj_t * s_rail_label[RAIL_COUNT];
+static lv_obj_t * s_rail_ind;
+static int s_rail_idx = -1;                  // 当前激活的 rail 项（-1 = 无）
 static lv_obj_t * s_clock_label;             // 顶部时钟文本 Label
 static lv_obj_t * s_lock_text;               // 顶部锁状态文本 Label
 static lv_obj_t * s_lock_dot;                // 顶部锁状态点（绿=开 / 蓝=锁）
@@ -97,32 +109,30 @@ static lv_obj_t * s_mqtt_chip;              // 顶部 MQTT chip 背景（淡灰�
 static lv_obj_t * s_wifi;                    // 顶部 WiFi 图标（保留兼容）
 static lv_obj_t * s_wifi_text;               // 顶部 WiFi 文本（"WiFi 5G"）
 
-/* 运行时缩放后的实际高度 */
+/* 运行时缩放后的实际尺寸 */
 static int32_t s_topbar_h;
-static int32_t s_tabbar_h;
+static int32_t s_rail_w;
 
 static void build_shell(void);
 static void build_topbar(lv_obj_t * parent);
-static void build_tabbar(lv_obj_t * parent);
+static void build_rail(lv_obj_t * parent);
 static void build_overlay(void);
 static void switch_page(ui_page_t page);
-/* 页面切换过渡（UI 现代化 spec §2） */
-static void page_translate_y_cb(void * obj, int32_t v);
+/* 页面切换过渡（UI 现代化 spec §3） */
+static void page_translate_x_cb(void * obj, int32_t v);
 static void page_opa_cb(void * obj, int32_t v);
 static void page_faded_out_cb(lv_anim_t * a);
 static void page_reset(lv_obj_t * pg);
-static void page_anim_out(lv_obj_t * pg);
-static void page_anim_in(lv_obj_t * pg);
-static void ui_page_transition_to(ui_page_t page);
-static void tab_click_cb(lv_event_t * e);
+static void page_anim_out(lv_obj_t * pg, int dir);
+static void page_anim_in(lv_obj_t * pg, int dir);
+static void ui_page_transition_to(ui_page_t page, int dir);
+static void rail_click_cb(lv_event_t * e);
 static void status_timer_cb(lv_timer_t * t);
 /* 阶段 1：状态机心跳 / RPC 指令泵 / 状态周期上报 + FSM→UI 桥接 */
 static void fsm_ui_hook(fsm_state_t st, const char *user, const char *detail);
 /* 主题切换回调：刷新顶栏本地颜色覆盖（定义在 build_topbar 之后） */
 static void topbar_refresh_theme(int idx);
-static void tabbar_refresh_theme(int idx);
-/* 页签高亮渐变：把 st_tab_hl（150ms 颜色过渡载体）挂到图标的所有子形状上 */
-static lv_obj_tree_walk_res_t tab_hl_walk_cb(lv_obj_t * obj, void * user_data);
+static void rail_refresh_theme(int idx);
 
 /* "当前是否开锁"判定（与 page_monitor.c::is_unlocked_now 一致）：
  *   物理执行器 500ms 高电平 OR FSM UNLOCKED 30s 语义窗口 */
@@ -139,7 +149,7 @@ void ui_init(void)
     // 0. 初始化缩放系统（必须在所有 UI 创建之前）
     ui_scale_init();
     s_topbar_h = SY(TOPBAR_BASE);
-    s_tabbar_h = SY(TABBAR_BASE);
+    s_rail_w = SX(RAIL_BASE);
 
     // 1. 基础资源初始化（存储与工作线程由 app.c 统一编排）
     app_fonts_init();
@@ -149,9 +159,9 @@ void ui_init(void)
 
     // 2.5 注册主题切换回调
     theme_register_change_cb(topbar_refresh_theme);
-    theme_register_change_cb(tabbar_refresh_theme);
+    theme_register_change_cb(rail_refresh_theme);
 
-    // 3. 构建 UI 外壳骨架（顶栏、底栏、中间空白内容区）
+    // 3. 构建 UI 外壳骨架（左 rail、顶栏、中间空白内容区）
     build_shell();
 
     // 4. 一次性实例化所有页面
@@ -242,36 +252,36 @@ static void build_shell(void)
     int32_t w = disp ? lv_display_get_horizontal_resolution(disp) : 1024;
     int32_t h = disp ? lv_display_get_vertical_resolution(disp) : 600;
 
-    // 3. 构建顶部状态栏容器 (TOPBAR)
+    // 3. 构建左侧图标导航栏容器（RAIL，满高）
+    lv_obj_t * rail = lv_obj_create(scr);
+    lv_obj_set_size(rail, s_rail_w, h);
+    lv_obj_align(rail, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_pad_all(rail, 0, 0);
+    lv_obj_set_style_bg_opa(rail, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(rail, 0, 0);
+    lv_obj_set_style_outline_width(rail, 0, 0);
+
+    // 4. 构建顶部状态栏容器（TOPBAR，位于 rail 右侧）
     lv_obj_t * top = lv_obj_create(scr);
-    lv_obj_set_size(top, w, s_topbar_h);
-    lv_obj_align(top, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_size(top, w - s_rail_w, s_topbar_h);
+    lv_obj_align(top, LV_ALIGN_TOP_RIGHT, 0, 0);
     lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(top, 0, 0);
     lv_obj_set_style_outline_width(top, 0, 0);
     lv_obj_set_style_pad_all(top, 0, 0);
 
-    // 4. 构建中部内容区容器 (CONTENT)
+    // 5. 构建中部内容区容器（CONTENT，rail 右侧 + 顶栏下方）
     s_content = lv_obj_create(scr);
-    lv_obj_set_size(s_content, w, h - s_topbar_h - s_tabbar_h);
-    lv_obj_align(s_content, LV_ALIGN_TOP_MID, 0, s_topbar_h);
+    lv_obj_set_size(s_content, w - s_rail_w, h - s_topbar_h);
+    lv_obj_align(s_content, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
     lv_obj_set_style_pad_all(s_content, 0, 0);
     lv_obj_set_style_bg_opa(s_content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_content, 0, 0);
     lv_obj_set_style_outline_width(s_content, 0, 0);
 
-    // 5. 构建底部导航栏容器 (TABBAR)
-    lv_obj_t * tab = lv_obj_create(scr);
-    lv_obj_set_size(tab, w, s_tabbar_h);
-    lv_obj_align(tab, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_opa(tab, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(tab, 0, 0);
-    lv_obj_set_style_outline_width(tab, 0, 0);
-    lv_obj_set_style_pad_all(tab, 0, 0);
-
-    // 6. 填充顶栏和底栏的具体 UI 元素
+    // 6. 填充 rail 与顶栏的具体 UI 元素
+    build_rail(rail);
     build_topbar(top);
-    build_tabbar(tab);
 
     // 7. 横幅浮层（最上层）：常驻、透明、不挡触摸，供 ui_feedback 挂反馈条
     build_overlay();
@@ -291,8 +301,8 @@ static void build_overlay(void)
     int32_t w = disp ? lv_display_get_horizontal_resolution(disp) : 1024;
 
     s_overlay = lv_obj_create(scr);
-    lv_obj_set_size(s_overlay, w, SY(UI_ANIM_BANNER_H_BASE) + SY(12));
-    lv_obj_align(s_overlay, LV_ALIGN_TOP_MID, 0, s_topbar_h + SY(6));
+    lv_obj_set_size(s_overlay, w - s_rail_w, SY(UI_ANIM_BANNER_H_BASE) + SY(12));
+    lv_obj_align(s_overlay, LV_ALIGN_TOP_RIGHT, 0, s_topbar_h + SY(6));
     lv_obj_set_style_bg_opa(s_overlay, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_overlay, 0, 0);
     lv_obj_set_style_outline_width(s_overlay, 0, 0);
@@ -433,138 +443,169 @@ static void topbar_refresh_theme(int idx)
     if (s_mqtt_text)   lv_obj_set_style_text_color(s_mqtt_text, mqtt_on ? theme_color(TH_TEXT) : theme_color(TH_DANGER), 0);
 }
 
-/* 页签高亮渐变：图标由「容器 + 多个几何子对象」组成，颜色是逐个设置的，
- * 因此过渡样式也要挂到每个子对象上才整体平滑（spec §3：tab checked 150ms） */
-static lv_obj_tree_walk_res_t tab_hl_walk_cb(lv_obj_t * obj, void * user_data)
+/* ================================================================
+ *  左侧图标导航栏（ui4 · 对齐 ui_redesign_preview.html 的 .rail）
+ *
+ *  结构（设计稿 px）：
+ *    rail 宽 104，右边框 1px（TH_BORDER）；
+ *    品牌徽标 46×46 圆角 14，accent 浅底 + accent 锁图标，上边距 18；
+ *    7 个导航项 80×64 圆角 16，纵向间距 6，图标 24px + 标签 13px；
+ *    激活项：accent 文字 + accent-soft 底色 + 左侧 4px accent 指示条。
+ *
+ *  为什么不用 flex：rail 是「固定数量 + 固定尺寸」的纵向栈，手工 set_pos
+ *  更简单，也让唯一的指示条能自由绝对定位（不受 flex 布局约束）。
+ *  颜色一律 theme_color(token)，底色用 accent + 低 opa 模拟 accent-soft，
+ *  无任何硬编码 hex，四套主题自动跟随。
+ * ================================================================ */
+
+/* 第 i 个导航项的 y（设计稿 px → 运行时缩放） */
+static inline int32_t rail_item_y(int i)
 {
-    (void)user_data;
-    lv_obj_add_style(obj, &st_tab_hl, 0);
-    return LV_OBJ_TREE_WALK_NEXT;
+    return SY(18) + SY(46) + SY(14) + i * (SY(64) + SY(6));
 }
 
-/**
- * @brief v3 底部导航栏：单条连续白色面板 + 4 个等宽 tab。
- * 每个 tab 由上方矢量图标 + 下方文字 + 顶部一矩形高亮指示条组成，
- * 当前页的指示条可见、文字与图标染色为 accent 蓝。
- */
-static void build_tabbar(lv_obj_t * parent)
+static void build_rail(lv_obj_t * parent)
 {
-    /* 外层连续面板（白色 st_panel 样式 + 圆角 0） */
+    /* 外层连续面板（st_panel 样式 + 右侧 1px 分隔线） */
     lv_obj_t * bar = lv_obj_create(parent);
     lv_obj_set_size(bar, lv_pct(100), lv_pct(100));
     lv_obj_add_style(bar, &st_panel, 0);
     lv_obj_set_style_radius(bar, 0, 0);
-    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_border_width(bar, 1, 0);
+    lv_obj_set_style_border_side(bar, LV_BORDER_SIDE_RIGHT, 0);
+    lv_obj_set_style_border_color(bar, theme_color(TH_BORDER), 0);
     lv_obj_set_style_outline_width(bar, 0, 0);
-    lv_obj_set_style_pad_left(bar, SX(8), 0);
-    lv_obj_set_style_pad_right(bar, SX(8), 0);
-    lv_obj_set_style_pad_top(bar, SY(8), 0);
-    lv_obj_set_style_pad_bottom(bar, SY(8), 0);
-    lv_obj_set_style_pad_column(bar, SX(4), 0);
+    lv_obj_set_style_pad_all(bar, 0, 0);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
 
-    for (int i = 0; i < 3; i++) {
-        /* 一个 tab = 按钮容器（仅用作事件命中） */
-        lv_obj_t * btn = lv_button_create(bar);
-        lv_obj_set_flex_grow(btn, 1);
-        lv_obj_set_height(btn, lv_pct(100));
-        lv_obj_set_style_radius(btn, SX(14), 0);
-        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, LV_STATE_CHECKED);   /* 选中态也保持透明 */
-        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, LV_STATE_PRESSED);
+    /* 品牌徽标：accent 浅底 + accent 锁图标 */
+    lv_obj_t * brand = lv_obj_create(bar);
+    lv_obj_set_size(brand, SX(46), SY(46));
+    lv_obj_align(brand, LV_ALIGN_TOP_MID, 0, SY(18));
+    lv_obj_set_style_bg_color(brand, theme_color(TH_ACCENT), 0);
+    lv_obj_set_style_bg_opa(brand, LV_OPA_30, 0);
+    lv_obj_set_style_radius(brand, SX(14), 0);
+    lv_obj_set_style_border_width(brand, 0, 0);
+    lv_obj_set_style_outline_width(brand, 0, 0);
+    lv_obj_set_style_pad_all(brand, 0, 0);
+    lv_obj_clear_flag(brand, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t * brand_ic = icon_label_colored(brand, UI_GLYPH_LOCK, 26, TH_ACCENT);
+    lv_obj_center(brand_ic);
+
+    for (int i = 0; i < RAIL_COUNT; i++) {
+        /* 导航项容器：手工定位（见上方「为什么不用 flex」） */
+        lv_obj_t * btn = lv_obj_create(bar);
+        lv_obj_set_size(btn, SX(80), SY(64));
+        lv_obj_set_pos(btn, SX(12), rail_item_y(i));
+        lv_obj_set_style_radius(btn, SX(16), 0);
+        lv_obj_set_style_bg_color(btn, theme_color(TH_ACCENT), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);                 /* 常态透明 */
+        lv_obj_set_style_bg_opa(btn, LV_OPA_20, LV_STATE_CHECKED);      /* 激活：accent-soft */
+        lv_obj_set_style_bg_opa(btn, LV_OPA_30, LV_STATE_PRESSED);      /* 按压：略强 */
         lv_obj_set_style_border_width(btn, 0, 0);
         lv_obj_set_style_outline_width(btn, 0, 0);
+        lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUSED);   /* 触摸聚焦不留外框 */
+        lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUS_KEY);
         lv_obj_set_style_pad_all(btn, 0, 0);
-        lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_row(btn, SY(2), 0);
+        lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
 
-        /* 顶部高亮指示条（默认隐藏，激活时显示） */
-        lv_obj_t * ind = lv_obj_create(btn);
-        lv_obj_set_size(ind, SX(28), (SY(3) > 2 ? SY(3) : 2));
-        lv_obj_set_style_bg_opa(ind, LV_OPA_TRANSP, 0);    /* 默认透明 */
-        lv_obj_set_style_radius(ind, SX(2), 0);
-        lv_obj_set_style_border_width(ind, 0, 0);
-        lv_obj_set_style_outline_width(ind, 0, 0);
-        lv_obj_add_style(ind, &st_tab_hl, 0);              /* 高亮切换 150ms 渐变 */
-        s_tab_indicator[i] = ind;
-
-        /* 矢量图标（子形状逐个挂过渡样式） */
-        lv_obj_t * icon = ui_icon_create(btn, TABS[i].icon, SX(22),
-                                         theme_color(TH_TEXT_MUT));
-        lv_obj_tree_walk(icon, tab_hl_walk_cb, NULL);
-        s_tab_icon[i] = icon;
+        /* 图标字体图标（24px → lv_font_icon_24） */
+        lv_obj_t * icon = icon_label_colored(btn, RAILS[i].glyph, 24, TH_TEXT_MUT);
+        lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, SY(10));
+        lv_obj_add_style(icon, &st_tab_hl, 0);      /* 高亮切换 150ms 渐变 */
+        s_rail_icon[i] = icon;
 
         /* 文字标签 */
         lv_obj_t * lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, TABS[i].label);
+        lv_label_set_text(lbl, RAILS[i].label);
         lv_obj_set_style_text_font(lbl, app_font_scaled(13), 0);
         lv_obj_set_style_text_color(lbl, theme_color(TH_TEXT_MUT), 0);
-        lv_obj_add_style(lbl, &st_tab_hl, 0);              /* 高亮切换 150ms 渐变 */
-        s_tab_label[i] = lbl;
+        lv_obj_add_style(lbl, &st_tab_hl, 0);       /* 高亮切换 150ms 渐变 */
+        lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -SY(8));
+        s_rail_label[i] = lbl;
 
-        lv_obj_add_event_cb(btn, tab_click_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
-        s_tab_btn[i] = btn;
+        lv_obj_add_event_cb(btn, rail_click_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+        s_rail_btn[i] = btn;
     }
 
-    tabbar_refresh_theme(-1);   /* 触发一次底栏主题色初始化 */
+    /* 激活指示条：全 rail 唯一对象，随选中项移动到对应导航项左侧 */
+    s_rail_ind = lv_obj_create(bar);
+    lv_obj_set_size(s_rail_ind, SX(4), SY(36));
+    lv_obj_set_style_bg_color(s_rail_ind, theme_color(TH_ACCENT), 0);
+    lv_obj_set_style_bg_opa(s_rail_ind, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_rail_ind, SX(2), 0);
+    lv_obj_set_style_border_width(s_rail_ind, 0, 0);
+    lv_obj_set_style_outline_width(s_rail_ind, 0, 0);
+    lv_obj_clear_flag(s_rail_ind, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_rail_idx = -1;
+    rail_refresh_theme(-1);   /* 触发一次 rail 主题色初始化 */
 }
 
-/* 主题切换回调：刷新底栏选中/非选中配色。idx=-1 表示首次进入（无选中色变化）。 */
-static void tabbar_refresh_theme(int idx)
+/* 主题切换回调：刷新 rail 选中/非选中配色 + 指示条位置。
+ * idx=-1 表示首次进入（无选中项，指示条隐藏）。 */
+static void rail_refresh_theme(int idx)
 {
     (void)idx;
-    for (int i = 0; i < 3; i++) {
-        bool selected = (s_tab_btn[i] && lv_obj_has_state(s_tab_btn[i], LV_STATE_CHECKED));
+    for (int i = 0; i < RAIL_COUNT; i++) {
+        bool selected = (i == s_rail_idx);
         lv_color_t col = selected ? theme_color(TH_ACCENT) : theme_color(TH_TEXT_MUT);
-        if (s_tab_icon[i]) ui_icon_set_color(s_tab_icon[i], col);
-        if (s_tab_label[i]) lv_obj_set_style_text_color(s_tab_label[i], col, 0);
-        if (s_tab_indicator[i]) {
-            if (selected) {
-                lv_obj_set_style_bg_color(s_tab_indicator[i], theme_color(TH_ACCENT), 0);
-                lv_obj_set_style_bg_opa(s_tab_indicator[i], LV_OPA_COVER, 0);
-            } else {
-                lv_obj_set_style_bg_opa(s_tab_indicator[i], LV_OPA_TRANSP, 0);
-            }
+        if (s_rail_btn[i])   lv_obj_set_style_bg_color(s_rail_btn[i], theme_color(TH_ACCENT), 0);
+        if (s_rail_icon[i])  lv_obj_set_style_text_color(s_rail_icon[i], col, 0);
+        if (s_rail_label[i]) lv_obj_set_style_text_color(s_rail_label[i], col, 0);
+    }
+    if (s_rail_ind) {
+        lv_obj_set_style_bg_color(s_rail_ind, theme_color(TH_ACCENT), 0);
+        if (s_rail_idx >= 0) {
+            lv_obj_set_pos(s_rail_ind, SX(2), rail_item_y(s_rail_idx) + SY(14));
+            lv_obj_set_hidden(s_rail_ind, false);
+        } else {
+            lv_obj_set_hidden(s_rail_ind, true);
         }
     }
 }
 
-/* 返回页面所属的底部页签索引；全屏覆盖层返回 -1 */
-static int tab_index_of(ui_page_t page)
+/* 返回页面所属的 rail 项索引；不在 rail 上的页面（键盘/动态码全屏层）返回 -1
+ * ——此时保持当前高亮不变，避免全屏层弹出时 rail 闪动。 */
+static int rail_index_of(ui_page_t page)
 {
-    switch (page) {
-        case PAGE_HOME:        return 0;
-        case PAGE_LOGS:        return 1;
-        case PAGE_SETTINGS:
-        case PAGE_NETWORK:
-        case PAGE_SYSTEM:
-        case PAGE_USERS:       return 2;   /* 用户管理已收纳到「设置」下 */
-        default:               return -1;
+    for (int i = 0; i < RAIL_COUNT; i++) {
+        if (RAILS[i].page == page) return i;
     }
+    return -1;
 }
 
 /* ================================================================
- *  页面切换过渡（UI 现代化 spec §2）
+ *  页面切换过渡（UI 现代化 spec §3）
  *
- * 旧页：translate_y 0 → -24px + opa 255 → 0，150ms ease-in（退场加速）
- * 新页：translate_y 24px → 0 + opa 0 → 255，200ms ease-out（入场减速）
+ *  新页：translate_x ±46px → 0 + opa 0 → 255，200ms ease-out（入场减速）
+ *  旧页：translate_x 0 → ∓46px + opa 255 → 0，160ms ease-out（退场略快，
+ *        避免两段同时占用重绘带宽）
+ *  方向：dir = +1（沿 rail 向下选）→ 新页自右滑入、旧页向左退出；
+ *        dir = -1（沿 rail 向上选）→ 新页自左滑入、旧页向右退出。
  *
- * 结构与性能要点：
- *  - 页面 roots 常驻（ui_init 一次性实例化），动画只动 translate_y / opa 两个
- *    样式属性，不销毁、不重建对象（A7 单核：局部重绘 content 区）；
- *  - 快速连点：每个对象同一属性只留一条动画——起动画前先 lv_anim_delete 清旧，
- *    并把「上一个目标页」也按退场处理，杜绝半透明孤儿页；
- *  - FSM 自动切页（fsm_ui_hook）走同一路径，自动获得动画；
- *  - 常量集中 ui_anim.h，A7 上调参只改那里。
+ *  为什么自建 lv_anim 而不是 lv_screen_load_anim：
+ *    lv_screen_load_anim 的粒度是整个 screen，会把常驻的顶栏 / rail 一起
+ *    换掉（shell 与页面是同一 screen 的父子关系）。spec §3 也给出「或自建
+ *    lv_anim 对两个 screen 做 x/opacity 插值」这一路径，故在页面根节点上
+ *    做等价的 x + opacity 插值，视觉与 MOVE_LEFT / MOVE_RIGHT 一致。
+ *
+ *  结构与性能要点（与旧版一致，未回退）：
+ *   - 页面 roots 常驻（ui_init 一次性实例化），动画只动 translate_x / opa，
+ *     不销毁、不重建对象（A7 单核：局部重绘 content 区）；
+ *   - 快速连点：每个对象同一属性只留一条动画——起动画前先 lv_anim_delete 清旧，
+ *     并把「上一个目标页」也按退场处理，杜绝半透明孤儿页；
+ *   - 回调内不 create / free、不 malloc；
+ *   - FSM 自动切页（fsm_ui_hook）走同一路径，自动获得动画；
+ *   - 常量集中 ui_anim.h，A7 上调参只改那里。
  * ================================================================ */
 
 /* 动画执行回调：只改一个样式属性，便于 lv_anim_delete 按 cb 精确清理 */
-static void page_translate_y_cb(void * obj, int32_t v)
+static void page_translate_x_cb(void * obj, int32_t v)
 {
     if (obj == NULL) return;
-    lv_obj_set_style_translate_y((lv_obj_t *)obj, v, 0);
+    lv_obj_set_style_translate_x((lv_obj_t *)obj, v, 0);
 }
 
 static void page_opa_cb(void * obj, int32_t v)
@@ -580,7 +621,7 @@ static void page_faded_out_cb(lv_anim_t * a)
     /* lv_anim 的 var 就是页面根节点 */
     lv_obj_t * pg = (lv_obj_t *)a->var;
     if (pg == NULL) return;
-    lv_obj_set_style_translate_y(pg, 0, 0);
+    lv_obj_set_style_translate_x(pg, 0, 0);
     lv_obj_set_style_opa(pg, LV_OPA_COVER, 0);
     lv_obj_set_hidden(pg, true);
 }
@@ -589,76 +630,77 @@ static void page_faded_out_cb(lv_anim_t * a)
 static void page_reset(lv_obj_t * pg)
 {
     if (pg == NULL) return;
-    lv_anim_delete(pg, page_translate_y_cb);
+    lv_anim_delete(pg, page_translate_x_cb);
     lv_anim_delete(pg, page_opa_cb);
-    lv_obj_set_style_translate_y(pg, 0, 0);
+    lv_obj_set_style_translate_x(pg, 0, 0);
     lv_obj_set_style_opa(pg, LV_OPA_COVER, 0);
     lv_obj_set_hidden(pg, true);
 }
 
 /* 旧页退场：从当前样式值出发（可能是上次动画进行到一半的值），平滑滑出 */
-static void page_anim_out(lv_obj_t * pg)
+static void page_anim_out(lv_obj_t * pg, int dir)
 {
     if (pg == NULL) return;
-    lv_anim_delete(pg, page_translate_y_cb);
+    lv_anim_delete(pg, page_translate_x_cb);
     lv_anim_delete(pg, page_opa_cb);
 
-    int32_t y0 = lv_obj_get_style_translate_y(pg, 0);
+    int32_t x0 = lv_obj_get_style_translate_x(pg, 0);
     int32_t o0 = (int32_t)lv_obj_get_style_opa(pg, 0);
     lv_obj_set_hidden(pg, false);   /* 可能在上一次过渡里已被隐藏，先亮出来退场 */
 
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, pg);
-    lv_anim_set_exec_cb(&a, page_translate_y_cb);
-    lv_anim_set_values(&a, y0, -UI_ANIM_TRANSLATE_PX);
-    lv_anim_set_duration(&a, UI_ANIM_PAGE_OUT_MS);
-    lv_anim_set_path_cb(&a, UI_ANIM_PAGE_EASE_IN);
+    lv_anim_set_exec_cb(&a, page_translate_x_cb);
+    lv_anim_set_values(&a, x0, -dir * UI_TRANS_SHIFT_PX);
+    lv_anim_set_duration(&a, UI_TRANS_OUT_MS);
+    lv_anim_set_path_cb(&a, UI_TRANS_EASE);
     lv_anim_start(&a);
 
     lv_anim_init(&a);
     lv_anim_set_var(&a, pg);
     lv_anim_set_exec_cb(&a, page_opa_cb);
     lv_anim_set_values(&a, o0, LV_OPA_TRANSP);
-    lv_anim_set_duration(&a, UI_ANIM_PAGE_OUT_MS);
-    lv_anim_set_path_cb(&a, UI_ANIM_PAGE_EASE_IN);
+    lv_anim_set_duration(&a, UI_TRANS_OUT_MS);
+    lv_anim_set_path_cb(&a, UI_TRANS_EASE);
     lv_anim_set_completed_cb(&a, page_faded_out_cb);
     lv_anim_start(&a);
 }
 
-/* 新页入场：从下方 24px 滑入 + 淡入 */
-static void page_anim_in(lv_obj_t * pg)
+/* 新页入场：从 dir 方向 46px 处滑入 + 淡入 */
+static void page_anim_in(lv_obj_t * pg, int dir)
 {
     if (pg == NULL) return;
-    lv_anim_delete(pg, page_translate_y_cb);
+    lv_anim_delete(pg, page_translate_x_cb);
     lv_anim_delete(pg, page_opa_cb);
 
-    lv_obj_set_style_translate_y(pg, UI_ANIM_TRANSLATE_PX, 0);
+    lv_obj_set_style_translate_x(pg, dir * UI_TRANS_SHIFT_PX, 0);
     lv_obj_set_style_opa(pg, LV_OPA_TRANSP, 0);
     lv_obj_set_hidden(pg, false);
 
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, pg);
-    lv_anim_set_exec_cb(&a, page_translate_y_cb);
-    lv_anim_set_values(&a, UI_ANIM_TRANSLATE_PX, 0);
-    lv_anim_set_duration(&a, UI_ANIM_PAGE_IN_MS);
-    lv_anim_set_path_cb(&a, UI_ANIM_PAGE_EASE_OUT);
+    lv_anim_set_exec_cb(&a, page_translate_x_cb);
+    lv_anim_set_values(&a, dir * UI_TRANS_SHIFT_PX, 0);
+    lv_anim_set_duration(&a, UI_TRANS_MS);
+    lv_anim_set_path_cb(&a, UI_TRANS_EASE);
     lv_anim_start(&a);
 
     lv_anim_init(&a);
     lv_anim_set_var(&a, pg);
     lv_anim_set_exec_cb(&a, page_opa_cb);
     lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
-    lv_anim_set_duration(&a, UI_ANIM_PAGE_IN_MS);
-    lv_anim_set_path_cb(&a, UI_ANIM_PAGE_EASE_OUT);
+    lv_anim_set_duration(&a, UI_TRANS_MS);
+    lv_anim_set_path_cb(&a, UI_TRANS_EASE);
     lv_anim_start(&a);
 }
 
 /**
  * @brief 带过渡的页面切换。同页重复点击不重放动画（避免无意义的闪动）。
+ * @param dir  +1 新页自右滑入 / -1 新页自左滑入
  */
-static void ui_page_transition_to(ui_page_t page)
+static void ui_page_transition_to(ui_page_t page, int dir)
 {
     if (page < 0 || page >= PAGE_COUNT) return;
     int prev = s_vis_page;
@@ -670,30 +712,35 @@ static void ui_page_transition_to(ui_page_t page)
         if (i == (int)page || i == prev) continue;
         page_reset(s_page_roots[i]);
     }
-    if (prev >= 0 && prev != (int)page) page_anim_out(s_page_roots[prev]);
-    page_anim_in(s_page_roots[page]);
+    if (prev >= 0 && prev != (int)page) page_anim_out(s_page_roots[prev], dir);
+    page_anim_in(s_page_roots[page], dir);
 }
 
 static void switch_page(ui_page_t page)
 {
-    int i;
     if (page >= PAGE_COUNT) return;
-    int ti = tab_index_of(page);
-    for (i = 0; i < 3; i++) {
-        bool on = (i == ti);
-        if (s_tab_btn[i]) {
-            if (on) lv_obj_add_state(s_tab_btn[i], LV_STATE_CHECKED);
-            else    lv_obj_remove_state(s_tab_btn[i], LV_STATE_CHECKED);
+
+    int ri = rail_index_of(page);
+    int dir = 1;
+    if (ri >= 0) {
+        /* 沿 rail 向下选 → 新页自右滑入；向上选 → 自左滑入 */
+        dir = (s_rail_idx < 0 || ri >= s_rail_idx) ? 1 : -1;
+        for (int i = 0; i < RAIL_COUNT; i++) {
+            if (s_rail_btn[i] == NULL) continue;
+            if (i == ri) lv_obj_add_state(s_rail_btn[i], LV_STATE_CHECKED);
+            else         lv_obj_remove_state(s_rail_btn[i], LV_STATE_CHECKED);
         }
+        s_rail_idx = ri;
     }
-    ui_page_transition_to(page);
-    tabbar_refresh_theme(0);
+
+    ui_page_transition_to(page, dir);
+    rail_refresh_theme(0);
 }
 
-static void tab_click_cb(lv_event_t * e)
+static void rail_click_cb(lv_event_t * e)
 {
     int idx = (int)(uintptr_t)lv_event_get_user_data(e);
-    switch_page(TABS[idx].page);
+    switch_page(RAILS[idx].page);
 }
 
 static void status_timer_cb(lv_timer_t * t)
@@ -716,3 +763,4 @@ static void status_timer_cb(lv_timer_t * t)
     if (s_wifi_text)  lv_label_set_text(s_wifi_text, "WiFi 5G");
     if (s_mqtt_text)  lv_label_set_text(s_mqtt_text, mqtt_is_connected() ? "MQTT 已连" : "MQTT 断线");
 }
+

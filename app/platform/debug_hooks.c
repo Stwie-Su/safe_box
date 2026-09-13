@@ -7,6 +7,8 @@
  *   SAFE_TEST_THEME = 0..3
  *   SAFE_TEST_DLG   = add_user | auth | change_pwd | otp | face
  *   SAFE_TEST_SHOT  = 截图输出路径（原始 RGB565，截图后直接退出）
+ *   SAFE_TEST_TRANS_PAGE = 目标页面名：先稳定再切页、推进若干 ms 抓过渡中间帧
+ *   SAFE_TEST_TRANS_MS   = 上者切页后推进的毫秒数（默认 90，≈200ms 过渡中段）
  *   SAFE_TEST_FACE  = 注入一次人脸事件后截图（UI 现代化 ui1 验收用），取值：
  *       match[<n>]       识别成功（face_id=n，默认 1）→ 「欢迎回来，{用户名}」+ 扫描框绿
  *       no_match         未匹配 ×1 → 「未匹配（1/3）」+ 扫描框红
@@ -181,7 +183,21 @@ static void take_shot(const char * path)
      * 注入后再推 400ms 抓屏，保证截图里横幅处于完全显示状态。
      * SAFE_TEST_SHOT_MS 可覆盖这段等待：设成 40~120ms 可抓到过渡/淡入的中间帧，
      * 用于实证「动画真的在跑」而不是直接跳到终态（默认 400ms = 动效已结束）。 */
-    if(inject_face_from_env()) {
+    /* 过渡中间帧：稳定之后再切页，推进 UI_TRANS 中段（默认 90ms ≈ 200ms 过渡
+     * 的一半）抓屏，实证「页面过渡真的在跑」而不是直接跳到终态
+     * （UI 重设计 spec 7 验收第 5 项）。
+     *   SAFE_TEST_TRANS_PAGE = 目标页面名（HOME/LOGS/.../USERS）
+     *   SAFE_TEST_TRANS_MS   = 切页后推进的毫秒数（默认 90） */
+    const char * trans_page = getenv("SAFE_TEST_TRANS_PAGE");
+    if(trans_page && *trans_page) {
+        int mid = 90;
+        const char * tms = getenv("SAFE_TEST_TRANS_MS");
+        if(tms && *tms) mid = atoi(tms);
+        if(mid < 0) mid = 0;
+        ui_switch_page(page_from_name(trans_page));
+        pump_ms(10, mid);
+    }
+    else if(inject_face_from_env()) {
         int settle = 400;
         const char * ms = getenv("SAFE_TEST_SHOT_MS");
         if(ms && *ms) settle = atoi(ms);

@@ -159,24 +159,6 @@ lv_obj_t * page_monitor_create(lv_obj_t * parent)
     /* 7. 注册主题切换回调 */
     theme_register_change_cb(monitor_refresh_theme);
 
-        /* UI4_TEMP_ICON_PROOF：图标字体自证（M1 验证完即删） */
-    {
-        lv_obj_t * row = lv_obj_create(root);
-        lv_obj_set_size(row, SX(180), SY(48));
-        lv_obj_align(row, LV_ALIGN_BOTTOM_RIGHT, -SX(12), -SY(12));
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, 0, 0);
-        lv_obj_set_style_outline_width(row, 0, 0);
-        lv_obj_set_style_pad_all(row, 0, 0);
-        lv_obj_set_style_pad_column(row, SX(14), 0);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        icon_label_colored(row, UI_GLYPH_HOME,   24, TH_TEXT);
-        icon_label_colored(row, UI_GLYPH_LOCK,   24, TH_ACCENT);
-        icon_label_colored(row, UI_GLYPH_FINGER, 24, TH_OK);
-        icon_label_colored(row, UI_GLYPH_BELL,   24, TH_WARN);
-    }
-
 return root;
 }
 
