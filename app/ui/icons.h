@@ -145,6 +145,12 @@ lv_obj_t * icon_label_colored(lv_obj_t * parent, ui_glyph_t glyph,
 lv_obj_t * icon_label(lv_obj_t * parent, ui_glyph_t glyph, int32_t size);
 
 /**
+ * @brief 运行时更换图标码位（不重建 label、不重新分配）。
+ * 事件行 / 锁状态图标刷新走这条路径。
+ */
+void icon_label_set_glyph(lv_obj_t * lb, ui_glyph_t glyph);
+
+/**
  * @brief 图标字体自检：逐个码位 × 每个字号调 lv_font_get_glyph_dsc() 查字形，
  * 缺失打印 MISS。SAFE_ICON_CHECK=1 时由 ui_init() 调用一次，用于换字体后自证。
  */

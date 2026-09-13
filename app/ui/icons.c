@@ -683,3 +683,13 @@ void icon_font_selfcheck(void)
     printf("[icon] selfcheck done: sizes=16/20/24/32 checks=%d miss=%d\n", total, miss);
 }
 
+
+/* 运行时换码位（不重建 label）：事件行 / 状态图标刷新走这条路径，
+ * 避免为了换图标反复 create/free（A7 单核：少一次对象创建少一次布局）。 */
+void icon_label_set_glyph(lv_obj_t * lb, ui_glyph_t glyph)
+{
+    if (lb == NULL) return;
+    char s[4];
+    glyph_utf8((uint32_t)glyph, s);
+    lv_label_set_text(lb, s);
+}
