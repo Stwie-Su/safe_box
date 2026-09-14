@@ -68,7 +68,12 @@ lv_style_t st_tab_btn_checked;
 lv_style_t st_btn_press;        /* 全局按压态（theme 钩子自动挂） */
 lv_style_t st_tab_hl;           /* 页签高亮渐变载体 */
 
-static int g_idx = 1;   /* 默认主题索引：0 石墨黑 / 1 月白 / 2 蓝白 / 3 松石青 / 4 浅蓝 */
+/* 默认主题索引：唯一来源。
+ * 历史问题：本处静态初始化曾为 1（月白），而 theme_init() 里另行写死 4（浅蓝）
+ * —— 两处默认值不一致（与 D6「日志上限 5000/500 双默认值」同型缺陷）。
+ * 用户 2026-09-14 裁定：默认保持「浅蓝」。 */
+#define DEFAULT_THEME_IDX 4   /* 0 石墨黑 / 1 月白 / 2 蓝白 / 3 松石青 / 4 浅蓝 */
+static int g_idx = DEFAULT_THEME_IDX;
 static lv_style_transition_dsc_t s_trans;    /* 松开回弹过渡（180ms） */
 static lv_style_transition_dsc_t s_trans_pr; /* 按下过渡（120ms） */
 static lv_style_transition_dsc_t s_trans_tab;/* 页签高亮渐变（150ms） */
@@ -228,7 +233,7 @@ void theme_init(void)
     lv_style_init(&st_tab_btn_checked);
     lv_style_init(&st_btn_press);
     lv_style_init(&st_tab_hl);
-    g_idx = 4;          /* 默认主题：浅蓝（用户偏好浅蓝色系） */
+    g_idx = DEFAULT_THEME_IDX;   /* 默认主题：见文件头部唯一定义 */
     apply_theme();
     theme_press_install();   /* 全局按压手感钩子（样式就绪后再挂） */
 }
