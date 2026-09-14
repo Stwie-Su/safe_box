@@ -9,6 +9,8 @@
 
 #include "face_backend.h"
 
+#include "hal/hal_time.h"
+
 #include <string.h>
 
 #define ENROLL_COST_MS   1200    /* 模拟录入耗时 */
@@ -72,7 +74,9 @@ static void fake_tick(uint32_t now_ms)
             memset(&r, 0, sizeof(r));
             r.face_id   = s_detect_face_id;
             r.reason    = s_detect_reason;
-            r.timestamp = now_ms / 1000u;
+            /* 契约（hal_face.h）：timestamp = hal_time()（Unix 秒），不是"进程/开机起算秒"。
+             * 消费方 page_face 用 hal_time() 判新鲜度，用 tick 时钟会让结果恒判过期（D12）。 */
+            r.timestamp = hal_time();
             face_service_emit(FACE_EV_DETECT, &r);
         }
     }
