@@ -1,43 +1,32 @@
 /**
  * @file page_face.c
- * 人脸识别全屏页（v5）：
- *   - 顶部：返回按钮 + 标题「人脸识别」
- *   - 中央：实时视频预览面板（自适应大小），**保持 4:3 原始比例居中最大化**
- *          （不拉伸变形），四角扫描框 + 扫描光带 + **双 FPS 角标**（视频 / UI）
- *          叠加在画面之上；无摄像头时显示占位文字
- *   - 底部：状态文字「请将面部对准摄像头」 + 取消按钮
+ * 人脸识别页（v2 卡片化；视觉真源 ui_redesign_preview_v2.html 的 #sc-face）。
  *
- * 设计变更：
- *   v5（2026-09-10）：
- *   - **保持比例不拉伸**：v4 是把 320×240 拉伸到整个面板（变形）。v5 改为
- *     「等比缩放 + 居中」：scale = min(canvas_w/320, canvas_h/240)（千分比整型
- *     运算，无浮点），得到最大 4:3 矩形，居中放置，四周填面板底色。
- *     满足「图像尽可能大」+「人脸在正中心」+「别拉伸比例」三个要求。
- *   - **双 FPS 分别显示**：
- *       · 视频 fps = face_thread_get_preview() 成功取到的帧数（摄像头真实出帧率）
- *       · UI   fps = LV_EVENT_REFR_READY 事件计数（LVGL 真实渲染帧率）
- *     二者 500ms 滑窗独立统计，右上角徽章两行显示。
- *   - **性能优化（流畅）**：预计算 x/y 映射表（rebuild_maps，SIZE_CHANGED 时
- *     重建一次），绘制期用查表代替逐像素除法——1024×600 面板下每帧省去约
- *     123 万次整型除法，改为 61 万次查表。
+ * 布局（root 纵向 flex）：
+ *   1) 标题区（.hd）：标题「人脸识别」+ 副标题（后端名 · 模板 n/max · 健康状态，真实来源）
+ *   2) 画面区：**视频矩形**（不是满铺内容区）——画布尺寸 = 4:3 视频矩形，显示放大
+ *      上限 1.3×（FACE_MAX_SCALE）。这是 T3 帧率优化的既有结论：满铺时每帧给留白
+ *      刷底色会吃掉约 3.7× 帧率，v6 已把画布收缩到视频矩形，**本版不得回归**。
+ *      · 四角扫描框 + 扫描光带：四态染色（青=待识别 / 绿=已匹配 / 红=未匹配或活体失败），
+ *        颜色走 theme_color(TH_ACCENT / TH_OK / TH_DANGER)；
+ *      · 右上角两个 FPS 角标（UI fps / 视频 fps），取实测值；
+ *      · 无摄像头 / 后端降级：画面区显示「图标 + 一句话」占位，不留黑块。
+ *   3) 底部行：左 = 状态文案（后端名 / 健康 / 超时等明确文案，不留空、不显示 "--"）；
+ *      右 = 「录入人脸」主按钮 + 「删除模板」次按钮。
  *
- *   v4（2026-09-10）：预览面板自适应 + 画面填满 + 单 FPS 角标。
+ * 安全性说明（有意偏离预览）：
+ *   人脸录入 / 删除在既有实现（page_users.c）里是**管理员二次验证（admin PIN）**门禁
+ *   的敏感操作，且必须绑定到“某个具体用户”。本页没有用户选择器、也没有可复用的
+ *   二次验证弹窗（auth_show_ctx 是 page_users.c 私有），因此这两个按钮**不在本页直接
+ *   执行破坏性操作**，而是导航到「用户」页并给出横幅指引，让操作走已验证的安全路径。
+ *   后端不支持该能力时按钮置灰 + 状态文案说明（不留空）。
  *
- *   v6（2026-09-12，帧率优化，详见 开发进度.md「帧率优化」小节）：
- *   - **画布收缩到视频矩形**：v5 的画布满铺面板，每帧都要给视频区之外的留白
- *     刷一次底色（板上 1008×410 面板下约 20~30 万像素/帧，纯浪费）。v6 画布
- *     尺寸 = 视频矩形，留白交给 s_preview 的底色承担，每帧零额外开销。
- *   - **显示放大倍数上限 1.3×**（FACE_MAX_SCALE）：采集源只有 320×240，放大
- *     超过 1.3× 不增加任何信息，但每多一个显示像素 LVGL 每帧就要多做一次
- *     565→ARGB8888 转换 + 一次 32bpp 帧缓冲写入 —— 这是板上实测的瓶颈。
- *
- * 设计约束：
- *   - 摄像头未配置 / 未出帧：显示提示文字；
- *   - 首帧到达后隐藏占位文字；
- *   - 页面隐藏时 timer 空转返回，不拉帧不重绘（页面不销毁，返回后再进自动恢复）；
- *   - 契约（§5.13）：frame() 与 release() 成对调用，漏调会导致后端停更；
- *   - 画布缓冲动态分配：首次创建预览面板后 + 每次 SIZE_CHANGED 时
- *     （free→malloc 原子替换）；最坏 1024×600×2 ≈ 1.2MB。
+ * 性能与纪律：
+ *   - 画布缓冲尺寸 = 视频矩形（非整面板），映射表 SIZE_CHANGED 时重建一次，
+ *     绘制期查表代替除法（见 v5/v6 注释，未改动）；
+ *   - 页面隐藏时拉帧 timer 空转返回，不拉帧不重绘；
+ *   - 契约（§5.13）：frame()/release() 成对；预览帧归 face 线程所有，主线程只取最新帧；
+ *   - 颜色 100% 走 theme_color(TH_*) / st_* 样式，零硬编码 hex。
  */
 #include "page_face.h"
 #include "ui/ui.h"
@@ -45,8 +34,12 @@
 #include "ui/ui_scale.h"
 #include "ui/ui_anim.h"
 #include "ui/icons.h"
+#include "ui/ui_feedback.h"
 #include "core/auth/auth_fsm.h"
+#include "core/store/store.h"
+#include "core/support/async_store.h"
 #include "hal/hal_camera.h"
+#include "hal/hal_face.h"
 #include "hal/face/face_thread.h"
 #include "hal/hal_time.h"
 #include <stdlib.h>
@@ -69,16 +62,35 @@
 /* FPS 统计滑窗长度 */
 #define FPS_WINDOW_MS 500
 
-/* 底部浮层（状态文字 + 取消按钮）高度基准像素；半透明叠在视频最下方 */
-#define BOTTOM_BAR_H  48
+/* 画面「陈旧」判定：超过此时长没有新帧即视为无信号（占位重新显示） */
+#define FACE_FRAME_STALE_MS 2500
+
+/* 识别结果「保鲜」秒数：超时的旧结果不再驱动状态文案 */
+#define FACE_RESULT_FRESH_S 8
+
+/* 状态刷新 / 模板统计周期 */
+#define FACE_STATUS_MS 500
+#define FACE_USERS_MS  2000
 
 /* ===== 静态对象句柄 ===== */
 static lv_obj_t * s_scan_beam;        // 顶部扫描光带
-static lv_obj_t * s_canvas;           // 预览画布（满铺面板，内容居中 4:3）
-static lv_obj_t * s_ph_label;         // 占位文字（首帧后隐藏）
+static lv_obj_t * s_canvas;           // 预览画布（尺寸 = 视频矩形）
+static lv_obj_t * s_ph;               // 占位容器（图标 + 一句话；首帧后隐藏）
+static lv_obj_t * s_ph_icon;          // 占位图标
+static lv_obj_t * s_ph_label;         // 占位文字
 static lv_obj_t * s_page_root;        // 页面根容器（可见性判断）
 static lv_obj_t * s_preview;          // 预览面板（监听 SIZE_CHANGED）
-static lv_obj_t * s_fps_label;        // 双 FPS 角标
+static lv_obj_t * s_fps_box;          // FPS 角标容器（右上角，两个徽章）
+static lv_obj_t * s_fps_ui;           // UI fps 徽章
+static lv_obj_t * s_fps_vid;          // 视频 fps 徽章
+static lv_obj_t * s_face_sub;         // 标题副文案（后端/模板/健康）
+static lv_obj_t * s_face_status;      // 底部左侧状态文案
+static lv_obj_t * s_btn_enroll;       // 录入人脸（主）
+static lv_obj_t * s_btn_del;          // 删除模板（次）
+static lv_obj_t * s_btn_enroll_ic;
+static lv_obj_t * s_btn_enroll_lb;
+static lv_obj_t * s_btn_del_ic;
+static lv_obj_t * s_btn_del_lb;
 static lv_timer_t * s_frame_timer;
 
 /* 画布帧缓冲：尺寸 = **视频矩形**（不是整个面板）。理由见 rebuild_canvas()。 */
@@ -98,8 +110,7 @@ static uint16_t * s_map_y = NULL;     /* s_vid_h 个，值域 [0, CAP_H) */
 static lv_obj_t * s_corners[CORNER_OBJ_COUNT];
 
 /* ---- 扫描框状态染色（UI 现代化 spec §3 后半） ----
- * 状态 → 主题色角色查表；FAIL 为瞬时反馈，UI_ANIM_SCAN_FAIL_MS 后自动回 IDLE。
- * s_scan_revert_timer 是一次性 timer 的句柄，用完即清（LVGL 不会自动置空）。 */
+ * 状态 → 主题色角色查表；FAIL 为瞬时反馈，UI_ANIM_SCAN_FAIL_MS 后自动回 IDLE。 */
 static page_face_scan_t s_scan_state = PAGE_FACE_SCAN_IDLE;
 static lv_timer_t * s_scan_revert_timer = NULL;
 
@@ -116,6 +127,12 @@ static uint32_t s_ui_frames;          /* 窗口内 LV_EVENT_REFR_READY 计数 */
 static int      s_video_fps;          /* 上次报告的视频 fps */
 static int      s_ui_fps;             /* 上次报告的 UI fps */
 
+/* ---- 预览帧新鲜度 / 模板统计 ---- */
+static bool     s_got_frame = false;      /* 是否已经出过帧 */
+static uint32_t s_last_frame_ms = 0;      /* 最近一次成功取帧时间（hal_time_ms） */
+static int      s_tpl_count = 0;          /* 已绑定人脸模板数（= face_id>=0 的用户数） */
+static bool     s_users_busy = false;     /* astore_load_users 在途标记 */
+
 /* 采集源临时缓冲（画布是显示缓冲，源是摄像头输出；大小固定 = 320×240×2 = 150KB） */
 static uint16_t s_cap_buf[CAP_W * CAP_H];
 
@@ -125,8 +142,9 @@ static lv_anim_t s_beam_anim;
 /* ----- 私有声明 ----- */
 static lv_obj_t * mk_corner(lv_obj_t * parent, int32_t x, int32_t y,
                             int32_t w, int32_t h, lv_color_t color);
-static void back_cb(lv_event_t * e);
-static void cancel_cb(lv_event_t * e);
+static lv_obj_t * mk_face_btn(lv_obj_t * parent, ui_glyph_t g, const char * text,
+                              bool primary, lv_event_cb_t cb,
+                              lv_obj_t ** out_icon, lv_obj_t ** out_label);
 static void beam_anim_xcb(void * obj, int32_t v);
 static void frame_timer_cb(lv_timer_t * t);
 static void preview_size_changed_cb(lv_event_t * e);
@@ -141,15 +159,22 @@ static void scan_apply_color(void);
 static void scan_revert_timer_cb(lv_timer_t * t);
 static void scan_arm_revert(uint32_t ms);
 static void scan_refresh_theme(int idx);
+/* v2 新增：标题 / 状态 / 占位 / 按钮 */
+static void face_update_header(void);
+static void face_status_timer_cb(lv_timer_t * t);
+static void face_users_timer_cb(lv_timer_t * t);
+static void face_users_loaded(safe_user_t * list, int count);
+static void face_refresh_local_colors(void);
+static void face_ph_show(bool show, const char * text);
+static const char * face_health_str(void);
+static const char * face_status_from_result(void);
+static void face_set_btn_enabled(lv_obj_t * btn, bool enabled);
+static void enroll_cb(lv_event_t * e);
+static void delete_tpl_cb(lv_event_t * e);
 
 /* ================================================================
  *  扫描框状态染色（UI 现代化 spec §3 后半）
  *  四角扫描框（8 段）+ 扫描光带统一按当前状态取主题色。
- *  实现要点：
- *   - 枚举 + 查表（SCAN_ROLE），不用 if-else 嵌套；
- *   - FAIL 是瞬时反馈：一次性 lv_timer 到点后自动回 IDLE，避免红色长期滞留；
- *   - 主题切换时按当前状态重染色（挂在 theme_change_cb 链上）。
- *  性能：只改 9 个对象的 bg_color，无动画、无堆分配。
  * ================================================================ */
 
 /* 按当前状态把颜色刷到 8 个角 + 光带 */
@@ -187,11 +212,12 @@ static void scan_arm_revert(uint32_t ms)
     }
 }
 
-/* 主题切换：按当前状态重新取色（本地颜色覆盖不会随主题自动变） */
+/* 主题切换：按当前状态重新取色 + 刷新本页新增的本地颜色覆盖 */
 static void scan_refresh_theme(int idx)
 {
     (void)idx;
     scan_apply_color();
+    face_refresh_local_colors();
 }
 
 void page_face_set_scan_state(page_face_scan_t st)
@@ -223,7 +249,44 @@ static lv_obj_t * mk_corner(lv_obj_t * parent, int32_t x, int32_t y,
     lv_obj_set_style_radius(o, MAX(w, h) / 2, 0);
     lv_obj_set_style_border_width(o, 0, 0);
     lv_obj_set_style_outline_width(o, 0, 0);
+    lv_obj_set_scrollable(o, false);
     return o;
+}
+
+/**
+ * @brief 底部操作按钮：primary = accent 实心，否则 ghost 描边（含图标 + 文本）
+ */
+static lv_obj_t * mk_face_btn(lv_obj_t * parent, ui_glyph_t g, const char * text,
+                              bool primary, lv_event_cb_t cb,
+                              lv_obj_t ** out_icon, lv_obj_t ** out_label)
+{
+    lv_obj_t * btn = lv_button_create(parent);
+    lv_obj_set_size(btn, SX(primary ? 150 : 132), SY(primary ? 44 : 38));
+    lv_obj_set_style_radius(btn, SX(12), 0);
+    lv_obj_set_style_outline_width(btn, 0, 0);
+    if (primary) {
+        lv_obj_set_style_bg_color(btn, theme_color(TH_ACCENT), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(btn, 0, 0);
+    } else {
+        lv_obj_add_style(btn, &st_ghost_btn, 0);
+        lv_obj_set_style_radius(btn, SX(12), 0);
+        lv_obj_set_style_border_color(btn, theme_color(TH_BORDER), 0);
+    }
+    lv_obj_set_style_opa(btn, LV_OPA_50, LV_STATE_DISABLED);
+    lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(btn, SX(8), 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+
+    *out_icon = icon_label_colored(btn, g, primary ? 19 : 16,
+                                   primary ? TH_ACCENT_INK : TH_TEXT);
+    *out_label = lv_label_create(btn);
+    lv_label_set_text(*out_label, text);
+    lv_obj_set_style_text_font(*out_label, app_font_scaled(14), 0);
+    lv_obj_set_style_text_color(*out_label, theme_color(primary ? TH_ACCENT_INK : TH_TEXT), 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+    return btn;
 }
 
 /**
@@ -238,73 +301,51 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(root, 0, 0);
     lv_obj_set_style_outline_width(root, 0, 0);
-    /* 压缩 padding / 行距：把纵向空间尽量让给视频预览（用户要求「图像尽可能大」） */
     lv_obj_set_style_pad_all(root, SX(8), 0);
     lv_obj_set_style_pad_row(root, SY(6), 0);
     lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(root, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(root, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
 
-    /* ---------- 顶部 bar：返回 + 标题 ---------- */
-    lv_obj_t * top = lv_obj_create(root);
-    lv_obj_set_size(top, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(top, 0, 0);
-    lv_obj_set_style_outline_width(top, 0, 0);
-    lv_obj_set_style_pad_all(top, 0, 0);
-    lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(top, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(top, SX(12), 0);
+    /* ---------- 标题区（.hd）：标题 + 副文案 ---------- */
+    lv_obj_t * head = lv_obj_create(root);
+    lv_obj_set_width(head, lv_pct(100));
+    lv_obj_set_height(head, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(head, 0, 0);
+    lv_obj_set_style_outline_width(head, 0, 0);
+    lv_obj_set_style_pad_all(head, 0, 0);
+    lv_obj_set_style_pad_left(head, SX(14), 0);
+    lv_obj_set_style_pad_right(head, SX(14), 0);
+    lv_obj_set_style_pad_row(head, SY(2), 0);
+    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scrollable(head, false);
 
-    /* 「← 返回」图标 + 文字按钮 */
-    lv_obj_t * back = lv_button_create(top);
-    lv_obj_set_size(back, LV_SIZE_CONTENT, SY(40));
-    lv_obj_set_style_radius(back, SX(20), 0);
-    lv_obj_set_style_bg_color(back, theme_color(TH_PANEL2), 0);
-    lv_obj_set_style_bg_opa(back, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(back, 0, 0);
-    lv_obj_set_style_outline_width(back, 0, 0);
-    lv_obj_set_style_pad_left(back, SX(14), 0);
-    lv_obj_set_style_pad_right(back, SX(16), 0);
-    lv_obj_set_style_pad_top(back, 0, 0);
-    lv_obj_set_style_pad_bottom(back, 0, 0);
-    lv_obj_set_style_pad_column(back, SX(8), 0);
-    lv_obj_set_flex_flow(back, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(back, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
-
-    ui_icon_create(back, UI_ICON_BACK, SX(20), theme_color(TH_TEXT));
-    lv_obj_t * back_lbl = lv_label_create(back);
-    lv_label_set_text(back_lbl, "返回");
-    lv_obj_set_style_text_color(back_lbl, theme_color(TH_TEXT), 0);
-    lv_obj_set_style_text_font(back_lbl, app_font_scaled(15), 0);
-
-    /* 中间标题 */
-    lv_obj_t * title = lv_label_create(top);
+    lv_obj_t * title = lv_label_create(head);
     lv_label_set_text(title, "人脸识别");
-    lv_obj_set_style_text_color(title, theme_color(TH_TEXT), 0);
+    lv_obj_add_style(title, &st_text, 0);
     lv_obj_set_style_text_font(title, app_font_scaled(20), 0);
-    lv_obj_set_flex_grow(title, 1);
-    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
 
-    /* 右侧占位（与左侧对称） */
-    lv_obj_t * right = lv_obj_create(top);
-    lv_obj_set_size(right, SX(40), SY(40));
-    lv_obj_set_style_bg_opa(right, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(right, 0, 0);
-    lv_obj_set_style_outline_width(right, 0, 0);
+    s_face_sub = lv_label_create(head);
+    lv_label_set_text(s_face_sub, "");   /* 由 face_update_header() 填真实值 */
+    lv_obj_add_style(s_face_sub, &st_text_mut, 0);
+    lv_obj_set_style_text_font(s_face_sub, app_font_scaled(12), 0);
 
-    /* ---------- 中央：视频预览面板（自适应 root 中间区域，flex grow 占满） ---------- */
+    /* ---------- 画面区：视频预览面板（flex grow 占满中间） ---------- */
     s_preview = lv_obj_create(root);
     lv_obj_set_size(s_preview, lv_pct(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_grow(s_preview, 1);
     lv_obj_set_style_min_width(s_preview, SY(240), 0);
     lv_obj_set_style_min_height(s_preview, SY(180), 0);
     lv_obj_add_style(s_preview, &st_panel, 0);
-    lv_obj_set_style_radius(s_preview, SX(18), 0);
+    lv_obj_set_style_radius(s_preview, SX(16), 0);
     lv_obj_set_style_bg_color(s_preview, theme_color(TH_PANEL), 0);
-    lv_obj_set_style_border_width(s_preview, 0, 0);
+    lv_obj_set_style_border_width(s_preview, 1, 0);
+    lv_obj_set_style_border_color(s_preview, theme_color(TH_BORDER), 0);
     lv_obj_set_style_outline_width(s_preview, 0, 0);
     lv_obj_set_style_pad_all(s_preview, 0, 0);     /* 不要 st_panel 那个 16px pad */
+    lv_obj_set_scroll_dir(s_preview, LV_DIR_NONE);
+    lv_obj_set_scrollable(s_preview, false);
     /* 监听面板大小变化：触发画布/视频矩形/映射表/四角/光带/FPS 重算 */
     lv_obj_add_event_cb(s_preview, preview_size_changed_cb, LV_EVENT_SIZE_CHANGED, NULL);
 
@@ -314,29 +355,56 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_obj_set_style_bg_opa(s_canvas, LV_OPA_TRANSP, 0);    /* 拉不到帧时透出 panel 底色 */
     lv_canvas_fill_bg(s_canvas, theme_color(TH_PANEL), LV_OPA_COVER);
 
-    /* 占位文字（无摄像头/未出帧时可见；首帧后隐藏） */
-    s_ph_label = lv_label_create(s_preview);
-    lv_label_set_text(s_ph_label, "视频预览区域\n（摄像头未配置）");
-    lv_obj_set_style_text_color(s_ph_label, theme_color(TH_TEXT_MUT), 0);
-    lv_obj_set_style_text_font(s_ph_label, app_font_scaled(15), 0);
-    lv_obj_set_style_text_align(s_ph_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_center(s_ph_label);
+    /* 占位（无摄像头 / 无信号时可见）：图标 + 一句话 */
+    s_ph = lv_obj_create(s_preview);
+    lv_obj_set_size(s_ph, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(s_ph, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_ph, 0, 0);
+    lv_obj_set_style_outline_width(s_ph, 0, 0);
+    lv_obj_set_style_pad_all(s_ph, 0, 0);
+    lv_obj_set_style_pad_row(s_ph, SY(8), 0);
+    lv_obj_set_flex_flow(s_ph, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_ph, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(s_ph, false);
 
-    /* 双 FPS 角标（右上角叠加，半透明圆角徽章，两行） */
-    s_fps_label = lv_label_create(s_preview);
-    lv_label_set_text(s_fps_label, "视频 — fps\nUI  — fps");
-    lv_obj_set_style_text_color(s_fps_label, theme_color(TH_TEXT), 0);
-    lv_obj_set_style_text_font(s_fps_label, app_font_scaled(14), 0);
-    lv_obj_set_style_bg_color(s_fps_label, theme_color(TH_PANEL2), 0);
-    lv_obj_set_style_bg_opa(s_fps_label, LV_OPA_80, 0);
-    lv_obj_set_style_radius(s_fps_label, SX(10), 0);
-    lv_obj_set_style_pad_left(s_fps_label, SX(12), 0);
-    lv_obj_set_style_pad_right(s_fps_label, SX(12), 0);
-    lv_obj_set_style_pad_top(s_fps_label, SY(5), 0);
-    lv_obj_set_style_pad_bottom(s_fps_label, SY(5), 0);
-    lv_obj_set_style_border_width(s_fps_label, 0, 0);
-    lv_obj_set_style_outline_width(s_fps_label, 0, 0);
-    lv_obj_set_style_text_line_space(s_fps_label, SY(2), 0);
+    s_ph_icon = icon_label_colored(s_ph, UI_GLYPH_CAMERA, 44, TH_TEXT_MUT);
+    s_ph_label = lv_label_create(s_ph);
+    lv_label_set_text(s_ph_label, "摄像头未接入，无预览画面");
+    lv_obj_set_style_text_color(s_ph_label, theme_color(TH_TEXT_MUT), 0);
+    lv_obj_set_style_text_font(s_ph_label, app_font_scaled(14), 0);
+    lv_obj_set_style_text_align(s_ph_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(s_ph);
+
+    /* 双 FPS 角标（右上角，两个独立徽章：UI fps / 视频 fps） */
+    s_fps_box = lv_obj_create(s_preview);
+    lv_obj_set_size(s_fps_box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(s_fps_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_fps_box, 0, 0);
+    lv_obj_set_style_outline_width(s_fps_box, 0, 0);
+    lv_obj_set_style_pad_all(s_fps_box, 0, 0);
+    lv_obj_set_style_pad_column(s_fps_box, SX(6), 0);
+    lv_obj_set_flex_flow(s_fps_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_fps_box, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(s_fps_box, false);
+
+    lv_obj_t ** fps_tgt[2] = { &s_fps_ui, &s_fps_vid };
+    const char * fps_txt[2] = { "UI — fps", "视频 — fps" };
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t * b = lv_label_create(s_fps_box);
+        lv_label_set_text(b, fps_txt[i]);
+        lv_obj_set_style_text_color(b, theme_color(TH_TEXT), 0);
+        lv_obj_set_style_text_font(b, app_font_scaled(12), 0);
+        lv_obj_set_style_bg_color(b, theme_color(TH_PANEL2), 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_80, 0);
+        lv_obj_set_style_radius(b, SX(8), 0);
+        lv_obj_set_style_pad_left(b, SX(10), 0);
+        lv_obj_set_style_pad_right(b, SX(10), 0);
+        lv_obj_set_style_pad_top(b, SY(4), 0);
+        lv_obj_set_style_pad_bottom(b, SY(4), 0);
+        lv_obj_set_style_border_width(b, 0, 0);
+        lv_obj_set_style_outline_width(b, 0, 0);
+        *fps_tgt[i] = b;
+    }
 
     /* 4 角扫描框（按 LVGL 创建顺序会叠在 canvas 之上；SIZE_CHANGED 时重定位） */
     int32_t init_w = SY(360);
@@ -345,16 +413,12 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     int32_t len = SX(36);
     int32_t thick = SY(4);
 
-    /* 左上角 */
     s_corners[0] = mk_corner(s_preview, pad, pad, len, thick, theme_color(TH_ACCENT));
     s_corners[1] = mk_corner(s_preview, pad, pad, thick, len, theme_color(TH_ACCENT));
-    /* 右上角 */
     s_corners[2] = mk_corner(s_preview, init_w - pad - len, pad, len, thick, theme_color(TH_ACCENT));
     s_corners[3] = mk_corner(s_preview, init_w - pad - thick, pad, thick, len, theme_color(TH_ACCENT));
-    /* 左下角 */
     s_corners[4] = mk_corner(s_preview, pad, init_h - pad - thick, len, thick, theme_color(TH_ACCENT));
     s_corners[5] = mk_corner(s_preview, pad, init_h - pad - len, thick, len, theme_color(TH_ACCENT));
-    /* 右下角 */
     s_corners[6] = mk_corner(s_preview, init_w - pad - len, init_h - pad - thick, len, thick, theme_color(TH_ACCENT));
     s_corners[7] = mk_corner(s_preview, init_w - pad - thick, init_h - pad - len, thick, len, theme_color(TH_ACCENT));
 
@@ -369,45 +433,44 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_obj_set_style_radius(s_scan_beam, beam_h / 2, 0);
     lv_obj_set_style_border_width(s_scan_beam, 0, 0);
     lv_obj_set_style_outline_width(s_scan_beam, 0, 0);
+    lv_obj_set_scrollable(s_scan_beam, false);
 
-    /* ---------- 底部浮层：状态文字（左）+ 取消按钮（右） ----------
-     * 关键改动（v6）：改为 **preview 的子对象浮在底部**，不再作为 root 的 flex 子项。
-     * 原布局下 status/cancel 会挤占纵向空间，导致预览面板只有 ~265px 高、视频被压到
-     * 373×280；改为浮层后 preview 独占中间全部空间，视频可达 ~602×452（面积 2.6 倍）。
-     * 浮层用半透明底条，不遮挡画面中心（人脸区）。 */
-    lv_obj_t * bottom = lv_obj_create(s_preview);
-    lv_obj_set_size(bottom, lv_pct(100), SY(BOTTOM_BAR_H));
-    lv_obj_align(bottom, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_color(bottom, theme_color(TH_PANEL2), 0);
-    lv_obj_set_style_bg_opa(bottom, LV_OPA_60, 0);
-    lv_obj_set_style_border_width(bottom, 0, 0);
-    lv_obj_set_style_outline_width(bottom, 0, 0);
-    lv_obj_set_style_radius(bottom, 0, 0);
-    lv_obj_set_style_pad_left(bottom, SX(20), 0);
-    lv_obj_set_style_pad_right(bottom, SX(20), 0);
-    lv_obj_set_style_pad_top(bottom, 0, 0);
-    lv_obj_set_style_pad_bottom(bottom, 0, 0);
-    lv_obj_set_flex_flow(bottom, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(bottom, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    /* ---------- 底部行：状态文案（左）+ 录入/删除按钮（右） ---------- */
+    lv_obj_t * foot = lv_obj_create(root);
+    lv_obj_set_width(foot, lv_pct(100));
+    lv_obj_set_height(foot, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(foot, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(foot, 0, 0);
+    lv_obj_set_style_outline_width(foot, 0, 0);
+    lv_obj_set_style_pad_all(foot, 0, 0);
+    lv_obj_set_style_pad_left(foot, SX(14), 0);
+    lv_obj_set_style_pad_right(foot, SX(14), 0);
+    lv_obj_set_style_pad_column(foot, SX(12), 0);
+    lv_obj_set_flex_flow(foot, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(foot, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(foot, false);
 
-    lv_obj_t * status = lv_label_create(bottom);
-    lv_label_set_text(status, "请将面部对准摄像头");
-    lv_obj_set_style_text_color(status, theme_color(TH_TEXT), 0);
-    lv_obj_set_style_text_font(status, app_font_scaled(15), 0);
+    s_face_status = lv_label_create(foot);
+    lv_label_set_text(s_face_status, "");   /* 由 face_status_timer_cb 填真实文案 */
+    lv_obj_add_style(s_face_status, &st_text_mut, 0);
+    lv_obj_set_style_text_font(s_face_status, app_font_scaled(13), 0);
+    lv_obj_set_flex_grow(s_face_status, 1);
 
-    lv_obj_t * cancel = lv_button_create(bottom);
-    lv_obj_set_size(cancel, SX(120), SY(40));
-    lv_obj_add_style(cancel, &st_ghost_btn, 0);
-    lv_obj_set_style_radius(cancel, SX(20), 0);
-    lv_obj_set_flex_flow(cancel, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(cancel, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(cancel, SX(8), 0);
-    lv_obj_add_event_cb(cancel, cancel_cb, LV_EVENT_CLICKED, NULL);
-    ui_icon_create(cancel, UI_ICON_CLOSE, SX(18), theme_color(TH_TEXT));
-    lv_obj_t * ct = lv_label_create(cancel);
-    lv_label_set_text(ct, "取消");
-    lv_obj_set_style_text_color(ct, theme_color(TH_TEXT), 0);
-    lv_obj_set_style_text_font(ct, app_font_scaled(15), 0);
+    lv_obj_t * acts = lv_obj_create(foot);
+    lv_obj_set_size(acts, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(acts, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(acts, 0, 0);
+    lv_obj_set_style_outline_width(acts, 0, 0);
+    lv_obj_set_style_pad_all(acts, 0, 0);
+    lv_obj_set_style_pad_column(acts, SX(10), 0);
+    lv_obj_set_flex_flow(acts, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(acts, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(acts, false);
+
+    s_btn_enroll = mk_face_btn(acts, UI_GLYPH_FACE, "录入人脸", true, enroll_cb,
+                               &s_btn_enroll_ic, &s_btn_enroll_lb);
+    s_btn_del    = mk_face_btn(acts, UI_GLYPH_DELETE, "删除模板", false, delete_tpl_cb,
+                               &s_btn_del_ic, &s_btn_del_lb);
 
     /* ---------- 启动扫描动画 + 预览拉帧定时器 ---------- */
     lv_anim_init(&s_beam_anim);
@@ -423,13 +486,15 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_display_add_event_cb(lv_display_get_default(), ui_refr_ready_cb,
                             LV_EVENT_REFR_READY, NULL);
 
-    /* 扫描框染色随主题切换重刷（第 3 个主题回调，上限 4） */
+    /* 扫描框染色随主题切换重刷（第 4 个主题回调，槽位已满：本页只占这一个） */
     theme_register_change_cb(scan_refresh_theme);
 
     /* 拉帧定时器（20fps）：回调内部判断页面可见性，隐藏时空转不拉帧 */
     if (s_frame_timer == NULL) {
         s_frame_timer = lv_timer_create(frame_timer_cb, PREVIEW_MS, NULL);
     }
+    lv_timer_create(face_status_timer_cb, FACE_STATUS_MS, NULL);
+    lv_timer_create(face_users_timer_cb, FACE_USERS_MS, NULL);
 
     /* 初始化 FPS 窗口起点 */
     s_fps_win_start = hal_time_ms();
@@ -437,6 +502,10 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     s_ui_frames     = 0;
     s_video_fps     = 0;
     s_ui_fps        = 0;
+
+    /* 首次刷新标题 / 状态 */
+    face_update_header();
+    face_status_timer_cb(NULL);
 
     /* 触发一次 SIZE_CHANGED 立即建 canvas（force layout 后再调用） */
     lv_obj_update_layout(root);
@@ -466,16 +535,15 @@ static void preview_size_changed_cb(lv_event_t * e)
     rebuild_canvas(w, h);
     reposition_corners_and_beam(w, h);
     /* FPS 角标：右上角，按面板宽度自适配 */
-    if (s_fps_label) {
-        lv_obj_align(s_fps_label, LV_ALIGN_TOP_RIGHT, -SX(14), SY(12));
+    if (s_fps_box) {
+        lv_obj_align(s_fps_box, LV_ALIGN_TOP_RIGHT, -SX(12), SY(10));
     }
 }
 
 /* 重建画布缓冲：**尺寸 = 视频矩形**（不是整个面板），并把画布定位到居中位置。
- * 为什么不再满铺面板：满铺时「视频区之外」的留白每帧都要重新刷一次底色（板上
- * 1008×410 面板下约 20~30 万像素/帧），而这块区域只要在尺寸/主题变化时才需要刷。
- * 改成画布 = 视频矩形后，留白交给 s_preview 自己的 panel 底色承担，每帧零额外
- * 开销，画布缓冲也从约 827KB 降到视频矩形大小（416×312×2 ≈ 259KB）。
+ * 为什么不再满铺面板：满铺时「视频区之外」的留白每帧都要重新刷一次底色，而这块
+ * 区域只要在尺寸/主题变化时才需要刷。改成画布 = 视频矩形后，留白交给 s_preview
+ * 自己的底色承担，每帧零额外开销，画布缓冲也从约 827KB 降到约 259KB。
  * 注意：本函数必须在 compute_video_rect() 之后调用。 */
 static void rebuild_canvas(int32_t w, int32_t h)
 {
@@ -514,13 +582,10 @@ static void rebuild_canvas(int32_t w, int32_t h)
     s_canvas_h   = ch;
 }
 
-/* 计算 4:3 视频矩形：等比缩放取最大，居中（不拉伸变形）。
- * scale 用千分比整型运算：scale = min(cw*1000/320, ch*1000/240)。
- * 视频区**吃满整个面板高度**（用户要求「图像尽可能大」）——底部浮层为半透明
- * （OPA 60），叠在视频最下方 ~48px 上，不遮挡画面中心（人脸区）。 */
+/* 计算 4:3 视频矩形：等比缩放取最大（放大封顶 FACE_MAX_SCALE），居中（不拉伸变形）。 */
 static void compute_video_rect(int32_t cw, int32_t ch)
 {
-    int32_t avail_h = ch;                     /* 不避让底部浮层：视频最大化 */
+    int32_t avail_h = ch;                     /* 视频最大化 */
 
     int32_t sx = (int32_t)(((int64_t)cw * 1000) / CAP_W);
     int32_t sy = (int32_t)(((int64_t)avail_h * 1000) / CAP_H);
@@ -569,8 +634,7 @@ static void rebuild_maps(void)
     }
 }
 
-/* 把四角扫描框 + 扫描光带重定位到当前**视频区**（s_vid_*，非整个面板）。
- * 因为视频保持 4:3 居中，左右可能有留白；扫描框贴合画面才协调。 */
+/* 把四角扫描框 + 扫描光带重定位到当前**视频区**（s_vid_*，非整个面板）。 */
 static void reposition_corners_and_beam(int32_t w, int32_t h)
 {
     (void)w; (void)h;
@@ -611,14 +675,14 @@ static void reposition_corners_and_beam(int32_t w, int32_t h)
     lv_anim_set_playback_time(&s_beam_anim, 1800);
     lv_anim_set_time(&s_beam_anim, 1800);
 
-    /* 占位文字重新居中（panel 缩放后位置失效） */
-    if (s_ph_label) lv_obj_center(s_ph_label);
+    /* 占位重新居中（panel 缩放后位置失效） */
+    if (s_ph) lv_obj_center(s_ph);
 
-    /* 重定位不影响颜色，但画布重建后统一按当前状态刷一次，保证状态色不丢 */
+    /* 重定位不影响颜色，但统一按当前状态刷一次，保证状态色不丢 */
     scan_apply_color();
 }
 
-/* ===== 双 FPS 窗口更新：每 500ms 各算一次，更新角标 ===== */
+/* ===== 双 FPS 窗口更新：每 500ms 各算一次，更新两个角标 ===== */
 static void fps_label_update_if_due(void)
 {
     uint32_t now = hal_time_ms();
@@ -631,30 +695,38 @@ static void fps_label_update_if_due(void)
         s_fps_win_start = now;
         s_video_frames  = 0;
         s_ui_frames     = 0;
-        char buf[48];
-        snprintf(buf, sizeof(buf), "视频 %d fps\nUI  %d fps", s_video_fps, s_ui_fps);
-        lv_label_set_text(s_fps_label, buf);
+        char buf[24];
+        if (s_fps_ui) {
+            snprintf(buf, sizeof(buf), "UI %d fps", s_ui_fps);
+            lv_label_set_text(s_fps_ui, buf);
+        }
+        if (s_fps_vid) {
+            snprintf(buf, sizeof(buf), "视频 %d fps", s_video_fps);
+            lv_label_set_text(s_fps_vid, buf);
+        }
     }
 }
 
-/* ===== 拉帧定时器：拉帧 → 4:3 居中最近邻缩放 → invalidate 视频区 ===== */
+/* ===== 拉帧定时器：拉帧 → 最近邻缩放 → invalidate 视频区 ===== */
 static void frame_timer_cb(lv_timer_t * t)
 {
     (void)t;
-    if (s_page_root == NULL || lv_obj_is_hidden(s_page_root)) return;
+    if (s_page_root == NULL || lv_obj_is_hidden(s_page_root)) {
+        /* 离开人脸页：状态复位（否则下次进来还挂着上一次的红/绿） */
+        if (s_scan_state != PAGE_FACE_SCAN_IDLE) page_face_set_scan_state(PAGE_FACE_SCAN_IDLE);
+        return;
+    }
     if (!s_canvas || s_canvas_w <= 0 || s_canvas_h <= 0) return;
     if (s_vid_w <= 0 || s_vid_h <= 0) return;
 
-    /* 预览帧由 face 线程采集 + 转换（步骤 3b / 规约 §3.4），这里只取最新一帧渲染；
-     * 本回调运行在主线程，取回后可直接操作 LVGL，不跨线程。无新帧时保持上一帧。
-     * 不再直接调 hal_camera_frame()/release()——相机缓冲归 face 线程所有。 */
+    /* 预览帧由 face 线程采集 + 转换（规约 §3.4），这里只取最新一帧渲染；
+     * 本回调运行在主线程，取回后可直接操作 LVGL，不跨线程。无新帧时保持上一帧。 */
     hal_camera_frame_info_t info;
     if (face_thread_get_preview(s_cap_buf, &info)) {
         /* 1. 帧已在 s_cap_buf（face 线程双帧缓冲拷贝而来），无需再拷贝 */
 
         /* 2. 最近邻缩放 320×240 → 画布（画布 == 居中的 4:3 视频矩形），查表，
-         *    绘制期零除法。画布已收缩到视频矩形，因此**没有留白要填** —— 留白
-         *    是 s_preview 的底色，只在尺寸/主题变化时刷一次。 */
+         *    绘制期零除法。画布已收缩到视频矩形，因此**没有留白要填**。 */
         int32_t dst_stride = s_canvas_w;
         uint16_t * buf = s_canvas_buf;
         for (int32_t y = 0; y < s_canvas_h; y++) {
@@ -664,8 +736,7 @@ static void frame_timer_cb(lv_timer_t * t)
                 for (int32_t x = 0; x < s_canvas_w; x++) {
                     dst_row[x] = src_row[s_map_x[x]];
                 }
-            }
-            else {
+            } else {
                 /* 映射表分配失败时回退：逐像素整型除法 */
                 int32_t sy = (int32_t)(((int64_t)y * CAP_H) / s_canvas_h);
                 const uint16_t * src_row = &s_cap_buf[sy * CAP_W];
@@ -676,13 +747,14 @@ static void frame_timer_cb(lv_timer_t * t)
             }
         }
 
-        /* 3. 统计视频帧（face 线程成功取帧且被主线程消费的计数） */
+        /* 3. 统计视频帧 + 记录新鲜度 */
         s_video_frames++;
+        s_last_frame_ms = hal_time_ms();
+        s_got_frame = true;
 
         /* 4. 隐藏占位 */
-        if (!lv_obj_is_hidden(s_ph_label)) {
-            lv_obj_set_hidden(s_ph_label, true);
-        }
+        if (s_ph && !lv_obj_is_hidden(s_ph)) lv_obj_set_hidden(s_ph, true);
+
         /* 画布 == 视频矩形，整块 invalidate 即已是最小重绘面积 */
         lv_obj_invalidate(s_canvas);
     }
@@ -698,20 +770,170 @@ static void beam_anim_xcb(void * obj, int32_t v)
     lv_obj_set_y((lv_obj_t *)obj, v);
 }
 
-/* 返回主页 */
-static void back_cb(lv_event_t * e)
+/* ================================================================
+ *  标题 / 状态 / 占位 / 按钮（v2 新增）
+ * ================================================================ */
+
+/* 画面区占位：图标 + 一句话 */
+static void face_ph_show(bool show, const char * text)
+{
+    if (s_ph == NULL) return;
+    if (text != NULL && s_ph_label != NULL) lv_label_set_text(s_ph_label, text);
+    if (show) lv_obj_set_hidden(s_ph, false);
+    else      lv_obj_set_hidden(s_ph, true);
+}
+
+/* 健康状态：由后端能力 + 运行状态 + 是否有帧推导（真实来源，非写死） */
+static const char * face_health_str(void)
+{
+    const face_caps_t * caps = face_service_caps();
+    if (caps == NULL || caps->name == NULL || strcmp(caps->name, "none") == 0) return "未启用";
+    if (!face_service_running()) return "异常";
+    if (!s_got_frame)            return "待机";
+    if (hal_camera_fd() < 0)     return "降级";
+    return "正常";
+}
+
+/* 标题副文案：后端名 · 模板 n/max · 健康（全部真实来源） */
+static void face_update_header(void)
+{
+    if (s_face_sub == NULL) return;
+    const face_caps_t * caps = face_service_caps();
+    char buf[112];
+    if (caps == NULL || caps->name == NULL || strcmp(caps->name, "none") == 0) {
+        snprintf(buf, sizeof(buf), "人脸后端未启用 · 仅显示摄像头预览");
+    } else {
+        char tpl[24];
+        if (caps->max_templates < 0) snprintf(tpl, sizeof(tpl), "%d/不限", s_tpl_count);
+        else                         snprintf(tpl, sizeof(tpl), "%d/%d", s_tpl_count, caps->max_templates);
+        snprintf(buf, sizeof(buf), "后端 %s · 模板 %s · 健康：%s",
+                 caps->name, tpl, face_health_str());
+    }
+    lv_label_set_text(s_face_sub, buf);
+}
+
+/* 按钮可用性：后端不支持该能力 → 置灰（配合状态文案说明） */
+static void face_set_btn_enabled(lv_obj_t * btn, bool enabled)
+{
+    if (btn == NULL) return;
+    if (enabled) lv_obj_remove_state(btn, LV_STATE_DISABLED);
+    else         lv_obj_add_state(btn, LV_STATE_DISABLED);
+}
+
+/* 由最近一次识别结果推导状态文案（结果超过 FACE_RESULT_FRESH_S 秒则忽略） */
+static const char * face_status_from_result(void)
+{
+    const face_result_t * r = face_service_last_result();
+    if (r == NULL) return "请将面部对准摄像头";
+    uint32_t now = (uint32_t)hal_time();
+    if (now - r->timestamp > FACE_RESULT_FRESH_S) return "请将面部对准摄像头";
+    switch (r->reason) {
+        case FACE_RES_OK:            return "识别成功 · 正在开锁";
+        case FACE_RES_NO_MATCH:      return "未匹配 · 请调整角度重试";
+        case FACE_RES_LIVENESS_FAIL: return "活体检测未通过 · 请正对摄像头";
+        case FACE_RES_TIMEOUT:       return "识别超时 · 请重新对准";
+        case FACE_RES_ERROR:         return "模组异常 · 请检查连接";
+        default:                     return "请将面部对准摄像头";
+    }
+}
+
+/* 状态刷新（500ms）：底部状态文案 + 画面区占位 + 按钮可用性 + 标题副文案 */
+static void face_status_timer_cb(lv_timer_t * t)
+{
+    (void)t;
+
+    const face_caps_t * caps = face_service_caps();
+    bool backend_none = (caps == NULL || caps->name == NULL ||
+                         strcmp(caps->name, "none") == 0);
+    bool cam_ok  = (hal_camera_fd() >= 0);
+    uint32_t now = hal_time_ms();
+    bool live    = s_got_frame && ((now - s_last_frame_ms) < FACE_FRAME_STALE_MS);
+
+    /* ---- 底部状态文案：明确、不空、不显示 "--" ---- */
+    const char * st;
+    if (!cam_ok)            st = "摄像头未接入 · 预览不可用";
+    else if (backend_none)  st = "人脸后端未启用 · 仅预览画面";
+    else if (!face_service_running()) st = "人脸后端未运行 · 请检查设备";
+    else if (!live)         st = "等待摄像头出帧…";
+    else                    st = face_status_from_result();
+    if (s_face_status != NULL) lv_label_set_text(s_face_status, st);
+
+    /* ---- 画面区占位 ---- */
+    if (live) {
+        face_ph_show(false, NULL);
+    } else if (backend_none) {
+        face_ph_show(true, cam_ok ? "摄像头画面（人脸功能未启用）" : "摄像头未接入，无预览画面");
+    } else {
+        face_ph_show(true, cam_ok ? "等待摄像头出帧…" : "摄像头未接入，无预览画面");
+    }
+
+    /* ---- 按钮可用性（后端能力为准） ---- */
+    face_set_btn_enabled(s_btn_enroll, caps != NULL && (caps->caps & FACE_CAP_ENROLL));
+    face_set_btn_enabled(s_btn_del,    caps != NULL && (caps->caps & FACE_CAP_DELETE));
+
+    /* ---- 标题副文案（健康可能随帧/运行状态变化） ---- */
+    face_update_header();
+}
+
+/* 模板数统计（worker 线程读盘，主线程贴值） */
+static void face_users_timer_cb(lv_timer_t * t)
+{
+    (void)t;
+    if (s_users_busy) return;
+    s_users_busy = true;
+    astore_load_users(face_users_loaded);
+}
+
+static void face_users_loaded(safe_user_t * list, int count)
+{
+    s_users_busy = false;
+    int tpl = 0;
+    for (int i = 0; i < count; i++) {
+        if (list[i].face_id >= 0) tpl++;
+    }
+    s_tpl_count = tpl;
+    face_update_header();
+    /* list 由 astore 框架释放 */
+}
+
+/* 主题切换：刷新本页新增的本地颜色覆盖（标题/状态/占位走 st_* 自动刷新，
+ * 这里只处理按角色取色与自定义底色/文字色的控件） */
+static void face_refresh_local_colors(void)
+{
+    if (s_ph_icon)  lv_obj_set_style_text_color(s_ph_icon, theme_color(TH_TEXT_MUT), 0);
+    if (s_ph_label) lv_obj_set_style_text_color(s_ph_label, theme_color(TH_TEXT_MUT), 0);
+
+    lv_obj_t * fps[2] = { s_fps_ui, s_fps_vid };
+    for (int i = 0; i < 2; i++) {
+        if (fps[i] == NULL) continue;
+        lv_obj_set_style_bg_color(fps[i], theme_color(TH_PANEL2), 0);
+        lv_obj_set_style_text_color(fps[i], theme_color(TH_TEXT), 0);
+    }
+
+    if (s_preview) lv_obj_set_style_border_color(s_preview, theme_color(TH_BORDER), 0);
+
+    if (s_btn_enroll)    lv_obj_set_style_bg_color(s_btn_enroll, theme_color(TH_ACCENT), 0);
+    if (s_btn_enroll_ic) lv_obj_set_style_text_color(s_btn_enroll_ic, theme_color(TH_ACCENT_INK), 0);
+    if (s_btn_enroll_lb) lv_obj_set_style_text_color(s_btn_enroll_lb, theme_color(TH_ACCENT_INK), 0);
+    if (s_btn_del)       lv_obj_set_style_border_color(s_btn_del, theme_color(TH_BORDER), 0);
+    if (s_btn_del_ic)    lv_obj_set_style_text_color(s_btn_del_ic, theme_color(TH_TEXT), 0);
+    if (s_btn_del_lb)    lv_obj_set_style_text_color(s_btn_del_lb, theme_color(TH_TEXT), 0);
+}
+
+/* 录入人脸 / 删除模板：见文件头「安全性说明」——不在本页直接执行，
+ * 而是导航到「用户」页并给出明确指引，走已验证的管理员二次验证路径。 */
+static void enroll_cb(lv_event_t * e)
 {
     (void)e;
-    lv_anim_delete(s_scan_beam, NULL);
-    /* 离开人脸页：状态复位（否则下次进来还会挂着上一次的红/绿） */
-    page_face_set_scan_state(PAGE_FACE_SCAN_IDLE);
-    ui_switch_page(PAGE_HOME);
+    ui_banner("录入人脸：请在「用户」页选择用户（需管理员二次验证）",
+              UI_BANNER_INFO, UI_ANIM_BANNER_HOLD_MS_S);
+    ui_switch_page(PAGE_USERS);
 }
 
-static void cancel_cb(lv_event_t * e)
+static void delete_tpl_cb(lv_event_t * e)
 {
-    back_cb(e);
+    (void)e;
+    ui_banner("删除人脸模板：请在「用户」页选择用户（需管理员二次验证）",
+              UI_BANNER_INFO, UI_ANIM_BANNER_HOLD_MS_S);
+    ui_switch_page(PAGE_USERS);
 }
-
-
-
