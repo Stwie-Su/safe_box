@@ -26,3 +26,8 @@ data/
 .DS_Store
 Testing/
 build_board_test/
+
+# 本地工具/插件产物（不随源码入库）
+.claude/
+__pycache__/
+docs/
