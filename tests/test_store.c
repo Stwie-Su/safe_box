@@ -130,10 +130,10 @@ int main(void)
     }
 
     /* ---- 日志 ---- */
-    CHECK(log_append("unlock", "carol2", 1, "test") == 0);
+    CHECK(log_append("UNLOCK", "carol2", 1, "test") == 0);
     log_entry_t * logs = NULL;
     int n = 0;
-    CHECK(log_query("unlock", -1, &logs, &n) == 0);
+    CHECK(log_query("UNLOCK", -1, &logs, &n) == 0);
     CHECK(n >= 1);
     free(logs);
 
