@@ -142,7 +142,7 @@ def seq_listen(r):
             # 简单帧提取：找 EF AA 头，按 Size 切
             while len(buf) >= 7 and buf[0:2] == b"\xEF\xAA":
                 size = (buf[3] << 8) | buf[4]
-                total = 6 + size + 1
+                total = 6 + size   # 帧长 = EF AA(2) + msgid(1) + size(2) + data(size) + xor(1)
                 if len(buf) < total:
                     break
                 frame, buf = buf[:total], buf[total:]

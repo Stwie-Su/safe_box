@@ -4,7 +4,7 @@
  *
  * 环境变量：
  *   SAFE_TEST_PAGE  = HOME | LOGS | SETTINGS | USERS | NETWORK | SYSTEM | KEYPAD | FACE | OTP
- *   SAFE_TEST_THEME = 0..3
+ *   SAFE_TEST_THEME = 0..4（5 套主题，见 ui/theme.c THEMES[]）
  *   SAFE_TEST_DLG   = add_user | auth | change_pwd | otp | face
  *   SAFE_TEST_SHOT  = 截图输出路径（原始 RGB565，截图后直接退出）
  *   SAFE_TEST_TRANS_PAGE = 目标页面名：先稳定再切页、推进若干 ms 抓过渡中间帧
@@ -52,17 +52,47 @@ extern void page_users_test_open_change_pwd_dlg(void);
 extern void page_users_test_open_otp_dlg(void);
 extern void page_users_test_open_face_dlg(void);
 
-static ui_page_t page_from_name(const char * name)
+/* 合法页面名与枚举的映射表（单一来源：解析与错误提示都用它，加页只改这里）。 */
+static const struct { const char * name; ui_page_t page; } k_page_table[] = {
+    { "HOME",     PAGE_HOME },
+    { "LOGS",     PAGE_LOGS },
+    { "SETTINGS", PAGE_SETTINGS },
+    { "USERS",    PAGE_USERS },
+    { "NETWORK",  PAGE_NETWORK },
+    { "SYSTEM",   PAGE_SYSTEM },
+    { "KEYPAD",   PAGE_KEYPAD },
+    { "OTP",      PAGE_OTP },
+    { "FACE",     PAGE_FACE },
+};
+
+#define PAGE_TABLE_N  (sizeof(k_page_table) / sizeof(k_page_table[0]))
+
+static bool page_from_name(const char * name, ui_page_t * out)
 {
-    if(strcmp(name, "LOGS") == 0)     return PAGE_LOGS;
-    if(strcmp(name, "SETTINGS") == 0) return PAGE_SETTINGS;
-    if(strcmp(name, "USERS") == 0)    return PAGE_USERS;
-    if(strcmp(name, "NETWORK") == 0)  return PAGE_NETWORK;
-    if(strcmp(name, "SYSTEM") == 0)   return PAGE_SYSTEM;
-    if(strcmp(name, "KEYPAD") == 0)   return PAGE_KEYPAD;
-    if(strcmp(name, "OTP") == 0)      return PAGE_OTP;
-    if(strcmp(name, "FACE") == 0)     return PAGE_FACE;
-    return PAGE_HOME;
+    for(size_t i = 0; i < PAGE_TABLE_N; i++) {
+        if(strcmp(name, k_page_table[i].name) == 0) {
+            *out = k_page_table[i].page;
+            return true;
+        }
+    }
+    return false;   /* 非法名字：由 page_required 响亮失败，绝不静默回落 */
+}
+
+/* 夹具用：名字非法时打印错误与合法取值后以非 0 退出。
+ * 为什么不能静默回落 HOME（D16）：错值（如把 FACE 写成 FAC）会产出一张
+ * 「看起来正常」的主页截图，验收者据此得出的结论是假的——
+ * 宁可不出图，也不出假图。 */
+static ui_page_t page_required(const char * env_name, const char * name)
+{
+    ui_page_t page;
+    if(page_from_name(name, &page)) return page;
+
+    fprintf(stderr, "[DEBUG-HOOKS] 非法 %s=\"%s\"。合法取值：", env_name, name);
+    for(size_t i = 0; i < PAGE_TABLE_N; i++)
+        fprintf(stderr, "%s ", k_page_table[i].name);
+    fprintf(stderr, "\n");
+    fflush(stderr);
+    exit(2);
 }
 
 /* ---------------- 人脸事件注入（UI 现代化 ui1 截图验收，spec §7） ----------------
@@ -194,7 +224,7 @@ static void take_shot(const char * path)
         const char * tms = getenv("SAFE_TEST_TRANS_MS");
         if(tms && *tms) mid = atoi(tms);
         if(mid < 0) mid = 0;
-        ui_switch_page(page_from_name(trans_page));
+        ui_switch_page(page_required("SAFE_TEST_TRANS_PAGE", trans_page));
         pump_ms(10, mid);
     }
     else if(inject_face_from_env()) {
@@ -244,7 +274,7 @@ void debug_hooks_apply(void)
     if(theme && *theme) theme_switch(atoi(theme));
 
     const char * page = getenv("SAFE_TEST_PAGE");
-    if(page && *page) ui_switch_page(page_from_name(page));
+    if(page && *page) ui_switch_page(page_required("SAFE_TEST_PAGE", page));
 
     const char * shot = getenv("SAFE_TEST_SHOT");
     if(shot && *shot) take_shot(shot);
