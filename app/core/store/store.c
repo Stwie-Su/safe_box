@@ -10,6 +10,7 @@
  * 内置极简 JSON 读写器（仅服务于本模块固定 schema，不做通用库）。
  */
 #include "core/store/store.h"
+#include "core/config.h"       /* 运行期配置快照（SAFE_LOG_MAX 等） */
 #include "core/support/crypto.h"
 #include "hal/hal_time.h"        /* R2：时间源统一走 HAL，业务层不直接读系统时钟 */
 #include "app_version.h"          /* SAFE_DATA_DIR：编译期数据目录 */
@@ -36,7 +37,14 @@
 
 /* ---------------- 常量 ---------------- */
 #define PBKDF2_ITER_USER  10000u   /* PIN 哈希迭代次数 */
-#define LOG_MAX_ENTRIES   500      /* 日志滚动保留条数（DESIGN.md §3.3） */
+/* 日志滚动保留条数：默认值单一来源于 config 层（APP_CFG_LOG_MAX_DEFAULT），
+ * 运行期由 SAFE_LOG_MAX 覆盖。D6：原先此处硬编码 500，导致 app_config 里的
+ * log_max_entries / SAFE_LOG_MAX 形同虚设。 */
+static int log_retention_max(void)
+{
+    int m = app_config()->log_max_entries;
+    return (m > 0) ? m : APP_CFG_LOG_MAX_DEFAULT;
+}
 
 #define USERS_FILE  "users.json"
 #define NET_FILE    "network.json"
@@ -964,8 +972,8 @@ int log_append(const char *evt, const char *user, int res, const char *detail)
             if (c == '\n' && !in_str) lines++;
         }
         fclose(rf);
-        if (lines > LOG_MAX_ENTRIES) {
-            int skip = lines - LOG_MAX_ENTRIES;
+        if (lines > log_retention_max()) {
+            int skip = lines - log_retention_max();
             char tmp_path[576];
             snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
             FILE *nf = fopen(path, "rb");
@@ -975,8 +983,12 @@ int log_append(const char *evt, const char *user, int res, const char *detail)
                 bool ins = false;
                 while ((wc = fgetc(nf)) != EOF) {
                     if (wc == '"') ins = !ins;
-                    if (wc == '\n' && !ins) cur++;
-                    if (cur > skip) fputc(wc, tf);
+                    if (wc == '\n' && !ins) {
+                        cur++;
+                        if (cur > skip) fputc(wc, tf);   /* 保留第 skip+1 行起的换行 */
+                    } else if (cur >= skip) {
+                        fputc(wc, tf);                   /* 第 skip+1 行起才写内容 */
+                    }
                 }
             }
             if (nf) fclose(nf);

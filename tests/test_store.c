@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "core/store/store.h"
+#include "core/config.h"
 
 #define TEST_DATA_DIR "/tmp/safe_test_store"
 
@@ -136,6 +137,18 @@ int main(void)
     CHECK(log_query("UNLOCK", -1, &logs, &n) == 0);
     CHECK(n >= 1);
     free(logs);
+
+    /* ---- 日志滚动上限来自运行期配置（D6）：SAFE_LOG_MAX 必须生效 ---- */
+    setenv("SAFE_LOG_MAX", "3", 1);
+    app_config_init();
+    CHECK(app_config()->log_max_entries == 3);
+    for(int i = 0; i < 5; i++) CHECK(log_append("UNLOCK", "carol2", 1, "roll") == 0);
+    log_entry_t * rlogs = NULL;
+    int rn = 0;
+    CHECK(log_query(NULL, -1, &rlogs, &rn) == 0);
+    CHECK(rn == 3);                 /* 只保留最后 3 条，其余滚动截断 */
+    free(rlogs);
+    unsetenv("SAFE_LOG_MAX");
 
     /* ---- 网络 PSK 可逆加解密 ---- */
     CHECK(net_add_wifi("TestAP", "WPA2", "secret123") == 0);

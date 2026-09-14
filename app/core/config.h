@@ -19,6 +19,10 @@ extern "C" {
 #define APP_CFG_MQTT_HOST_MAX   64
 #define APP_CFG_DATA_DIR_MAX    256
 
+/* 日志滚动保留条数的唯一默认值（DESIGN.md §3.3）。
+ * 运行期可用环境变量 SAFE_LOG_MAX 覆盖（见 config.c）。 */
+#define APP_CFG_LOG_MAX_DEFAULT 500
+
 typedef struct {
     /* 认证与锁定（FR-2 / FR-4 / FR-7） */
     int  face_otp_after;        /* 人脸连续未匹配达此值转动态码 */
