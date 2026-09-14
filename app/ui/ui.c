@@ -68,7 +68,7 @@ static const rail_def_t RAILS[RAIL_COUNT] = {
     { "日志", UI_GLYPH_LIST,     PAGE_LOGS     },
     { "人脸", UI_GLYPH_FACE,     PAGE_FACE     },
     { "网络", UI_GLYPH_WIFI,     PAGE_NETWORK  },
-    { "设置", UI_GLYPH_SETTINGS, PAGE_SETTINGS },
+    { "开发者", UI_GLYPH_SETTINGS, PAGE_SETTINGS },
     { "系统", UI_GLYPH_SYSTEM,   PAGE_SYSTEM   },
 };
 
@@ -76,7 +76,7 @@ static const rail_def_t RAILS[RAIL_COUNT] = {
 static const page_desc_t s_pages[PAGE_COUNT] = {
     { PAGE_HOME,     page_monitor_create  }, // 0: 主监控页
     { PAGE_LOGS,     page_logs_create     }, // 1: 日志列表
-    { PAGE_SETTINGS, page_settings_create }, // 2: 设置主菜单
+    { PAGE_SETTINGS, page_settings_create }, // 2: 开发者选项（只读诊断，FR-7 2026-09-14 变更）
     { PAGE_USERS,    page_users_create    }, // 3: 用户管理子页
     { PAGE_NETWORK,  page_network_create  }, // 4: 网络设置子页
     { PAGE_SYSTEM,   page_system_create   }, // 5: 系统设置子页

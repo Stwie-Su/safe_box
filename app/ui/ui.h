@@ -32,10 +32,10 @@ LV_FONT_DECLARE(lv_font_cn_28)
 typedef enum {
     PAGE_HOME     = 0,   /* 主页（锁状态 + 时钟 + 开锁占位） */
     PAGE_LOGS,           /* 日志（独立一级页） */
-    PAGE_SETTINGS,       /* 设置中枢（二次验证 admin PIN） */
+    PAGE_SETTINGS,       /* 开发者选项（只读诊断，无鉴权；FR-7 2026-09-14 变更） */
     PAGE_USERS,          /* 用户管理（底部「用户」一级页签） */
-    PAGE_NETWORK,        /* 网络（设置子页） */
-    PAGE_SYSTEM,         /* 系统（设置子页） */
+    PAGE_NETWORK,        /* 网络（主导航一级入口） */
+    PAGE_SYSTEM,         /* 系统（主导航一级入口：策略/主题/恢复出厂） */
     PAGE_KEYPAD,         /* 开锁 PIN 键盘（主页全屏层） */
     PAGE_OTP,            /* 动态密码（人脸置信度二次确认，全屏层） */
     PAGE_FACE,           /* 人脸识别（全屏层：从主页"人脸识别"卡进入；视频区留空） */

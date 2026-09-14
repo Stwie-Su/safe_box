@@ -59,7 +59,7 @@ static void emit_event(const char * evt, const char * user, const char * detail,
  * 让 UI 来得及显示「已开锁」并允许用户继续操作。
  * 30s 之后自动回到 IDLE（保险柜已上锁）。
  * 实际物理执行器（hal_actuator_pulse）保持 500ms 上限，NFR-7 不变。
- * DETECTING 超时用策略 face_verify_timeout_s（FR-7 设置中枢可调，默认 10s）。
+ * DETECTING 超时用策略 face_verify_timeout_s（FR-7 系统策略可调，默认 10s）。
  */
 #define TO_OTP       60
 #define TO_UNLOCKED  30

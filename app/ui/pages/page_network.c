@@ -156,7 +156,7 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
 static void go_back_cb(lv_event_t * e)
 {
     (void)e;
-    ui_switch_page(PAGE_SETTINGS);
+    ui_switch_page(PAGE_HOME);   /* FR-7 变更：设置中枢已改为开发者选项，返回目标改主页 */
 }
 
 /* 读已存网络：4 次 net_get_psk（每次含 PBKDF2 派生）整段在后台执行（DESIGN.md §9） */

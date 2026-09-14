@@ -47,7 +47,7 @@ static lv_obj_t * s_ov = NULL;
 static lv_obj_t * s_win = NULL;
 static lv_obj_t * s_msg = NULL;
 
-static void go_back_cb(lv_event_t * e);
+static void clock_timer_cb(lv_timer_t * t);
 static void clock_timer_cb(lv_timer_t * t);
 static void policy_dec_cb(lv_event_t * e);
 static void policy_inc_cb(lv_event_t * e);
@@ -60,6 +60,26 @@ static void factory_done(void * p);
 static void factory_btn_cb(lv_event_t * e);
 static void refresh_policy(void);
 
+/* ---- 管理员二次验证（操作处鉴权，FR-7 2026-09-14 变更）----
+ * 原设计把鉴权放在「设置中枢」页级入口；但主导航本就直接暴露 系统/用户/网络，
+ * 页级验证可被 rail 绕过（鉴权口径不一致）。中枢取消后，鉴权下沉到**敏感操作处**：
+ *   保存安全策略 / 恢复出厂设置 → 先验管理员 PIN，通过才执行。
+ * 弹窗实现与 page_users 的管理员验证同源（astore_verify_admin，PBKDF2 后台校验）。 */
+typedef enum {
+    ADMIN_ACT_NONE = 0,
+    ADMIN_ACT_SAVE_POLICY,
+    ADMIN_ACT_FACTORY,
+} admin_action_t;
+
+static void admin_verify_open(admin_action_t act);
+static void admin_verify_close(void);
+static void admin_verify_dispatch(void);
+static void admin_verify_key_cb(lv_event_t * e);
+static void admin_verify_cancel_cb(lv_event_t * e);
+static void admin_verify_ok_cb(lv_event_t * e);
+static void admin_verify_update(void);
+static void admin_verify_done(int r);
+
 static void dlg_factory(void);
 static void close_dlg(void);
 static void dlg_cancel_cb(lv_event_t * e);
@@ -67,6 +87,13 @@ static void do_factory_cb(lv_event_t * e);
 
 static int s_pending_max_failed = 5;
 static int s_pending_lock_secs  = 60;
+
+static admin_action_t s_admin_act = ADMIN_ACT_NONE;
+static lv_obj_t * s_av_ov   = NULL;
+static lv_obj_t * s_av_win = NULL;
+static lv_obj_t * s_av_disp = NULL;
+static lv_obj_t * s_av_msg  = NULL;
+static char s_av_pin[16] = {0};
 
 /* ---------------- 小组件 ---------------- */
 
@@ -200,11 +227,7 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(head, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
 
-    lv_obj_t * back = ui_icon_text_button(head, LV_SYMBOL_LEFT, "返回",
-                                          SX(78), SY(38), &st_ghost_btn,
-                                          theme_color(TH_TEXT), go_back_cb, NULL);
-    (void)back;
-
+    /* rail 即导航，本页不放「返回」（与 v2 预览一致；原返回目标「设置中枢」已取消） */
     lv_obj_t * tt = lv_obj_create(head);
     lv_obj_set_size(tt, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(tt, LV_OPA_TRANSP, 0);
@@ -389,12 +412,6 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     return root;
 }
 
-static void go_back_cb(lv_event_t * e)
-{
-    (void)e;
-    ui_switch_page(PAGE_SETTINGS);
-}
-
 static void clock_timer_cb(lv_timer_t * t)
 {
     (void)t;
@@ -451,8 +468,8 @@ static void policy_inc_cb(lv_event_t * e)
 static void save_policy_cb(lv_event_t * e)
 {
     (void)e;
-    /* 策略落盘（重写 users.json）放后台；日志异步追加 */
-    astore_set_policy(s_pending_max_failed, s_pending_lock_secs, policy_saved_done);
+    /* FR-7（2026-09-14 变更）：策略修改属敏感操作，先验管理员 PIN，通过才落盘 */
+    admin_verify_open(ADMIN_ACT_SAVE_POLICY);
 }
 
 static void policy_saved_done(int result)
@@ -489,7 +506,8 @@ static void theme_change_refresh(int idx)
 static void factory_btn_cb(lv_event_t * e)
 {
     (void)e;
-    dlg_factory();
+    /* FR-7（2026-09-14 变更）：恢复出厂属敏感操作，先验管理员 PIN，通过再弹确认框 */
+    admin_verify_open(ADMIN_ACT_FACTORY);
 }
 
 static void close_dlg(void)
@@ -583,4 +601,190 @@ static void do_factory_cb(lv_event_t * e)
 {
     (void)e;
     worker_post(factory_worker, NULL, factory_done);
+}
+
+/* ================= 管理员二次验证弹窗（操作处鉴权） =================
+ * 布局与 page_users 的管理员验证同款（绝对定位，不用 flex，避免按钮被压扁）。
+ * 校验走 astore_verify_admin()：PBKDF2 在后台线程算，结果回主线程处理；
+ * 通过后按 s_admin_act 分派到真正的动作（保存策略 / 打开恢复出厂确认框）。 */
+
+static void admin_verify_open(admin_action_t act)
+{
+    admin_verify_close();
+    s_admin_act = act;
+    s_av_pin[0] = '\0';
+
+    lv_obj_t * scr = lv_screen_active();
+    s_av_ov = lv_obj_create(scr);
+    lv_obj_set_size(s_av_ov, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_bg_color(s_av_ov, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_av_ov, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_av_ov, 0, 0);
+    lv_obj_set_scrollable(s_av_ov, false);
+
+    s_av_win = lv_obj_create(s_av_ov);
+    lv_obj_set_size(s_av_win, 380, 460);
+    lv_obj_add_style(s_av_win, &st_panel, 0);
+    lv_obj_set_style_radius(s_av_win, SX(16), 0);
+    lv_obj_set_style_pad_all(s_av_win, 0, 0);
+    lv_obj_set_scrollable(s_av_win, false);
+    lv_obj_center(s_av_win);
+
+    lv_obj_t * t = lv_label_create(s_av_win);
+    lv_label_set_text(t, "管理员验证");
+    lv_obj_add_style(t, &st_text, 0);
+    lv_obj_set_style_text_font(t, app_font_scaled(20), 0);
+    lv_obj_set_width(t, 380);
+    lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(t, 0, 14);
+
+    s_av_disp = lv_label_create(s_av_win);
+    lv_label_set_text(s_av_disp, "——");
+    lv_obj_add_style(s_av_disp, &st_text, 0);
+    lv_obj_set_style_text_font(s_av_disp, app_font_scaled(28), 0);
+    lv_obj_set_style_pad_all(s_av_disp, 0, 0);
+    lv_obj_set_style_text_align(s_av_disp, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_bg_color(s_av_disp, theme_color(TH_PANEL2), 0);
+    lv_obj_set_style_radius(s_av_disp, 8, 0);
+    lv_obj_set_size(s_av_disp, 240, 50);
+    lv_obj_set_pos(s_av_disp, 70, 54);
+
+    s_av_msg = lv_label_create(s_av_win);
+    lv_label_set_text(s_av_msg, "请输入管理员 PIN");
+    lv_obj_add_style(s_av_msg, &st_text_mut, 0);
+    lv_obj_set_style_text_font(s_av_msg, app_font_scaled(14), 0);
+    lv_obj_set_width(s_av_msg, 380);
+    lv_obj_set_style_text_align(s_av_msg, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_av_msg, 0, 116);
+
+    static const char * KEYS[4][3] = {
+        { "1", "2", "3" }, { "4", "5", "6" }, { "7", "8", "9" }, { "退格", "0", "清空" },
+    };
+    const int ROW_Y[4] = { 160, 210, 260, 310 };
+    const int KEY_X[3] = { 50, 146, 242 };
+    for (int r = 0; r < 4; r++) {
+        for (int c = 0; c < 3; c++) {
+            lv_obj_t * k = lv_button_create(s_av_win);
+            lv_obj_set_size(k, 88, 40);
+            lv_obj_set_pos(k, KEY_X[c], ROW_Y[r]);
+            lv_obj_add_style(k, &st_panel2, 0);
+            lv_obj_set_style_radius(k, 8, 0);
+            lv_obj_t * kl = lv_label_create(k);
+            lv_label_set_text(kl, KEYS[r][c]);
+            lv_obj_add_style(kl, &st_text, 0);
+            lv_obj_set_style_text_font(kl, app_font_scaled(16), 0);
+            lv_obj_center(kl);
+            lv_obj_add_event_cb(k, admin_verify_key_cb, LV_EVENT_CLICKED,
+                                (void *)(uintptr_t)(r * 3 + c));
+        }
+    }
+
+    lv_obj_t * cancel = lv_button_create(s_av_win);
+    lv_obj_set_size(cancel, 136, 40);
+    lv_obj_set_pos(cancel, 50, 360);
+    lv_obj_add_style(cancel, &st_ghost_btn, 0);
+    lv_obj_add_event_cb(cancel, admin_verify_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * cl = lv_label_create(cancel);
+    lv_label_set_text(cl, "取消");
+    lv_obj_set_style_text_font(cl, app_font_scaled(16), 0);
+    lv_obj_center(cl);
+
+    lv_obj_t * ok = lv_button_create(s_av_win);
+    lv_obj_set_size(ok, 136, 40);
+    lv_obj_set_pos(ok, 194, 360);
+    lv_obj_add_style(ok, &st_accent_btn, 0);
+    lv_obj_add_style(ok, &st_accent_btn_pr, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(ok, admin_verify_ok_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * ol = lv_label_create(ok);
+    lv_label_set_text(ol, "确认");
+    lv_obj_set_style_text_font(ol, app_font_scaled(16), 0);
+    lv_obj_center(ol);
+
+    admin_verify_update();
+}
+
+static void admin_verify_close(void)
+{
+    if (s_av_ov) lv_obj_delete(s_av_ov);
+    s_av_ov = NULL; s_av_disp = NULL; s_av_msg = NULL;
+    s_av_pin[0] = '\0';
+}
+
+static void admin_verify_update(void)
+{
+    size_t len = strlen(s_av_pin);
+    char masked[16];
+    for (size_t i = 0; i < len; i++) masked[i] = '*';
+    masked[len] = '\0';
+    if (s_av_disp) lv_label_set_text(s_av_disp, len ? masked : "——");
+}
+
+static void admin_verify_key_cb(lv_event_t * e)
+{
+    int idx = (int)(uintptr_t)lv_event_get_user_data(e);
+    static const char * KEYS[12] = {
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "退格", "0", "清空",
+    };
+    const char * key = KEYS[idx];
+    if (strcmp(key, "清空") == 0) {
+        s_av_pin[0] = '\0';
+    } else if (strcmp(key, "退格") == 0) {
+        size_t len = strlen(s_av_pin);
+        if (len > 0) s_av_pin[len - 1] = '\0';
+    } else {
+        size_t len = strlen(s_av_pin);
+        if (len < 8) { s_av_pin[len] = key[0]; s_av_pin[len + 1] = '\0'; }
+    }
+    admin_verify_update();
+}
+
+static void admin_verify_cancel_cb(lv_event_t * e)
+{
+    (void)e;
+    s_admin_act = ADMIN_ACT_NONE;
+    admin_verify_close();
+}
+
+static void admin_verify_done(int r)
+{
+    if (r == 0) {
+        astore_append_log("setting_change", "admin", 1, "admin verify ok");
+        admin_verify_close();
+        admin_verify_dispatch();
+    } else if (r == 2) {
+        if (s_av_msg) lv_label_set_text(s_av_msg, "已被锁定，请稍后再试");
+        s_av_pin[0] = '\0';
+        admin_verify_update();
+    } else {
+        if (s_av_msg) lv_label_set_text(s_av_msg, "PIN 错误，请重试");
+        s_av_pin[0] = '\0';
+        admin_verify_update();
+    }
+}
+
+static void admin_verify_ok_cb(lv_event_t * e)
+{
+    (void)e;
+    if (strlen(s_av_pin) < 4) {
+        if (s_av_msg) lv_label_set_text(s_av_msg, "PIN 至少 4 位");
+        return;
+    }
+    astore_verify_admin(s_av_pin, admin_verify_done);
+}
+
+static void admin_verify_dispatch(void)
+{
+    switch (s_admin_act) {
+    case ADMIN_ACT_SAVE_POLICY:
+        /* 策略落盘（重写 users.json）放后台；日志异步追加 */
+        astore_set_policy(s_pending_max_failed, s_pending_lock_secs, policy_saved_done);
+        break;
+    case ADMIN_ACT_FACTORY:
+        dlg_factory();          /* 验证通过后再弹恢复出厂确认框（破坏性操作双重确认） */
+        break;
+    case ADMIN_ACT_NONE:
+    default:
+        break;
+    }
+    s_admin_act = ADMIN_ACT_NONE;
 }
