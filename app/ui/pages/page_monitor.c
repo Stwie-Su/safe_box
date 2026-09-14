@@ -53,7 +53,11 @@ typedef struct {
     ui_glyph_t   glyph;
     theme_role_t role;
     char         title[40];
-    char         sub[72];
+    /* 副标题承载 "user · detail"：log_entry_t 的 user/detail 各 48 字节，
+     * 拼接后最长 48+5(" · " 的 UTF-8)+48+1 ≈ 102 字节。此前 72 字节会让 GCC 报
+     * -Wformat-truncation 并在运行期静默截掉用户名/详情尾部（D11，审计信息失真）；
+     * 取 128 让编译器推断的可写区域下界也大于最长输出。 */
+    char         sub[128];
     char         time[16];
 } ev_view_t;
 
@@ -603,8 +607,12 @@ static void describe_event(const log_entry_t * e, ev_view_t * v)
         snprintf(v->title, sizeof(v->title), "%s", evt);
     }
 
+    /* 显式限宽（%.*s）：user/detail 各 48B，直接 "%s · %s" 最长约 102B，而 GCC 对
+     * sizeof(v->sub) 只能做区间推断（下界小于最长输出）→ 报 -Wformat-truncation。
+     * 限宽后输出长度有确定上界（56*2 + " · "5 + '\0' = 118 < 128），静态检查与
+     * 运行期都不再截断；真实用户名/详情远短于此，信息不丢。 */
     if (e->user[0] && strcmp(e->user, "-") != 0 && e->detail[0])
-        snprintf(v->sub, sizeof(v->sub), "%s · %s", e->user, e->detail);
+        snprintf(v->sub, sizeof(v->sub), "%.*s · %.*s", 56, e->user, 56, e->detail);
     else if (e->detail[0])
         snprintf(v->sub, sizeof(v->sub), "%s", e->detail);
     else if (e->user[0])
@@ -684,7 +692,10 @@ static void stats_done(void * p)
     lv_label_set_text(s_stat_value[3], buf);
 
     if (s_sub_label) {
-        char sub[96];
+        /* 中文字面量按 UTF-8 计：前缀约 15B + last_open 32 + 分隔约 20B +
+         * methods 48 + '\0' ≈ 116B。此前 96B 会触发 -Wformat-truncation
+         * 并静默截断「最后开启」时间（D11）。 */
+        char sub[160];
         snprintf(sub, sizeof(sub), "最后开启 · %s　·　开锁方式 %s", a->last_open, a->methods);
         lv_label_set_text(s_sub_label, sub);
     }

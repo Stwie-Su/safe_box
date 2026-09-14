@@ -22,7 +22,8 @@ static void back_click_cb(lv_event_t * e);
 static void confirm_cb(lv_event_t * e);
 static void update_display(void);
 static void set_msg(const char *text, bool warn);
-static void finish_ok(lv_timer_t * t);
+/* 注：已删除 finish_ok(lv_timer_t *) 的未定义声明——全仓无定义、无调用
+ * （PIN 校验走 worker 异步回调，不走定时器），属半截功能残留（D11）。 */
 
 lv_obj_t * page_keypad_create(lv_obj_t * parent)
 {

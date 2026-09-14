@@ -18,10 +18,23 @@
 #define QUEUE_DEPTH         32
 #define PAYLOAD_MAX_BYTES   128
 
-/* payload 结构体尺寸拘束：超过总线拷贝上限会在编译期报错（C11 _Static_assert
- * 也适用于 C99 扩展，GCC/Clang 均支持）。新增 payload 时同步维护。 */
-_Static_assert(sizeof(ev_auth_result_t) <= PAYLOAD_MAX_BYTES, "ev_auth_result_t exceeds bus payload cap");
-_Static_assert(sizeof(ev_face_event_t)  <= PAYLOAD_MAX_BYTES, "ev_face_event_t exceeds bus payload cap");
+/* payload 结构体尺寸拘束：超过总线拷贝上限在编译期报错（新增 payload 时同步维护）。
+ * _Static_assert 是 C11 关键字，本工程以 C99 + -pedantic 编译会告警（D11），
+ * 故按语言标准选实现：C11 用关键字；C99 用「条件为真则长度 1、否则 -1」的数组
+ * 声明——同样在编译期生效，且零告警。 */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define SAFE_STATIC_ASSERT(cond, msg)  _Static_assert(cond, msg)
+#else
+/* 双层拼接：直接写 a##__LINE__ 不会展开 __LINE__（宏参数在 ## 两侧不展开），
+ * 两次展开后才是 safe_static_assert_<行号>，避免同名 typedef 重定义。 */
+#define SAFE_ASSERT_CAT2(a, b)  a##b
+#define SAFE_ASSERT_CAT(a, b)   SAFE_ASSERT_CAT2(a, b)
+#define SAFE_STATIC_ASSERT(cond, msg) \
+    typedef char SAFE_ASSERT_CAT(safe_static_assert_, __LINE__)[(cond) ? 1 : -1]
+#endif
+
+SAFE_STATIC_ASSERT(sizeof(ev_auth_result_t) <= PAYLOAD_MAX_BYTES, "ev_auth_result_t exceeds bus payload cap");
+SAFE_STATIC_ASSERT(sizeof(ev_face_event_t)  <= PAYLOAD_MAX_BYTES, "ev_face_event_t exceeds bus payload cap");
 
 typedef struct {
     ev_handler_t handler;

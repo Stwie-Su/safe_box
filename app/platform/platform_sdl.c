@@ -99,6 +99,7 @@ void platform_bootstrap(int argc, char ** argv)
             case ':':
                 print_usage();
                 die("Option -%c requires an argument.\n", optopt);
+                break;   /* die() 实际不返回；break 仅用于消除 fallthrough 告警 */
             case '?':
             default:
                 /* 未知或错误选项：打印用法后退出 */

@@ -192,9 +192,10 @@ lv_obj_t * page_users_create(lv_obj_t * parent)
     lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(head, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    lv_obj_t * back = ui_icon_text_button(head, LV_SYMBOL_LEFT, "返回",
-                                           SX(78), SY(38), &st_ghost_btn,
-                                           theme_color(TH_TEXT), go_back_cb, NULL);
+    /* 按钮挂载到 head 后由父对象持有，无需保存句柄（原写法留下未使用变量 back，D11） */
+    ui_icon_text_button(head, LV_SYMBOL_LEFT, "返回",
+                        SX(78), SY(38), &st_ghost_btn,
+                        theme_color(TH_TEXT), go_back_cb, NULL);
 
     lv_obj_t * title = lv_label_create(head);
     lv_label_set_text(title, "用户管理");  /* 用户管理 */
