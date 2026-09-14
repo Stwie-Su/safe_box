@@ -19,8 +19,12 @@ extern "C" {
 #define APP_CFG_MQTT_HOST_MAX   64
 #define APP_CFG_DATA_DIR_MAX    256
 
-/* 日志滚动保留条数的唯一默认值（DESIGN.md §3.3）。
- * 运行期可用环境变量 SAFE_LOG_MAX 覆盖（见 config.c）。 */
+/* 日志滚动保留条数的唯一默认值。
+ * 出处：现行《需求规约》只要求"保留条数上限，超出滚动"，未规定具体数值；
+ * 历史上曾有"保留最近 5000 条"的提案，但被标注"需确认板子 flash 容量"而未拍板。
+ * 故本期按实现级默认沿用 500（= 旧 store.c 的硬编码值，保持线上行为不变、零回归），
+ * 运行期可用环境变量 SAFE_LOG_MAX 覆盖（见 config.c）。
+ * 注意：本值决定 append 达上限后每次滚动重写的写入量（见 store.c log_append）。 */
 #define APP_CFG_LOG_MAX_DEFAULT 500
 
 typedef struct {
