@@ -292,7 +292,7 @@ static void dlg_psk(void)
     lv_obj_t * cc = lv_button_create(s_win);
     lv_obj_set_size(cc, 146, 44);
     lv_obj_set_pos(cc, btn_x, btn_y);
-    lv_obj_add_flag(cc, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_floating(cc, true);
     lv_obj_add_style(cc, &st_ghost_btn, 0);
     lv_obj_add_event_cb(cc, dlg_cancel_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * ccl = lv_label_create(cc);
@@ -303,7 +303,7 @@ static void dlg_psk(void)
     lv_obj_t * ok = lv_button_create(s_win);
     lv_obj_set_size(ok, 146, 44);
     lv_obj_set_pos(ok, btn_x + 154, btn_y);
-    lv_obj_add_flag(ok, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_floating(ok, true);
     lv_obj_add_style(ok, &st_accent_btn, 0);
     lv_obj_add_style(ok, &st_accent_btn_pr, LV_STATE_PRESSED);
     lv_obj_add_event_cb(ok, psk_save_cb, LV_EVENT_CLICKED, NULL);

@@ -164,7 +164,7 @@ lv_obj_t * page_monitor_create(lv_obj_t * parent)
  * 绘制（A7 单核），所有容器一次性关掉。 */
 static void pm_no_scroll(lv_obj_t * o)
 {
-    lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(o, false);
 }
 
 /* 卡片底板：st_panel（主题托管背景）+ 1px TH_BORDER 描边 + 圆角 18 */

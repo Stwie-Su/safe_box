@@ -321,7 +321,7 @@ static void users_list_loaded(safe_user_t * us, int n)
         lv_obj_set_style_pad_column(row, SX(8), 0);
         lv_obj_set_style_pad_row(row, 0, 0);
         lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);  /* 防止行内滚动 */
+        lv_obj_set_scrollable(row, false);  /* 防止行内滚动 */
 
         /* --- 左侧：头像圆 + 用户名 --- */
         /* ★ 修复：原来的 ▸ 字符(Noto CJK 没收录)→ 改用直径 28 的小圆代替，纯色块无字形依赖；
@@ -1326,7 +1326,7 @@ static void dlg_confirm_del(const char *msg)
     lv_obj_t * cc = lv_button_create(s_win);
     lv_obj_set_size(cc, 136, 44);
     lv_obj_set_pos(cc, btn_x, btn_y);
-    lv_obj_add_flag(cc, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_floating(cc, true);
     lv_obj_add_style(cc, &st_ghost_btn, 0);
     lv_obj_add_event_cb(cc, dlg_cancel_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * ccl = lv_label_create(cc);
@@ -1337,7 +1337,7 @@ static void dlg_confirm_del(const char *msg)
     lv_obj_t * yy = ui_icon_text_button(s_win, LV_SYMBOL_TRASH, "删除",
                                         136, 44, &st_danger_btn,
                                         lv_color_white(), do_del_cb, NULL);
-    lv_obj_add_flag(yy, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_floating(yy, true);
     lv_obj_set_pos(yy, btn_x + 144, btn_y);
 }
 

@@ -32,7 +32,8 @@ static lv_obj_t * mk_rect(lv_obj_t * parent, int32_t x, int32_t y,
     lv_obj_set_style_outline_color(o, color, 0);
     lv_obj_set_style_outline_opa(o, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(o, radius, 0);
-    lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_clickable(o, false);
+    lv_obj_set_scrollable(o, false);
     uid_t * u = (uid_t *)lv_malloc(sizeof(uid_t));
     u->magic = UID_MAGIC; u->color = color;
     lv_obj_set_user_data(o, u);
@@ -51,7 +52,8 @@ static lv_obj_t * mk_dot(lv_obj_t * parent, int32_t cx, int32_t cy,
     lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(o, 0, 0);
     lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, 0);
-    lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_clickable(o, false);
+    lv_obj_set_scrollable(o, false);
     uid_t * u = (uid_t *)lv_malloc(sizeof(uid_t));
     u->magic = UID_MAGIC; u->color = color;
     lv_obj_set_user_data(o, u);
@@ -76,7 +78,8 @@ static lv_obj_t * mk_line(lv_obj_t * parent, int32_t x, int32_t y,
         lv_obj_set_style_transform_pivot_x(o, w / 2, 0);
         lv_obj_set_style_transform_pivot_y(o, h / 2, 0);
     }
-    lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_clickable(o, false);
+    lv_obj_set_scrollable(o, false);
     uid_t * u = (uid_t *)lv_malloc(sizeof(uid_t));
     u->magic = UID_MAGIC; u->color = color;
     lv_obj_set_user_data(o, u);
@@ -119,7 +122,7 @@ static void mk_lock(lv_obj_t * icn, int32_t s, lv_color_t c)
     lv_obj_set_style_outline_width(ring, MAX(s / 16, 3), 0);
     lv_obj_set_style_outline_color(ring, c, 0);
     lv_obj_set_style_outline_opa(ring, LV_OPA_COVER, 0);
-    lv_obj_clear_flag(ring, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_clickable(ring, false);
     uid_t * u0 = (uid_t *)lv_malloc(sizeof(uid_t));
     u0->magic = UID_MAGIC; u0->color = c;
     lv_obj_set_user_data(ring, u0);
@@ -136,7 +139,7 @@ static void mk_lock(lv_obj_t * icn, int32_t s, lv_color_t c)
     lv_obj_set_style_outline_width(body, MAX(s / 20, 2), 0);
     lv_obj_set_style_outline_color(body, c, 0);
     lv_obj_set_style_radius(body, s / 16, 0);
-    lv_obj_clear_flag(body, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_clickable(body, false);
     uid_t * u1 = (uid_t *)lv_malloc(sizeof(uid_t));
     u1->magic = UID_MAGIC; u1->color = c;
     lv_obj_set_user_data(body, u1);
@@ -179,7 +182,7 @@ static void mk_keypad(lv_obj_t * icn, int32_t s, lv_color_t c)
             lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, 0);
             lv_obj_set_style_outline_width(d, MAX(dot_r / 4, 1), 0);
             lv_obj_set_style_outline_color(d, c, 0);
-            lv_obj_clear_flag(d, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_clickable(d, false);
             uid_t * u = (uid_t *)lv_malloc(sizeof(uid_t));
             u->magic = UID_MAGIC; u->color = c;
             lv_obj_set_user_data(d, u);
@@ -216,7 +219,7 @@ static void mk_face_scan(lv_obj_t * icn, int32_t s, lv_color_t c)
     lv_obj_set_style_outline_width(head, MAX(s / 28, 2), 0);
     lv_obj_set_style_outline_color(head, c, 0);
     lv_obj_set_style_radius(head, LV_RADIUS_CIRCLE, 0);
-    lv_obj_clear_flag(head, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_clickable(head, false);
     uid_t * u0 = (uid_t *)lv_malloc(sizeof(uid_t));
     u0->magic = UID_MAGIC; u0->color = c;
     lv_obj_set_user_data(head, u0);
@@ -230,7 +233,7 @@ static void mk_face_scan(lv_obj_t * icn, int32_t s, lv_color_t c)
     lv_obj_set_style_bg_opa(sh, LV_OPA_30, 0);
     lv_obj_set_style_border_width(sh, 0, 0);
     lv_obj_set_style_radius(sh, sh_w / 2, 0);
-    lv_obj_clear_flag(sh, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_clickable(sh, false);
     uid_t * u1 = (uid_t *)lv_malloc(sizeof(uid_t));
     u1->magic = UID_MAGIC; u1->color = c;
     lv_obj_set_user_data(sh, u1);
@@ -252,7 +255,7 @@ static void mk_user(lv_obj_t * icn, int32_t s, lv_color_t c)
     lv_obj_set_style_bg_opa(sh, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(sh, 0, 0);
     lv_obj_set_style_radius(sh, sh_w / 2, 0);
-    lv_obj_clear_flag(sh, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_clickable(sh, false);
     uid_t * u = (uid_t *)lv_malloc(sizeof(uid_t));
     u->magic = UID_MAGIC; u->color = c;
     lv_obj_set_user_data(sh, u);
@@ -300,7 +303,7 @@ static void mk_calendar(lv_obj_t * icn, int32_t s, lv_color_t c)
     lv_obj_set_style_outline_width(box, MAX(s / 22, 2), 0);
     lv_obj_set_style_outline_color(box, c, 0);
     lv_obj_set_style_radius(box, MAX(s / 18, 4), 0);
-    lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_clickable(box, false);
     uid_t * ub = (uid_t *)lv_malloc(sizeof(uid_t));
     ub->magic = UID_MAGIC; ub->color = c;
     lv_obj_set_user_data(box, ub);
@@ -355,7 +358,7 @@ static void mk_home(lv_obj_t * icn, int32_t s, lv_color_t c)
     lv_obj_set_style_outline_width(body, MAX(s / 22, 2), 0);
     lv_obj_set_style_outline_color(body, c, 0);
     lv_obj_set_style_radius(body, MAX(s / 26, 3), 0);
-    lv_obj_clear_flag(body, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_clickable(body, false);
     uid_t * ub = (uid_t *)lv_malloc(sizeof(uid_t));
     ub->magic = UID_MAGIC; ub->color = c;
     lv_obj_set_user_data(body, ub);
@@ -379,7 +382,7 @@ static void mk_home(lv_obj_t * icn, int32_t s, lv_color_t c)
     lv_obj_set_style_outline_width(door, MAX(s / 36, 2), 0);
     lv_obj_set_style_outline_color(door, c, 0);
     lv_obj_set_style_radius(door, dw / 2, 0);
-    lv_obj_clear_flag(door, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_clickable(door, false);
     uid_t * ud = (uid_t *)lv_malloc(sizeof(uid_t));
     ud->magic = UID_MAGIC; ud->color = c;
     lv_obj_set_user_data(door, ud);
@@ -399,7 +402,7 @@ static void mk_settings(lv_obj_t * icn, int32_t s, lv_color_t c)
     lv_obj_set_style_outline_width(core_o, MAX(s / 30, 1), 0);
     lv_obj_set_style_outline_color(core_o, c, 0);
     lv_obj_set_style_radius(core_o, LV_RADIUS_CIRCLE, 0);
-    lv_obj_clear_flag(core_o, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_clickable(core_o, false);
     uid_t * u0 = (uid_t *)lv_malloc(sizeof(uid_t));
     u0->magic = UID_MAGIC; u0->color = c;
     lv_obj_set_user_data(core_o, u0);
@@ -420,7 +423,7 @@ static void mk_settings(lv_obj_t * icn, int32_t s, lv_color_t c)
         lv_obj_set_style_transform_angle(sp, a * 10, 0);
         lv_obj_set_style_transform_pivot_x(sp, spoke_l / 2, 0);
         lv_obj_set_style_transform_pivot_y(sp, spoke_w / 2, 0);
-        lv_obj_clear_flag(sp, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_clickable(sp, false);
         uid_t * u = (uid_t *)lv_malloc(sizeof(uid_t));
         u->magic = UID_MAGIC; u->color = c;
         lv_obj_set_user_data(sp, u);
@@ -515,7 +518,7 @@ static void mk_key_locked(lv_obj_t * icn, int32_t s, lv_color_t c)
     lv_obj_set_style_outline_width(body, thick, 0);
     lv_obj_set_style_outline_color(body, c, 0);
     lv_obj_set_style_radius(body, s / 14, 0);
-    lv_obj_clear_flag(body, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_clickable(body, false);
     uid_t * ub = (uid_t *)lv_malloc(sizeof(uid_t));
     ub->magic = UID_MAGIC; ub->color = c;
     lv_obj_set_user_data(body, ub);
@@ -550,7 +553,8 @@ lv_obj_t * ui_icon_create(lv_obj_t * parent,
     lv_obj_set_style_border_width(icn, 0, 0);
     lv_obj_set_style_outline_width(icn, 0, 0);
     lv_obj_set_style_pad_all(icn, 0, 0);
-    lv_obj_clear_flag(icn, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_clickable(icn, false);
+    lv_obj_set_scrollable(icn, false);
     tag_root(icn);
 
     switch (kind) {

@@ -476,7 +476,7 @@ static void build_rail(lv_obj_t * parent)
     lv_obj_set_style_border_color(bar, theme_color(TH_BORDER), 0);
     lv_obj_set_style_outline_width(bar, 0, 0);
     lv_obj_set_style_pad_all(bar, 0, 0);
-    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(bar, false);
 
     /* 品牌徽标：accent 浅底 + accent 锁图标 */
     lv_obj_t * brand = lv_obj_create(bar);
@@ -488,7 +488,7 @@ static void build_rail(lv_obj_t * parent)
     lv_obj_set_style_border_width(brand, 0, 0);
     lv_obj_set_style_outline_width(brand, 0, 0);
     lv_obj_set_style_pad_all(brand, 0, 0);
-    lv_obj_clear_flag(brand, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(brand, false);
     lv_obj_t * brand_ic = icon_label_colored(brand, UI_GLYPH_LOCK, 26, TH_ACCENT);
     lv_obj_center(brand_ic);
 
@@ -507,8 +507,8 @@ static void build_rail(lv_obj_t * parent)
         lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUSED);   /* 触摸聚焦不留外框 */
         lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUS_KEY);
         lv_obj_set_style_pad_all(btn, 0, 0);
-        lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_clickable(btn, true);
+        lv_obj_set_scrollable(btn, false);
 
         /* 图标字体图标（24px → lv_font_icon_24） */
         lv_obj_t * icon = icon_label_colored(btn, RAILS[i].glyph, 24, TH_TEXT_MUT);
@@ -537,7 +537,7 @@ static void build_rail(lv_obj_t * parent)
     lv_obj_set_style_radius(s_rail_ind, SX(2), 0);
     lv_obj_set_style_border_width(s_rail_ind, 0, 0);
     lv_obj_set_style_outline_width(s_rail_ind, 0, 0);
-    lv_obj_clear_flag(s_rail_ind, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(s_rail_ind, false);
 
     s_rail_idx = -1;
     rail_refresh_theme(-1);   /* 触发一次 rail 主题色初始化 */
