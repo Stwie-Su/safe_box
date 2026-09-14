@@ -31,8 +31,6 @@
 #include "ui/ui.h"
 #include "app_version.h"
 
-static uint32_t s_tick_ms;
-
 /* 认证结果同时进总线与远程通道：
  * 走总线是为了让 UI 顶栏、告警等后续订阅方不用再改状态机；
  * 走远程通道是因为 MQTT 上报的契约来自需求文档，独立实现更清楚。
@@ -112,13 +110,14 @@ void app_main(void)
 
 void app_tick_fast(void)
 {
-    s_tick_ms += 20;
     worker_poll();
     event_bus_pump();
     rpc_poll();
     /* face_service_tick 保留在主线程作后端驱动（b3 取简，理由见 face_thread.c 头注释）；
-     * 相机采集与格式转换已移入 face 线程，主线程不再做帧转换。 */
-    face_service_tick(s_tick_ms);
+     * 相机采集与格式转换已移入 face 线程，主线程不再做帧转换。
+     * now_ms 必须与后端内部的 hal_time_ms() 同源（见 face_backend.h 契约）：此前传
+     * 进程内自增计数，与后端的单调绝对毫秒跨基，超时判定恒真、每 tick 刷屏（D1）。 */
+    face_service_tick(hal_time_ms());
 }
 
 void app_tick_slow(void)

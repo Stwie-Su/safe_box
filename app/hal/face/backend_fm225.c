@@ -220,7 +220,8 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
     if(f->mid_or_nid != FM225_CMD_VERIFY &&
        (s_pending_len == 0 || f->mid_or_nid != s_pending_cmd)) return;
     if(s_pending_len != 0 && f->mid_or_nid == s_pending_cmd) {
-        s_pending_len = 0;   /* 应答落地，停止重发计时 */
+        s_pending_len   = 0;                 /* 应答落地，停止重发计时 */
+        s_pending_at_ms = hal_time_ms();     /* 会话结束时刻 → 轮间退避基准（D1②） */
     }
 
     switch(f->mid_or_nid) {
@@ -239,12 +240,9 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
         r.timestamp = hal_time();
         printf("[fm225] verify 应答：reason=%s uid=%d\n", face_reason_name(reason), r.face_id);
         face_service_emit(FACE_EV_DETECT, &r);
-        /* verify 结束：若仍在运行，续发下一轮（模组一次 VERIFY 只出一组结果） */
-        if(s_started) {
-            const uint8_t p[] = { 0x00, FM225_VERIFY_TIMEOUT_S };
-            fm225_send_cmd(FM225_CMD_VERIFY, p, sizeof(p));
-            s_state = FM225_WAIT_VERIFY;
-        }
+        /* verify 结束：不在应答回调里立刻续发下一轮——那等于零退避轮询，模组/模拟器
+         * 连答时会被打成一串 no_match 洪泛（伪造失败计数 → 自锁）。改由 fm225_tick
+         * 的 REARM 退避统一续发，轮间强制留静默间隔（模组一次 VERIFY 只出一组结果）。 */
         break;
     }
     case FM225_CMD_ENROLL: {
@@ -346,7 +344,8 @@ static void fm225_tick(uint32_t now_ms)
     /* 协议状态机半帧超时推进（feed 在 face 线程，tick 在主线程，见 §5.20 线程模型） */
     fm225_proto_tick(&s_proto, now_ms);
 
-    /* 命令应答超时重发 */
+    /* 命令应答超时重发。now_ms 与 s_pending_at_ms 同为 hal_time_ms() 同源单调毫秒，
+     * 差值才是真实等待时长（D1 前：20ms 自增计数 vs 绝对 ms 跨基 → 回绕后恒真）。 */
     if(s_pending_len > 0 && s_started &&
        (now_ms - s_pending_at_ms) > FM225_REPLY_TIMEOUT_MS) {
         if(s_retry >= FM225_MAX_RETRY) {
@@ -359,15 +358,20 @@ static void fm225_tick(uint32_t now_ms)
             face_service_emit(FACE_EV_ERROR, msg);
         }
         else {
-            printf("[fm225] 命令 0x%02X 超时，重发 %u/%u\n",
-                   s_pending_cmd, s_retry + 1, FM225_MAX_RETRY);
+            /* 日志降频（D1③）：仅在「进入重发」这一状态变化时打一次；中间几次重发
+             * 静默，避免刷屏淹没真实事件。放弃时另打一条（见上，无应答）。 */
+            if(s_retry == 0) {
+                printf("[fm225] 命令 0x%02X 无应答，开始重发（上限 %u 次）\n",
+                       s_pending_cmd, FM225_MAX_RETRY);
+            }
             fm225_resend();
         }
     }
 
-    /* verify 会话保活：运行中但无 pending 命令（重发放弃 / 应答已处理 / 模组重启），
-     * 退避后重开 verify——识别链路要持续轮询模组，不能一次失败就停摆。
-     * s_pending_at_ms 在无 pending 时保留「上次命令时刻」，直接充当退避基准。 */
+    /* verify 会话续发（退避，D1②）：运行中但无 pending 命令——可能是重发放弃、
+     * 应答已处理、或模组重启。等 FM225_VERIFY_REARM_MS 后重开本轮：既保活识别链路
+     * （不能一次失败就停摆），又保证轮间静默、不刷屏。s_pending_at_ms 在无 pending
+     * 时 =「上次命令下发 / 应答落地」时刻，即退避基准。 */
     if(s_started && s_pending_len == 0 && s_state != FM225_WAIT_ENROLL &&
        (now_ms - s_pending_at_ms) > FM225_VERIFY_REARM_MS) {
         const uint8_t p[] = { 0x00, FM225_VERIFY_TIMEOUT_S };

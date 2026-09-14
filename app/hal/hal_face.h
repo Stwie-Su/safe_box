@@ -89,7 +89,8 @@ typedef struct {
 safe_err_t face_service_init(const char * backend_name);
 safe_err_t face_service_deinit(void);
 
-/* 主线程周期驱动（20ms 级）。后端需要轮询硬件时在此处理。 */
+/* 主线程周期驱动（20ms 级）。后端需要轮询硬件时在此处理。
+ * now_ms 必须与 hal_time_ms() 同源（单调毫秒）——见 face_backend_t.tick 契约。 */
 void face_service_tick(uint32_t now_ms);
 
 /* ---------------- 查询与控制 ---------------- */
