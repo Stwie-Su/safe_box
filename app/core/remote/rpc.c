@@ -262,11 +262,14 @@ static void dispatch(const char *payload)
     if (strcmp(c, "inject_face") == 0) {
         cJSON *rs = params ? cJSON_GetObjectItem(params, "reason") : NULL;
         int fid = params && cJSON_GetObjectItem(params, "face_id") ? cJSON_GetObjectItem(params, "face_id")->valueint : -1;
-        face_reason_t reason = parse_face_reason(cJSON_IsString(rs) && rs->valuestring ? rs->valuestring : "");
-        if (reason < 0) {
-            ack(req_id, 1001, "invalid reason");
+        /* -1 哨兵必须落在**有符号**变量里（D9）：face_reason_t 的取值全为非负，
+         * 编译器可以给它选无符号底层类型，此时 `reason < 0` 因整型提升恒为假，
+         * 非法 reason 会一路走到注入并回 code=0 假成功。先用 int 接住再做范围校验。 */
+        int reason_i = parse_face_reason(cJSON_IsString(rs) && rs->valuestring ? rs->valuestring : "");
+        if (reason_i < 0) {
+            ack(req_id, 1001, "invalid reason（合法：ok/no_match/liveness_fail/timeout/error）");
         } else {
-            face_service_inject(fid, reason);
+            face_service_inject(fid, (face_reason_t)reason_i);
             ack(req_id, 0, "injected");
         }
         cJSON_Delete(root);
