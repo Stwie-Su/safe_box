@@ -5,6 +5,8 @@
  * 设计要点（对应规约 §4.2 性能预算 / §5.13 相机契约）：
  *  1. V4L2 mmap 零拷贝采集：驱动缓冲直接映射，DQBUF 后在用户态做
  *     YUYV→RGB565 查表转换（整型，无逐像素浮点），再 QBUF 还回驱动；
+ *     驱动不接受 YUYV 时按决-1（2026-09-14）降级 MJPG 软解（stb_image，
+ *     只转最新帧，坏帧丢弃不停流），如 FM225 的 UVC（实测仅 MJPG 档）；
  *  2. 采集 = 显示 = 320×240（需求 v1.6 定案，1:1 直通无缩放开销）。
  *     start(w,h) 传期望值，驱动协商结果以 S_FMT 返回为准；
  *  3. 帧缓冲归后端所有（§5.13 契约）：frame() 返回内部转换缓冲，
@@ -31,6 +33,12 @@
 #include <unistd.h>
 #include <linux/videodev2.h>
 
+/* MJPG 解码（决-1，2026-09-14）：FM225 的 UVC 只出 MJPG（实测无 YUYV 档），
+ * 预览走 320×240@15fps 小图软解。stb_image 单头文件、无外部依赖，PC/ARM 同源；
+ * 实现实例化在 third_party/stb/stb_image_impl.c（safe_thirdparty，-w 不污染
+ * 全仓告警目标），本文件只引入声明。 */
+#include <stb_image.h>
+
 #define CAM_BUF_COUNT   4
 #define CAM_DEV_PATH_MAX 64
 
@@ -46,6 +54,7 @@ static int        s_buf_count;
 
 /* 协商后的采集格式 */
 static uint16_t   s_cap_w, s_cap_h;
+static bool       s_is_mjpg;   /* false=YUYV 查表直转；true=MJPG 软解（决-1） */
 static uint32_t   s_seq;
 
 /* YUYV → RGB565 输出缓冲（后端所有，frame() 交给消费方） */
@@ -182,6 +191,7 @@ static safe_err_t v4l2_deinit(void)
         s_bufs[i].length = 0;
     }
     s_buf_count = 0;
+    s_is_mjpg = false;
     if (s_fd >= 0) { close(s_fd); s_fd = -1; }
     free(s_out); s_out = NULL; s_out_size = 0;
     s_held = false;
@@ -193,7 +203,9 @@ static safe_err_t v4l2_start(uint16_t w, uint16_t h)
     if (s_fd < 0) return SAFE_ERR_STATE;
     if (s_streaming) return SAFE_OK;
 
-    /* ---- 1. 协商格式：YUYV，期望 320×240（1:1 直通，FR-16）---- */
+    /* ---- 1. 协商格式：优先 YUYV（查表直转，零解码成本）；驱动不接受
+     * （如 FM225 的 UVC 实测只有 MJPG 档）则显式降级 MJPG 软解——
+     * 决-1（2026-09-14）：录入走模组串口命令，预览走 UVC 小图软解。 ---- */
     struct v4l2_format fmt;
     memset(&fmt, 0, sizeof(fmt));
     fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -205,16 +217,31 @@ static safe_err_t v4l2_start(uint16_t w, uint16_t h)
         printf("[CAMERA] S_FMT 失败\n");
         return SAFE_ERR_UNSUP;
     }
-    if (fmt.fmt.pix.pixelformat != V4L2_PIX_FMT_YUYV) {
+    if (fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV) {
+        s_is_mjpg = false;
+        printf("[CAMERA] 格式协商: YUYV %ux%u (bytesperline=%u)\n",
+               fmt.fmt.pix.width, fmt.fmt.pix.height, fmt.fmt.pix.bytesperline);
+    } else {
         char fourcc[5] = {0};
         memcpy(fourcc, &fmt.fmt.pix.pixelformat, 4);
-        printf("[CAMERA] 驱动未接受 YUYV（实际 %s），按计划停下回报，不硬解\n", fourcc);
-        return SAFE_ERR_UNSUP;
+        printf("[CAMERA] YUYV 未被接受（驱动返回 %s），按决-1 降级 MJPG 软解\n", fourcc);
+        memset(&fmt, 0, sizeof(fmt));
+        fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        fmt.fmt.pix.width       = w ? w : 320;
+        fmt.fmt.pix.height      = h ? h : 240;
+        fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
+        fmt.fmt.pix.field       = V4L2_FIELD_NONE;
+        if (xioctl(s_fd, VIDIOC_S_FMT, &fmt) < 0 ||
+            fmt.fmt.pix.pixelformat != V4L2_PIX_FMT_MJPEG) {
+            printf("[CAMERA] MJPG 也未被接受，无可用采集格式\n");
+            return SAFE_ERR_UNSUP;
+        }
+        s_is_mjpg = true;
+        printf("[CAMERA] 格式协商: MJPG %ux%u（软解路径）\n",
+               fmt.fmt.pix.width, fmt.fmt.pix.height);
     }
     s_cap_w = (uint16_t)fmt.fmt.pix.width;
     s_cap_h = (uint16_t)fmt.fmt.pix.height;
-    printf("[CAMERA] 格式协商: YUYV %ux%u (bytesperline=%u)\n",
-           s_cap_w, s_cap_h, fmt.fmt.pix.bytesperline);
 
     /* ---- 2. 请求帧率 30fps，驱动按能力收敛 ---- */
     struct v4l2_streamparm parm;
@@ -276,7 +303,8 @@ static safe_err_t v4l2_start(uint16_t w, uint16_t h)
         return SAFE_ERR_FAIL;
     }
     s_streaming = true;
-    printf("[CAMERA] 开始采集: %ux%u YUYV, %d buffers\n", s_cap_w, s_cap_h, s_buf_count);
+    printf("[CAMERA] 开始采集: %ux%u %s, %d buffers\n", s_cap_w, s_cap_h,
+           s_is_mjpg ? "MJPG(软解)" : "YUYV", s_buf_count);
     return SAFE_OK;
 }
 
@@ -335,16 +363,45 @@ static safe_err_t v4l2_frame(const uint8_t ** rgb565, hal_camera_frame_info_t * 
     }
     if (!got) return SAFE_ERR_BUSY;                   /* 摄像头还没出下一帧 */
 
-    /* 只对最新一帧做转换：逐行处理，行内按宏像素展开（无浮点、无除法） */
-    const uint8_t * src = (const uint8_t *)s_bufs[latest.index].start;
-    uint16_t * dst = (uint16_t *)s_out;
-    for (uint32_t y = 0; y < s_cap_h; y++) {
-        yuyv_row_to_565(src + (size_t)y * s_cap_w * 2,
-                        dst + (size_t)y * s_cap_w,
-                        (int)s_cap_w);
+    /* 只对最新一帧做转换（转完立即 QBUF 还回驱动） */
+    if (s_is_mjpg) {
+        /* MJPG：mmap 缓冲即整帧 JPEG（bytesused 为长度），stb 软解到 RGB888
+         * 再打包 RGB565。坏帧/截断帧（USB 抖动）解码失败时按「本帧无效」处理：
+         * 还回驱动等下一帧，不置错不退出——预览丢一帧远好于停流。 */
+        const uint8_t * jpg = (const uint8_t *)s_bufs[latest.index].start;
+        int jw = 0, jh = 0, comp = 0;
+        unsigned char * rgb = stbi_load_from_memory(jpg, (int)latest.bytesused,
+                                                    &jw, &jh, &comp, 3);
+        if (rgb == NULL) {
+            xioctl(s_fd, VIDIOC_QBUF, &latest);
+            return SAFE_ERR_BUSY;
+        }
+        if ((uint16_t)jw != s_cap_w || (uint16_t)jh != s_cap_h) {
+            /* 尺寸不符（理论上 UVC 不会发生），丢弃并还原驱动缓冲 */
+            stbi_image_free(rgb);
+            xioctl(s_fd, VIDIOC_QBUF, &latest);
+            return SAFE_ERR_BUSY;
+        }
+        uint16_t * dst565 = (uint16_t *)s_out;
+        const unsigned char * px = rgb;
+        const size_t npix = (size_t)s_cap_w * s_cap_h;
+        for (size_t i = 0; i < npix; i++) {
+            dst565[i] = pack565(px[0], px[1], px[2]);
+            px += 3;
+        }
+        stbi_image_free(rgb);
+    } else {
+        /* YUYV：逐行查表直转（行内按宏像素展开，无浮点、无除法） */
+        const uint8_t * src = (const uint8_t *)s_bufs[latest.index].start;
+        uint16_t * dst = (uint16_t *)s_out;
+        for (uint32_t y = 0; y < s_cap_h; y++) {
+            yuyv_row_to_565(src + (size_t)y * s_cap_w * 2,
+                            dst + (size_t)y * s_cap_w,
+                            (int)s_cap_w);
+        }
     }
 
-    xioctl(s_fd, VIDIOC_QBUF, &latest);   /* 立即还回驱动，转完即还 */
+    xioctl(s_fd, VIDIOC_QBUF, &latest);   /* 立即还回驱动 */
 
     if (rgb565) *rgb565 = s_out;
     if (info) {

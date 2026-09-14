@@ -21,8 +21,9 @@
  *   face_thread_join 之后，线程先停再关 fd，无竞争窗口）。
  *
  * 命令应答超时重发：VERIFY/ENROLL/DELETE 下发后记 pending 命令与时间戳，
- * backend tick（主线程 20ms）查超时（REPLY_TIMEOUT_MS），超时重发，最多
- * FM225_MAX_RETRY 次后报 FACE_EV_ERROR 放弃。
+ * backend tick（主线程 20ms）查超时——即时命令用 REPLY_TIMEOUT_MS(800ms)，
+ * 会话命令 VERIFY/ENROLL 用 SESSION 超时（模组 timeout 参数+余量，D17），
+ * 超时重发，最多 FM225_MAX_RETRY 次后报 FACE_EV_ERROR 放弃。
  *
  * 手册警告：模组未上电时若 UART 已连外部设备，外部设备 UART 须为低电平
  * ——真机接线时注意上电顺序；PC 虚拟串口无此约束。
@@ -45,7 +46,12 @@
 
 #define FM225_VERIFY_TIMEOUT_S   10     /* verify 超时（手册默认 10s，最大 255） */
 #define FM225_ENROLL_TIMEOUT_S   10     /* enroll 超时（手册默认 10s） */
-#define FM225_REPLY_TIMEOUT_MS   800    /* 命令应答超时（模组处理远快于 1s） */
+#define FM225_REPLY_TIMEOUT_MS   800    /* 即时命令（RESET/GETSTATUS/DELETE）应答超时 */
+/* 会话型命令（VERIFY/ENROLL）的应答超时：模组要等人脸/录入完成才回最终 REPLY，
+ * 过程中只回 NOTE（手册 §MID_VERIFY「解锁过程中，模组返回 NOTE 和 REPLY 两种
+ * 消息」）。pending 超时必须 ≥ 模组超时 + 余量——D17：此前沿用 800ms 即时超时，
+ * sim 秒回应答掩盖了该语义差异，真模组在 800ms 判定下永远「无应答」。 */
+#define FM225_SESSION_TIMEOUT_MS  ((FM225_VERIFY_TIMEOUT_S + 2u) * 1000u)
 #define FM225_MAX_RETRY          3      /* 超时重发上限，超过报 ERROR 放弃 */
 #define FM225_VERIFY_REARM_MS    2000   /* verify 会话断链后的重开退避 */
 
@@ -345,9 +351,14 @@ static void fm225_tick(uint32_t now_ms)
     fm225_proto_tick(&s_proto, now_ms);
 
     /* 命令应答超时重发。now_ms 与 s_pending_at_ms 同为 hal_time_ms() 同源单调毫秒，
-     * 差值才是真实等待时长（D1 前：20ms 自增计数 vs 绝对 ms 跨基 → 回绕后恒真）。 */
+     * 差值才是真实等待时长（D1 前：20ms 自增计数 vs 绝对 ms 跨基 → 回绕后恒真）。
+     * 超时值按命令分型（D17）：VERIFY/ENROLL 是会话命令用 SESSION 超时，
+     * 其余（RESET/GETSTATUS/DELETE）立即应答用 800ms。 */
+    uint32_t pending_timeout_ms = FM225_REPLY_TIMEOUT_MS;
+    if(s_pending_cmd == FM225_CMD_VERIFY || s_pending_cmd == FM225_CMD_ENROLL)
+        pending_timeout_ms = FM225_SESSION_TIMEOUT_MS;
     if(s_pending_len > 0 && s_started &&
-       (now_ms - s_pending_at_ms) > FM225_REPLY_TIMEOUT_MS) {
+       (now_ms - s_pending_at_ms) > pending_timeout_ms) {
         if(s_retry >= FM225_MAX_RETRY) {
             s_pending_len = 0;
             s_state = FM225_IDLE;
