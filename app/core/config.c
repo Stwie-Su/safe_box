@@ -71,6 +71,11 @@ safe_err_t app_config_init(void)
     const char * dd = getenv("SAFE_DATA_DIR");
     s_cfg.data_dir = (dd && *dd) ? dd : SAFE_DATA_DIR;
 
+    /* 人脸后端名：环境变量 > 编译期默认（-DSAFE_FACE_BACKEND=fake/fm225/none）。
+     * D2：横幅与 face_service 都取本字段，杜绝"横幅显示 fake、实际跑 fm225"。 */
+    const char * fb = getenv("SAFE_FACE_BACKEND");
+    s_cfg.face_backend = (fb && *fb) ? fb : SAFE_FACE_BACKEND;
+
     return SAFE_OK;
 }
 

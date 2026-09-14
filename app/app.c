@@ -81,9 +81,9 @@ void app_main(void)
      * 仅线程 start 前可设（§5.19），故 face_service_init/start 必须排在
      * face_thread_start 之前（3c 调整，注释同步）。识别结果经
      * event_bus(EV_FACE_EVENT) 广播，auth_fsm 在自己的 init 里订阅。 */
-    const char * face_backend = getenv("SAFE_FACE_BACKEND");
-    if(face_backend == NULL || *face_backend == '\0') face_backend = NULL;   /* NULL = 构建期默认 */
-    face_service_init(face_backend);
+    /* D2：后端名的唯一解析点在 config（环境变量 SAFE_FACE_BACKEND > 构建期默认），
+     * 与下方横幅打印同一字段；此处不再二次读 env，避免"横幅 fake、实际 fm225"。 */
+    face_service_init(app_config()->face_backend);
     face_service_start();
 
     /* face 线程（步骤 3b，规约 §3.4）：由它 poll 相机 fd 取帧 + 转换（只转最新帧）
