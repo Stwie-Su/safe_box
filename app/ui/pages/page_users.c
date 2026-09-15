@@ -1286,10 +1286,9 @@ static void face_start_cb(lv_event_t * e)
         s_face_pending_tpl = -1;
     }
     else if (s_face_op == FACE_OP_ENROLL) {
-        /* 录入引导窗（用户验收 2026-09-15）：录入期间给明确指引；ENROLL_DONE
-         *（成功/失败/30s 兜底超时）到达时由 on_face_event_ui 统一关闭。 */
-        dlg_confirm_begin(380, 190, "录入人脸",
-                          "正在录入人脸…\n请正对模组保持不动\n（采集完成或超时后自动关闭）");
+        /* 录入是独立窗口（用户拍板 2026-09-15：录入引导与识别分开）——切到
+         * 专用「人脸录入」页（视频 + 实时引导），识别仍留在「人脸识别」页。 */
+        ui_switch_page(PAGE_ENROLL);
     }
     /* 发起成功：等 EV_FACE_EVENT 应答，由 on_face_event_ui 写回 + 刷新 */
 }
@@ -1358,11 +1357,11 @@ static void on_face_event_ui(ev_topic_t topic, const void * payload, void * user
     s_face_op = FACE_OP_NONE;
     s_face_pending_uid = -1;
     s_face_pending_tpl = -1;
-    close_dlg();                     /* 关录入引导窗（若开着）；失败提示的 dlg_tip 随后自开新窗 */
 
     if (tpl == -2 || uid < 0) {
         /* 横幅由 ui_feedback 出（只说「失败」）；这里补一句能指导下一步操作的提示 */
         if (fail_err != SAFE_OK) dlg_tip(face_err_hint(was_enroll, fail_err));
+        if (was_enroll) ui_switch_page(PAGE_USERS);   /* 从录入页回用户页 */
         return;
     }
 
@@ -1371,6 +1370,7 @@ static void on_face_event_ui(ev_topic_t topic, const void * payload, void * user
     a->id = uid;
     a->result = tpl;                                   /* worker 内转成 user_face_set 的入参 */
     worker_post(face_set_worker, a, face_set_done);
+    if (was_enroll) ui_switch_page(PAGE_USERS);   /* 录入结束（成功/失败）回用户页看结果 */
 }
 
 static void dlg_confirm_del(const char *msg)

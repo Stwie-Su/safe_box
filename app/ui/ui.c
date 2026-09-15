@@ -38,6 +38,7 @@
 #include "ui/pages/page_keypad.h"
 #include "ui/pages/page_otp.h"
 #include "ui/pages/page_face.h"
+#include "ui/pages/page_enroll.h"
 #include "core/store/store.h"      /* store_init */
 #include "core/support/worker.h"     /* worker_init, worker_poll */
 #include "core/auth/auth_fsm.h"   /* 阶段 1：置信度状态机 + UI hook */
@@ -83,6 +84,7 @@ static const page_desc_t s_pages[PAGE_COUNT] = {
     { PAGE_KEYPAD,   page_keypad_create   }, // 6: 密码键盘子页
     { PAGE_OTP,      page_otp_create      }, // 7: 动态密码子页
     { PAGE_FACE,     page_face_create     }, // 8: 人脸识别全屏页
+    { PAGE_ENROLL,   page_enroll_create   }, // 9: 人脸录入全屏页
 };
 
 /* --- 全局 UI 控件句柄 --- */

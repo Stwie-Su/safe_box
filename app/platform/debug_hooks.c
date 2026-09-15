@@ -63,6 +63,7 @@ static const struct { const char * name; ui_page_t page; } k_page_table[] = {
     { "KEYPAD",   PAGE_KEYPAD },
     { "OTP",      PAGE_OTP },
     { "FACE",     PAGE_FACE },
+    { "ENROLL",     PAGE_ENROLL },
 };
 
 #define PAGE_TABLE_N  (sizeof(k_page_table) / sizeof(k_page_table[0]))

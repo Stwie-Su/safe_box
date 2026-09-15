@@ -40,6 +40,7 @@
 #include "hal/hal_face.h"
 #include "hal/face/face_thread.h"
 #include "hal/hal_time.h"
+#include "ui/pages/page_enroll.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -759,7 +760,9 @@ static void frame_timer_cb(lv_timer_t * t)
 
     /* Duty-cycle（FR-27）：按人脸页可见性边沿开关模组前台（相机流 + 识别会话）。
      * 放在所有 early-return 之前，保证「离开页面」那次 tick 也能发出去。 */
-    bool vis = (s_page_root != NULL) && !lv_obj_is_hidden(s_page_root);
+    /* 前台 = 人脸识别页 或 人脸录入页 任一可见（两个窗口共用模组与相机） */
+    bool vis = ((s_page_root != NULL) && !lv_obj_is_hidden(s_page_root)) ||
+               page_enroll_is_visible();
     if (vis != s_fg_ui) {
         s_fg_ui = vis;
         face_service_set_foreground(vis);
@@ -1006,5 +1009,6 @@ static void face_refresh_local_colors(void)
     if (s_btn_verify)       lv_obj_set_style_bg_color(s_btn_verify, theme_color(TH_ACCENT), 0);
     if (s_btn_verify_ic)    lv_obj_set_style_text_color(s_btn_verify_ic, theme_color(TH_ACCENT_INK), 0);
     if (s_btn_verify_lb)    lv_obj_set_style_text_color(s_btn_verify_lb, theme_color(TH_ACCENT_INK), 0);
+
 }
 

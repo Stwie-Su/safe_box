@@ -39,6 +39,7 @@ typedef enum {
     PAGE_KEYPAD,         /* 开锁 PIN 键盘（主页全屏层） */
     PAGE_OTP,            /* 动态密码（人脸置信度二次确认，全屏层） */
     PAGE_FACE,           /* 人脸识别（全屏层：从主页"人脸识别"卡进入；视频区留空） */
+    PAGE_ENROLL,         /* 人脸录入（全屏层：录入专用窗口，与识别分开——用户拍板 2026-09-15） */
     PAGE_COUNT
 } ui_page_t;
 
