@@ -14,6 +14,13 @@
 
 #include "hal/hal_face.h"
 #include "face_backend.h"
+/* ⚠️ 已知分层例外（**不是笔误，勿按 backend_fm225.c 那条「hal->core 会 undefined
+ * reference」的注释来“修”这里**）：hal/face 需要把识别结果上报给 core 的事件总线，
+ * 故本文件确实 include core/event_bus.h 并调用 event_bus_post —— 这是 hal->core 的
+ * 反向依赖，已登记为架构债（技术路线规约 §10）。根治方案：把结果上报改为由 core 向
+ * hal 注入回调（依赖倒置），届时本 include 即可移除。
+ * 注：tools/check_layers.sh 只校验 core（不碰 LVGL/平台头）与 hal 公共头洁净，未覆盖
+ * hal->core 方向 —— 属门禁盲区（QA 发现 C3，待补检查）。 */
 #include "core/event_bus.h"
 
 #include <pthread.h>

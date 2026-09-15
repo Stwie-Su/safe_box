@@ -97,10 +97,11 @@ int main(void)
         CHECK(got.face_id == 21);
         CHECK(got.face_enable == true);            /* 抢到模板 -> 通道启用 */
 
-        /* 清除（-1）与错误入参 */
+        /* 清除（-1）与错误入参：清绑同样停用通道（守不变式） */
         CHECK(user_face_set(admin_id, -1) == 0);
         CHECK(user_find_by_id(admin_id, &got) == 0);
         CHECK(got.face_id == -1);
+        CHECK(got.face_enable == false);           /* 清绑 -> 通道停用 */
         CHECK(user_face_set(-12345, 5) != 0);      /* 用户不存在 */
 
         /* 其它字段不被波及（整记录落盘不能把 PIN 哈希/角色冲掉） */
@@ -123,11 +124,13 @@ int main(void)
         CHECK(got.face_id == 30);
         CHECK(got.face_enable == true);            /* 恢复：人脸通道被重新启用 */
 
-        /* 清除绑定（-1）不改 face_enable（避免与「管理员开关」语义互相覆盖） */
+        /* 清除绑定（-1）：face_enable 一并置 false —— 无绑定则通道不可用，守不变式
+         * 「face_enable == true ⟹ face_id >= 0」。管理员的意愿通过「允许此人录脸」表达，
+         * 而录入成功即自动启用（上面的重绑分支），故这里置 false 不丢失任何信息。 */
         CHECK(user_face_set(carol_id, -1) == 0);
         CHECK(user_find_by_id(carol_id, &got) == 0);
         CHECK(got.face_id == -1);
-        CHECK(got.face_enable == true);            /* 保持 true，不被清除动作改动 */
+        CHECK(got.face_enable == false);           /* 清绑 -> 通道停用（守不变式） */
     }
 
     /* ---- 旧数据兼容：缺人脸/TOTP 字段的 JSON 反序列化给默认值 ---- */

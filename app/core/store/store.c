@@ -724,8 +724,17 @@ int user_update(const safe_user_t *u)
 /* 人脸模板绑定单字段写（规约 §5.5 / UI 现代化 ui3）。
  * 读整表 → 定位 → 改 face_id → 整表原子落盘，读改写收在 store 一处，
  * 避免调用方「查→改→写回」三步在并发写下丢失更新。
- * face_id >= 0 时顺带把其它用户身上相同的模板号清成 -1：FM225 一个模板只属于
- * 一个用户，防御性去重保证 user_find_by_face 的映射保持唯一。 */
+ *
+ * 语义（face_enable = 「该用户的人脸通道当前是否可用」的可用性状态，非「管理员意愿」）：
+ *   不变式：face_enable == true ⟹ face_id >= 0（有可用通道必有绑定；逆否即
+ *   face_id < 0 ⟹ face_enable == false）。本函数内 face_id 与本用户 face_enable
+ *   同步维护，不破坏该不变式：
+ *     face_id >= 0（录入/重绑） -> face_enable = true（录入成功即自动启用）；
+ *     face_id < 0 （清除绑定） -> face_enable = false（无绑定 -> 通道不可用）。
+ *   「管理员是否允许此人用脸」的意愿由「允许其录脸」表达，而录入成功即自动启用，
+ *   故清绑时置 false 不丢失任何管理信息。
+ * face_id >= 0 时顺带把其它用户身上相同的模板号清成 -1 并停用其通道：FM225 一个
+ * 模板只属于一个用户，防御性去重保证 user_find_by_face 的映射唯一，且同样守不变式。 */
 int user_face_set(int user_id, int face_id)
 {
     safe_user_t *us = NULL;
@@ -741,25 +750,24 @@ int user_face_set(int user_id, int face_id)
     if (face_id >= 0) {
         for (int i = 0; i < n; i++) {
             if (i != idx && us[i].face_id == face_id) {
-                /* 模板号被本用户抢走 -> 该用户不再有绑定，必须同时停用人脸通道，维持
-                 * 不变式「face_id < 0 ⟹ face_enable == false」。否则会出现
-                 * face_enable=true 而 face_id=-1 的不一致态：该用户刷脸永不命中
-                 * （user_find_by_face 要求 face_id>=0）-> 被判「未注册人脸」记一次失败，
-                 * 界面也会误显示「人脸通道已启用」误导管理员。
-                 * （反向不要求：face_enable=false 而 face_id>=0 =「有绑定但被停用」，合法。） */
+                /* 模板号被本用户抢走：该用户不再有绑定 -> 通道一并停用，维持不变式
+                 * 「face_enable == true ⟹ face_id >= 0」。否则会出现 face_enable=true
+                 * 而 face_id=-1 的不一致态：该用户刷脸永不命中（user_find_by_face 要求
+                 * face_id>=0）-> 被判「未注册人脸」记一次失败，界面也会误显示已启用。 */
                 us[i].face_id     = -1;
                 us[i].face_enable = false;
             }
         }
     }
-    us[idx].face_id = face_id;
-    /* 绑定/重绑有效模板号（face_id >= 0）时顺带启用该用户的人脸通道 —— 这是「凭据
-     * 恢复」路径。face_enable 会被三条通道置 false：auth_fsm 的名字核对不符
-     * （FR-21 防线 1）、启动对账标孤儿（FR-21 防线 3）、管理员手动关闭。若此处只写
-     * face_id 不写 face_enable，用户重新录入人脸后 resolve() 仍会因 face_enable==false
-     * 永久拒绝（QA 复核 高危#2：真机复录后无法人脸开锁）。
-     * face_id < 0（清除绑定）时不动 face_enable：不与「管理员开关」语义互相覆盖。 */
-    if (face_id >= 0) us[idx].face_enable = true;
+    /* face_id 与本人 face_enable 同步维护（守不变式，见函数头）：
+     *   >= 0（录入/重绑）-> true：这是「凭据恢复」路径 —— face_enable 会被三条通道置
+     *     false（auth_fsm 名字核对不符 FR-21 防线1、启动对账标孤儿 FR-21 防线3、管理员
+     *     关闭）；若重绑只写 face_id 不置 true，用户重新录入人脸后 resolve() 仍会因
+     *     face_enable==false 永久拒绝（QA 复核 高危#2：真机复录后无法人脸开锁）。
+     *   < 0（清除绑定）-> false：无绑定则通道不可用（QA 二轮：清了 face_id 却留
+     *     face_enable=true 会造出不一致态，故此处必须一并置 false）。 */
+    us[idx].face_id     = face_id;
+    us[idx].face_enable = (face_id >= 0);
 
     bool ok = save_users(us, n);
     user_list_free(us);

@@ -212,6 +212,15 @@ static void dispatch(const char *payload)
         int en = params && cJSON_GetObjectItem(params, "enable") ? cJSON_GetObjectItem(params, "enable")->valueint : 0;
         safe_user_t u; memset(&u, 0, sizeof(u));
         if (user_find_by_id(uid, &u) != 0) { ack(req_id, 2003, "user not found"); cJSON_Delete(root); return; }
+        /* 不变式：face_enable == true ⟹ face_id >= 0。未绑定人脸（face_id < 0）时拒绝
+         * 「启用」——放行就等于主动制造 face_enable=true 而 face_id=-1 的不一致态
+         * （该用户刷脸永不命中、被判「未注册人脸」记失败，界面也误显示已启用）。
+         * 关闭（en=false）任何情况都允许，用于停用「有绑定但暂不用」的通道。 */
+        if (en && u.face_id < 0) {
+            ack(req_id, 1001, "该用户未绑定人脸，无法启用人脸通道");
+            cJSON_Delete(root);
+            return;
+        }
         u.face_enable = en ? true : false;
         user_update(&u);
         ack(req_id, 0, "ok");
