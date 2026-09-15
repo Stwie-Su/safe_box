@@ -740,7 +740,16 @@ int user_face_set(int user_id, int face_id)
 
     if (face_id >= 0) {
         for (int i = 0; i < n; i++) {
-            if (i != idx && us[i].face_id == face_id) us[i].face_id = -1;
+            if (i != idx && us[i].face_id == face_id) {
+                /* 模板号被本用户抢走 -> 该用户不再有绑定，必须同时停用人脸通道，维持
+                 * 不变式「face_id < 0 ⟹ face_enable == false」。否则会出现
+                 * face_enable=true 而 face_id=-1 的不一致态：该用户刷脸永不命中
+                 * （user_find_by_face 要求 face_id>=0）-> 被判「未注册人脸」记一次失败，
+                 * 界面也会误显示「人脸通道已启用」误导管理员。
+                 * （反向不要求：face_enable=false 而 face_id>=0 =「有绑定但被停用」，合法。） */
+                us[i].face_id     = -1;
+                us[i].face_enable = false;
+            }
         }
     }
     us[idx].face_id = face_id;

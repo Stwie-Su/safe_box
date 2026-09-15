@@ -81,15 +81,21 @@ int main(void)
         CHECK(user_face_set(carol_id, 21) == 0);
         CHECK(user_find_by_id(carol_id, &got) == 0);
         CHECK(got.face_id == 21);                  /* 写回成功 */
+        CHECK(got.face_enable == true);            /* 绑定即启用（QA 高危#2 的恢复语义） */
         CHECK(user_find_by_face(21, &got) == 0);   /* 能按模板号反查到 */
         CHECK(got.id == carol_id);
 
-        /* 模板号唯一性：把同一模板号绑到 admin，carol2 应被清成 -1 */
+        /* 模板号唯一性：把同一模板号绑到 admin，carol2 应被清成 -1；且被抢走模板的用户
+         * 必须同时 face_enable=false —— 维持不变式「face_id < 0 ⟹ face_enable == false」
+         * （否则「绑定没了但通道仍启用」会让该用户刷脸永不命中、被误判「未注册人脸」记失败，
+         * 界面也误显示已启用）。 */
         CHECK(user_face_set(admin_id, 21) == 0);
         CHECK(user_find_by_id(carol_id, &got) == 0);
         CHECK(got.face_id == -1);
+        CHECK(got.face_enable == false);           /* 被抢走 -> 通道一并停用 */
         CHECK(user_find_by_id(admin_id, &got) == 0);
         CHECK(got.face_id == 21);
+        CHECK(got.face_enable == true);            /* 抢到模板 -> 通道启用 */
 
         /* 清除（-1）与错误入参 */
         CHECK(user_face_set(admin_id, -1) == 0);
