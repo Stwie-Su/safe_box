@@ -11,15 +11,13 @@
  *        颜色走 theme_color(TH_ACCENT / TH_OK / TH_DANGER)；
  *      · 右上角两个 FPS 角标（UI fps / 视频 fps），取实测值；
  *      · 无摄像头 / 后端降级：画面区显示「图标 + 一句话」占位，不留黑块。
- *   3) 底部行：左 = 状态文案（后端名 / 健康 / 超时等明确文案，不留空、不显示 "--"）；
- *      右 = 「录入人脸」主按钮 + 「删除模板」次按钮。
+ *   3) 底部行：状态文案（后端名 / 健康 / 超时等明确文案，不留空、不显示 "--"）。
+ *      （「录入人脸/删除模板」按钮已移除——它们只做「跳转用户页」的指引，属重复
+ *       入口；录入/删除统一在「用户」页走管理员二次验证路径。用户验收 2026-09-15。）
  *
- * 安全性说明（有意偏离预览）：
- *   人脸录入 / 删除在既有实现（page_users.c）里是**管理员二次验证（admin PIN）**门禁
- *   的敏感操作，且必须绑定到“某个具体用户”。本页没有用户选择器、也没有可复用的
- *   二次验证弹窗（auth_show_ctx 是 page_users.c 私有），因此这两个按钮**不在本页直接
- *   执行破坏性操作**，而是导航到「用户」页并给出横幅指引，让操作走已验证的安全路径。
- *   后端不支持该能力时按钮置灰 + 状态文案说明（不留空）。
+ * Duty-cycle（FR-27 模组功耗管理）：
+ *   仅当本页可见时才开 UVC 预览流与模组识别会话（模组红外补光长时间工作发热）。
+ *   实现：frame_timer_cb 的可见性边沿 → face_service_set_foreground()。
  *
  * 性能与纪律：
  *   - 画布缓冲尺寸 = 视频矩形（非整面板），映射表 SIZE_CHANGED 时重建一次，
@@ -68,6 +66,7 @@ static int32_t  s_scale_max = FACE_MAX_SCALE;
 static int32_t  s_src_w     = CAP_W;        /* 旋转后的等效源宽（90/270 时 = CAP_H） */
 static int32_t  s_src_h     = CAP_H;
 static uint16_t * s_rot_buf = NULL;         /* 旋转目标缓冲（仅 rot!=0 时分配） */
+static bool     s_fg_ui = true;             /* 人脸页是否可见（Duty-cycle 边沿检测，FR-27） */
 
 static void preview_env_init(void);
 static void rotate_frame(const uint16_t * src, uint16_t * dst,
@@ -99,12 +98,6 @@ static lv_obj_t * s_fps_ui;           // UI fps 徽章
 static lv_obj_t * s_fps_vid;          // 视频 fps 徽章
 static lv_obj_t * s_face_sub;         // 标题副文案（后端/模板/健康）
 static lv_obj_t * s_face_status;      // 底部左侧状态文案
-static lv_obj_t * s_btn_enroll;       // 录入人脸（主）
-static lv_obj_t * s_btn_del;          // 删除模板（次）
-static lv_obj_t * s_btn_enroll_ic;
-static lv_obj_t * s_btn_enroll_lb;
-static lv_obj_t * s_btn_del_ic;
-static lv_obj_t * s_btn_del_lb;
 static lv_timer_t * s_frame_timer;
 
 /* 画布帧缓冲：尺寸 = **视频矩形**（不是整个面板）。理由见 rebuild_canvas()。 */
@@ -156,9 +149,6 @@ static lv_anim_t s_beam_anim;
 /* ----- 私有声明 ----- */
 static lv_obj_t * mk_corner(lv_obj_t * parent, int32_t x, int32_t y,
                             int32_t w, int32_t h, lv_color_t color);
-static lv_obj_t * mk_face_btn(lv_obj_t * parent, ui_glyph_t g, const char * text,
-                              bool primary, lv_event_cb_t cb,
-                              lv_obj_t ** out_icon, lv_obj_t ** out_label);
 static void beam_anim_xcb(void * obj, int32_t v);
 static void frame_timer_cb(lv_timer_t * t);
 static void preview_size_changed_cb(lv_event_t * e);
@@ -182,9 +172,6 @@ static void face_refresh_local_colors(void);
 static void face_ph_show(bool show, const char * text);
 static const char * face_health_str(void);
 static const char * face_status_from_result(void);
-static void face_set_btn_enabled(lv_obj_t * btn, bool enabled);
-static void enroll_cb(lv_event_t * e);
-static void delete_tpl_cb(lv_event_t * e);
 
 /* ================================================================
  *  扫描框状态染色（UI 现代化 spec §3 后半）
@@ -265,42 +252,6 @@ static lv_obj_t * mk_corner(lv_obj_t * parent, int32_t x, int32_t y,
     lv_obj_set_style_outline_width(o, 0, 0);
     lv_obj_set_scrollable(o, false);
     return o;
-}
-
-/**
- * @brief 底部操作按钮：primary = accent 实心，否则 ghost 描边（含图标 + 文本）
- */
-static lv_obj_t * mk_face_btn(lv_obj_t * parent, ui_glyph_t g, const char * text,
-                              bool primary, lv_event_cb_t cb,
-                              lv_obj_t ** out_icon, lv_obj_t ** out_label)
-{
-    lv_obj_t * btn = lv_button_create(parent);
-    lv_obj_set_size(btn, SX(primary ? 150 : 132), SY(primary ? 44 : 38));
-    lv_obj_set_style_radius(btn, SX(12), 0);
-    lv_obj_set_style_outline_width(btn, 0, 0);
-    if (primary) {
-        lv_obj_set_style_bg_color(btn, theme_color(TH_ACCENT), 0);
-        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(btn, 0, 0);
-    } else {
-        lv_obj_add_style(btn, &st_ghost_btn, 0);
-        lv_obj_set_style_radius(btn, SX(12), 0);
-        lv_obj_set_style_border_color(btn, theme_color(TH_BORDER), 0);
-    }
-    lv_obj_set_style_opa(btn, LV_OPA_50, LV_STATE_DISABLED);
-    lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(btn, SX(8), 0);
-    lv_obj_set_style_pad_all(btn, 0, 0);
-
-    *out_icon = icon_label_colored(btn, g, primary ? 19 : 16,
-                                   primary ? TH_ACCENT_INK : TH_TEXT);
-    *out_label = lv_label_create(btn);
-    lv_label_set_text(*out_label, text);
-    lv_obj_set_style_text_font(*out_label, app_font_scaled(14), 0);
-    lv_obj_set_style_text_color(*out_label, theme_color(primary ? TH_ACCENT_INK : TH_TEXT), 0);
-    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
-    return btn;
 }
 
 /**
@@ -470,21 +421,6 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_obj_set_style_text_font(s_face_status, app_font_scaled(13), 0);
     lv_obj_set_flex_grow(s_face_status, 1);
 
-    lv_obj_t * acts = lv_obj_create(foot);
-    lv_obj_set_size(acts, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(acts, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(acts, 0, 0);
-    lv_obj_set_style_outline_width(acts, 0, 0);
-    lv_obj_set_style_pad_all(acts, 0, 0);
-    lv_obj_set_style_pad_column(acts, SX(10), 0);
-    lv_obj_set_flex_flow(acts, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(acts, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(acts, false);
-
-    s_btn_enroll = mk_face_btn(acts, UI_GLYPH_FACE, "录入人脸", true, enroll_cb,
-                               &s_btn_enroll_ic, &s_btn_enroll_lb);
-    s_btn_del    = mk_face_btn(acts, UI_GLYPH_DELETE, "删除模板", false, delete_tpl_cb,
-                               &s_btn_del_ic, &s_btn_del_lb);
 
     /* ---------- 启动扫描动画 + 预览拉帧定时器 ---------- */
     lv_anim_init(&s_beam_anim);
@@ -775,6 +711,15 @@ static void rotate_frame(const uint16_t * src, uint16_t * dst, int32_t sw, int32
 static void frame_timer_cb(lv_timer_t * t)
 {
     (void)t;
+
+    /* Duty-cycle（FR-27）：按人脸页可见性边沿开关模组前台（相机流 + 识别会话）。
+     * 放在所有 early-return 之前，保证「离开页面」那次 tick 也能发出去。 */
+    bool vis = (s_page_root != NULL) && !lv_obj_is_hidden(s_page_root);
+    if (vis != s_fg_ui) {
+        s_fg_ui = vis;
+        face_service_set_foreground(vis);
+    }
+
     if (s_page_root == NULL || lv_obj_is_hidden(s_page_root)) {
         /* 离开人脸页：状态复位（否则下次进来还挂着上一次的红/绿） */
         if (s_scan_state != PAGE_FACE_SCAN_IDLE) page_face_set_scan_state(PAGE_FACE_SCAN_IDLE);
@@ -900,13 +845,6 @@ static void face_update_header(void)
 }
 
 /* 按钮可用性：后端不支持该能力 → 置灰（配合状态文案说明） */
-static void face_set_btn_enabled(lv_obj_t * btn, bool enabled)
-{
-    if (btn == NULL) return;
-    if (enabled) lv_obj_remove_state(btn, LV_STATE_DISABLED);
-    else         lv_obj_add_state(btn, LV_STATE_DISABLED);
-}
-
 /* 由最近一次识别结果推导状态文案（结果超过 FACE_RESULT_FRESH_S 秒则忽略） */
 static const char * face_status_from_result(void)
 {
@@ -954,10 +892,6 @@ static void face_status_timer_cb(lv_timer_t * t)
         face_ph_show(true, cam_ok ? "等待摄像头出帧…" : "摄像头未接入，无预览画面");
     }
 
-    /* ---- 按钮可用性（后端能力为准） ---- */
-    face_set_btn_enabled(s_btn_enroll, caps != NULL && (caps->caps & FACE_CAP_ENROLL));
-    face_set_btn_enabled(s_btn_del,    caps != NULL && (caps->caps & FACE_CAP_DELETE));
-
     /* ---- 标题副文案（健康可能随帧/运行状态变化） ---- */
     face_update_header();
 }
@@ -999,28 +933,5 @@ static void face_refresh_local_colors(void)
 
     if (s_preview) lv_obj_set_style_border_color(s_preview, theme_color(TH_BORDER), 0);
 
-    if (s_btn_enroll)    lv_obj_set_style_bg_color(s_btn_enroll, theme_color(TH_ACCENT), 0);
-    if (s_btn_enroll_ic) lv_obj_set_style_text_color(s_btn_enroll_ic, theme_color(TH_ACCENT_INK), 0);
-    if (s_btn_enroll_lb) lv_obj_set_style_text_color(s_btn_enroll_lb, theme_color(TH_ACCENT_INK), 0);
-    if (s_btn_del)       lv_obj_set_style_border_color(s_btn_del, theme_color(TH_BORDER), 0);
-    if (s_btn_del_ic)    lv_obj_set_style_text_color(s_btn_del_ic, theme_color(TH_TEXT), 0);
-    if (s_btn_del_lb)    lv_obj_set_style_text_color(s_btn_del_lb, theme_color(TH_TEXT), 0);
 }
 
-/* 录入人脸 / 删除模板：见文件头「安全性说明」——不在本页直接执行，
- * 而是导航到「用户」页并给出明确指引，走已验证的管理员二次验证路径。 */
-static void enroll_cb(lv_event_t * e)
-{
-    (void)e;
-    ui_banner("录入人脸：请在「用户」页选择用户（需管理员二次验证）",
-              UI_BANNER_INFO, UI_ANIM_BANNER_HOLD_MS_S);
-    ui_switch_page(PAGE_USERS);
-}
-
-static void delete_tpl_cb(lv_event_t * e)
-{
-    (void)e;
-    ui_banner("删除人脸模板：请在「用户」页选择用户（需管理员二次验证）",
-              UI_BANNER_INFO, UI_ANIM_BANNER_HOLD_MS_S);
-    ui_switch_page(PAGE_USERS);
-}

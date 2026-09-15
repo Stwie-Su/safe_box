@@ -1147,9 +1147,12 @@ static void del_btn_cb(lv_event_t * e)
  *  会让按钮落到负坐标（画不出来）。直接用 dlg_open 的入参尺寸算。
  *  返回的两个按钮：左「取消」在 x，右「确认」在 x+144，尺寸均 136×44。
  * ================================================================ */
+static int32_t s_confirm_btn_y;         /* begin() 里按文案实际高度算好（堆叠修复） */
+
 static void dlg_bottom_btn_xy(int win_w, int win_h, int32_t * x, int32_t * y)
 {
-    *y = win_h - 16 - 44 - 16;              /* 底边留 16，按钮高 44 */
+    (void)win_h;                            /* 按钮位由 begin() 按文案实测决定 */
+    *y = s_confirm_btn_y;                   /* 不再固定：见 dlg_confirm_begin 的堆叠修复 */
     *x = (win_w - 32 - 280) / 2 + 16;       /* 两按钮(136×2)+间距 8 共 280，左右各留 16 */
 }
 
@@ -1169,6 +1172,21 @@ static void dlg_confirm_begin(int win_w, int win_h, const char * title, const ch
     lv_obj_set_style_text_font(m, app_font_scaled(16), 0);
     lv_obj_set_width(m, win_w - 32);
     lv_obj_set_style_text_align(m, LV_TEXT_ALIGN_CENTER, 0);
+
+    /* 堆叠修复（用户验收 2026-09-15）：文案折行后底部会越过固定按钮位。
+     * 强制布局量出文案实际底边，按钮位取「默认位 / 文案下方」较大者，并统一
+     * 按内容定高、重新居中。update_layout 必须先做：dlg_open 刚 set_size 完时
+     * 坐标查询恒为 0（见上方陷阱注释）。
+     * 实测（第二轮截图验收）：量出的文案高度仍比最终渲染矮约一行（缩放字体
+     * 度量在布局与首绘间有偏差），故额外留一行余量。 */
+    lv_obj_update_layout(s_win);
+    int32_t need_y  = lv_obj_get_y(m) + lv_obj_get_height(m) + 40;
+    int32_t def_y   = win_h - 16 - 44 - 16;
+    s_confirm_btn_y = (need_y > def_y) ? need_y : def_y;
+    int32_t total_h = s_confirm_btn_y + 44 + 16;
+    if (total_h < win_h) total_h = win_h;
+    lv_obj_set_size(s_win, win_w, total_h);
+    lv_obj_center(s_win);
 }
 
 /* ================================================================

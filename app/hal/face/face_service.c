@@ -14,6 +14,7 @@
 
 #include "hal/hal_face.h"
 #include "face_backend.h"
+#include "hal/hal_camera.h"
 /* ⚠️ 已知分层例外（**不是笔误，勿按 backend_fm225.c 那条「hal->core 会 undefined
  * reference」的注释来“修”这里**）：hal/face 需要把识别结果上报给 core 的事件总线，
  * 故本文件确实 include core/event_bus.h 并调用 event_bus_post —— 这是 hal->core 的
@@ -24,6 +25,7 @@
 #include "core/event_bus.h"
 
 #include <pthread.h>
+#include <stdio.h>
 #include <string.h>
 
 #define ENROLL_TIMEOUT_MS  30000
@@ -146,6 +148,37 @@ safe_err_t face_service_stop(void)
 bool face_service_running(void)
 {
     return s_running;
+}
+
+/* ---------------- Duty-cycle（FR-27，规约 §5.20） ---------------- */
+
+/* 前台标志：主线程写（page_face 可见性边沿），face 线程 / 后端 tick 读。
+ * 跨线程仅此一个 volatile 标量，与 face_thread 的退出标志同一纪律（§3.4）。 */
+static volatile bool s_fg = true;
+
+void face_service_set_foreground(bool active)
+{
+    if(s_fg == active) return;
+    s_fg = active;
+    /* 相机流跟着前台走：STREAMOFF 后模组 UVC 传感断电（stop 幂等）；恢复时按
+     * 预览契约的 320x240 重启。识别会话由 fm225 后端在 tick 里响应该标志
+     * （0x10 RESET 终止 / REARM 退避自然重开）。 */
+    if(active) {
+        safe_err_t e = hal_camera_start(320, 240);
+        if(e != SAFE_OK) printf("[face] 相机恢复失败（err=%d）\n", (int)e);
+    }
+    else {
+        hal_camera_stop();
+    }
+    printf("[face] %s：相机%s，识别会话%s\n",
+           active ? "进入前台" : "离开前台",
+           active ? "恢复" : "停流",
+           active ? "恢复" : "终止");
+}
+
+bool face_service_foreground(void)
+{
+    return s_fg;
 }
 
 safe_err_t face_service_enroll_async(const char * user_name)

@@ -68,12 +68,9 @@ static lv_obj_t * s_hero_iconbox;   /* 64px 状态徽标盒 */
 static lv_obj_t * s_hero_icon;      /* 锁图标（图标字体 label） */
 static lv_obj_t * s_status_label;
 static lv_obj_t * s_sub_label;
-static lv_obj_t * s_btn_fast;       /* 一键开锁 */
-static lv_obj_t * s_btn_fast_icon;
-static lv_obj_t * s_btn_fast_label;
-static lv_obj_t * s_btn_pin;        /* 密码开锁 */
-static lv_obj_t * s_btn_pin_icon;
-static lv_obj_t * s_btn_pin_label;
+static lv_obj_t * s_btn_unlock;       /* 开锁（智能路由：有人脸→人脸页，否则 PIN 键盘） */
+static lv_obj_t * s_btn_unlock_icon;
+static lv_obj_t * s_btn_unlock_label;
 /* 4 统计卡 */
 static lv_obj_t * s_stat_card[4];
 static lv_obj_t * s_stat_box[4];
@@ -125,8 +122,7 @@ static int  count_today_events(void);
 static void fmt_when(const char * ts, char * out, size_t cap);
 static void fmt_ev_time(const char * ts, char * out, size_t cap);
 static void describe_event(const log_entry_t * e, ev_view_t * v);
-static void fast_unlock_cb(lv_event_t * e);
-static void pin_unlock_cb(lv_event_t * e);
+static void unlock_cb(lv_event_t * e);
 
 /**
  * @brief 创建监控主页面（由 UI 框架调用）
@@ -290,10 +286,11 @@ static void build_hero(lv_obj_t * parent)
     lv_obj_set_flex_align(acts, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     pm_no_scroll(acts);
 
-    s_btn_fast = make_button(acts, UI_GLYPH_FINGER, "一键开锁", true, fast_unlock_cb,
-                             &s_btn_fast_icon, &s_btn_fast_label);
-    s_btn_pin = make_button(acts, UI_GLYPH_PIN, "密码开锁", false, pin_unlock_cb,
-                            &s_btn_pin_icon, &s_btn_pin_label);
+    /* 单一「开锁」入口（用户验收 2026-09-15：原「一键开锁/密码开锁」两按钮功能
+     * 重叠——都只是页面路由）。智能路由：有人脸录入→人脸页（模组随前台 duty-cycle
+     * 唤醒）；否则→PIN 键盘（PIN 通道始终可达）。 */
+    s_btn_unlock = make_button(acts, UI_GLYPH_FINGER, "开锁", true, unlock_cb,
+                               &s_btn_unlock_icon, &s_btn_unlock_label);
 }
 
 /* ---------------------------------------------------------------------------
@@ -439,12 +436,9 @@ static void apply_local_colors(void)
     }
     if (s_status_label) lv_label_set_text(s_status_label, open ? "保险柜已开启" : "保险柜已上锁");
 
-    if (s_btn_fast) {
-        lv_obj_set_style_bg_color(s_btn_fast, theme_color(TH_ACCENT), 0);
-    }
-    if (s_btn_fast_icon)  lv_obj_set_style_text_color(s_btn_fast_icon, theme_color(TH_ACCENT_INK), 0);
-    if (s_btn_fast_label) lv_obj_set_style_text_color(s_btn_fast_label, theme_color(TH_ACCENT_INK), 0);
-    if (s_btn_pin)        lv_obj_set_style_border_color(s_btn_pin, theme_color(TH_BORDER), 0);
+    if (s_btn_unlock)       lv_obj_set_style_bg_color(s_btn_unlock, theme_color(TH_ACCENT), 0);
+    if (s_btn_unlock_icon)  lv_obj_set_style_text_color(s_btn_unlock_icon, theme_color(TH_ACCENT_INK), 0);
+    if (s_btn_unlock_label) lv_obj_set_style_text_color(s_btn_unlock_label, theme_color(TH_ACCENT_INK), 0);
 
     for (int i = 0; i < 4; i++) {
         if (s_stat_card[i])  lv_obj_set_style_border_color(s_stat_card[i], theme_color(TH_BORDER), 0);
@@ -742,17 +736,10 @@ static void monitor_refresh_theme(int idx)
     }
 }
 
-/* 一键开锁：优先走无感的人脸通道；无人录入人脸时退回 PIN 键盘 */
-static void fast_unlock_cb(lv_event_t * e)
+/* 开锁：优先走无感的人脸通道；无人录入人脸时退回 PIN 键盘（PIN 通道始终可达） */
+static void unlock_cb(lv_event_t * e)
 {
     (void)e;
     ui_switch_page(s_stats.face_count > 0 ? PAGE_FACE : PAGE_KEYPAD);
-}
-
-/* 密码开锁：PIN 键盘页（PIN 通道必须始终可达） */
-static void pin_unlock_cb(lv_event_t * e)
-{
-    (void)e;
-    ui_switch_page(PAGE_KEYPAD);
 }
 

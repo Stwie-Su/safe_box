@@ -31,6 +31,7 @@
 
 #include "face_backend.h"
 #include "fm225_proto.h"
+#include "hal/hal_face.h"
 #include "hal/face/face_thread.h"
 #include "hal/hal_time.h"
 
@@ -254,11 +255,37 @@ static void fm225_set_health(face_module_health_t st)
     }
 }
 
+/* Duty-cycle（FR-27）：前台标志边沿处理（主线程 tick 驱动）。离开时作废 pending 并用
+ * 0x10 RESET 终止进行中的会话（实测 26ms 回执、能立即终止；被终止方静默无应答，
+ * 故 pending 直接作废不等 REPLY）；进入时不主动发包，会话由既有 REARM 退避自然重开。 */
+static bool s_fg_last = true;      /* 上一次 tick 的前台态（初值 = 前台，与 face_service 一致） */
+static void fm225_fg_tick(uint32_t now_ms)
+{
+    (void)now_ms;
+    bool fg = face_service_foreground();
+    if(fg == s_fg_last) return;
+    s_fg_last = fg;
+    if(!fg) {
+        if(s_pending_len > 0 || s_state != FM225_IDLE) {
+            fm225_send_silent(FM225_CMD_RESET);
+            printf("[fm225] 离开人脸页：0x10 RESET 终止会话\n");
+        }
+        s_pending_len = 0;
+        s_state       = FM225_IDLE;
+    }
+    else {
+        printf("[fm225] 进入人脸页：恢复识别会话\n");
+    }
+}
+
 /* 健康监测（主线程 20ms tick 驱动，FR-23，不新增线程）：以 5s 为一轮，连续 3 轮（≈15s）
  * 内没有任何合法帧 → 不健康；本轮内收到过帧即清零连无应答计数并立即恢复。 */
 static void fm225_health_tick(uint32_t now_ms)
 {
     if(!s_health_monitor) return;
+    /* Duty-cycle（FR-27）：前台暂停期模组是被我们主动静默的，不计无应答轮；
+     * 清轮基准，恢复前台后从零重新起算（恢复后仍要连续 3 轮静默才判不健康）。 */
+    if(!face_service_foreground()) { s_health_round_at_ms = 0; return; }
     if(s_health_round_at_ms == 0) { s_health_round_at_ms = now_ms; return; }  /* 首轮基准 */
 
     if(s_rx_in_round) {
@@ -544,8 +571,14 @@ static void fm225_tick(uint32_t now_ms)
     /* 协议状态机半帧超时推进（feed 在 face 线程，tick 在主线程，见 §5.20 线程模型） */
     fm225_proto_tick(&s_proto, now_ms);
 
-    /* 模组健康监测（FR-23）：复用主线程 20ms tick，不新增线程 */
+    /* Duty-cycle 边沿（FR-27）：离开人脸页终止会话、进入时恢复 */
+    fm225_fg_tick(now_ms);
+
+    /* 模组健康监测（FR-23）：复用主线程 20ms tick，不新增线程（内部有前台守卫） */
     fm225_health_tick(now_ms);
+
+    /* 前台暂停：不对账 / 不重发 / 不重开识别会话 */
+    if(!face_service_foreground()) return;
 
     /* 启动对账：空闲时取一次模组用户清单（FR-21 防线 3） */
     fm225_recon_poll(now_ms);

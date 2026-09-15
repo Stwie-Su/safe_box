@@ -38,6 +38,7 @@
 #include <unistd.h>
 
 #include "hal/hal_camera.h"
+#include "hal/hal_face.h"
 
 #define FACE_POLL_TIMEOUT_MS  20        /* 无 IO 时的兜底节拍，保证能及时感知退出 */
 
@@ -156,7 +157,9 @@ static void * face_thread_main(void * arg)
         if (s_quit) break;
 
         struct pollfd fds[2];
-        fds[0].fd      = hal_camera_fd();   /* 无相机时 -1 -> poll 忽略 */
+        /* Duty-cycle（FR-27）：前台暂停时把相机 fd 移出 pollset —— STREAMOFF 后
+         * 该 fd 会持续 POLLERR 立即返回，不摘除会退化成忙轮询。 */
+        fds[0].fd      = face_service_foreground() ? hal_camera_fd() : -1;
         fds[0].events  = POLLIN;
         fds[0].revents = 0;
         fds[1].fd      = s_uart_fd;         /* FM225 未接时 -1 -> poll 忽略 */

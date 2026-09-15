@@ -106,6 +106,13 @@ safe_err_t face_service_start(void);
 safe_err_t face_service_stop(void);
 bool       face_service_running(void);
 
+/* Duty-cycle（FR-27 模组功耗管理）：人脸页是否前台。离开前台 = 停 UVC 采集流
+ * + 终止/不再发起模组识别会话（红外补光与传感停工作降温）；回到前台恢复。
+ * 由 page_face 在可见性边沿调用；face 线程 / fm225 后端经 face_service_foreground()
+ * 读取。跨线程语义与 face_thread 的退出标志相同：volatile 标量、无锁。 */
+void face_service_set_foreground(bool active);
+bool face_service_foreground(void);
+
 /* 异步录入：立即返回，结果通过 FACE_EV_ENROLL_DONE 上报。
  * user_name（v1.4）：本地用户名，由后端写入模组侧模板，使 VERIFY 应答能把它带回来
  * 供 FR-21 凭据一致性核对（backend → face_result_t.user_name → auth_fsm）。
