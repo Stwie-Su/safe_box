@@ -888,8 +888,13 @@ static void face_status_timer_cb(lv_timer_t * t)
         face_ph_show(false, NULL);
     } else if (backend_none) {
         face_ph_show(true, cam_ok ? "摄像头画面（人脸功能未启用）" : "摄像头未接入，无预览画面");
-    } else {
+    } else if (!s_got_frame) {
         face_ph_show(true, cam_ok ? "等待摄像头出帧…" : "摄像头未接入，无预览画面");
+    } else {
+        /* 出过帧但信号中断（>2.5s 无新帧）：保留末帧，**不再叠图标+文字**
+         *（用户验收 2026-09-15：占位盖在停格画面上像「卡住的混合体」）；
+         * 状态由底部状态行说明。 */
+        face_ph_show(false, NULL);
     }
 
     /* ---- 标题副文案（健康可能随帧/运行状态变化） ---- */

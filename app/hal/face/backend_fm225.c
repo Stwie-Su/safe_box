@@ -636,6 +636,8 @@ static safe_err_t fm225_enroll(const char * user_name)
      *   p[33]    face_dir  = 0x00（UNDEFINE，走默认正向交互录入。实测 2026-09-15：
      *                      0x00 与 0x01(FACE_DIRECTION_MIDDLE) 行为完全一致，都进入录入流程
      *                      并在 timeout 后回 MR_FAILED4_TIMEOUT，故维持 0x00）
+     *                      ★ 当前拍板（用户 2026-09-15）：**单帧模式**（一次采集即成模板，
+     *                      最简单可靠）；多角度方向录入为后续升级项，勿在本函数顺手加）
      *   p[34]    timeout   = FM225_ENROLL_TIMEOUT_S
      *
      * ★ 会话互斥实测（2026-09-15 真模组，勿据直觉改）：VERIFY 会话进行中下发 ENROLL，
