@@ -206,9 +206,16 @@ static void rebuild_canvas(void)
     s_canvas_h   = ch;
 }
 
-/* NOTE state → 引导文案（FR-19；语义见 hal_face.h face_service_face_state） */
+/* NOTE state → 引导文案（FR-19；语义见 hal_face.h face_service_face_state）
+ *
+ * fs < 0 = 模组**还没上报过**任何 FACE_STATE：backend_fm225.c 里 s_face_state
+ * 初值就是 -1，而模组只在录入/验证会话开始后才上报 NOTE，会话刚发起到第一帧
+ * 之间 state 恒为 -1。原先 -1 落进 default，被当成「未检测到人脸」——模组还没
+ * 开口界面就先报「没检测到人脸」，用户据此反复怀疑「为什么总是识别不到」。
+ * 这里给中性文案，与「已开口但没看到脸」（fs=1 等）区分开。 */
 static const char * guide_text(int32_t fs)
 {
+    if (fs < 0) return "正在等待模组响应，请正对模组…";
     switch (fs) {
         case 0:  return "已检测到人脸，请保持不动";
         case 2:  return "人脸太靠上，请下移一点";
@@ -270,7 +277,8 @@ static void status_timer_cb(lv_timer_t * t)
     bool live = s_got_frame && ((now - s_last_frame_ms) < FACE_FRAME_STALE_MS);
     bool enrolling = face_service_enrolling();
 
-    /* 引导小字：仅录入会话期间显示在视频上（FR-19） */
+    /* 引导小字：仅录入会话期间显示在视频上（FR-19）。
+     * fs < 0（模组尚未上报）不是「没检测到人脸」，由 guide_text 统一给中性文案。 */
     if (enrolling) {
         int32_t fs = face_service_face_state();
         lv_label_set_text(s_guide_lb, guide_text(fs));
