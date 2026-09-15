@@ -127,6 +127,15 @@ safe_err_t face_service_delete_async(int32_t face_id);
  * 后端不支持 = SAFE_ERR_UNSUP。 */
 safe_err_t face_service_verify_once(void);
 
+/* 模组实时人脸状态（FR-19 实时引导数据源，NOTE NID_FACE_STATE 的 state 字段）。
+ * 语义（手册 §NOTE）：0=人脸正常 1=未检测到人脸 2=太靠上 3=太靠下 4=太靠左 5=太靠右；
+ * -1 = 尚未收到任何状态帧（该后端无此概念或模组未上报）。
+ * 后端在 face 线程持续更新，此处只读快照；无模组概念的后端恒返回 -1。 */
+int32_t face_service_face_state(void);
+
+/* 是否有录入会话在途（录入实时引导小字的显隐依据）。 */
+bool face_service_enrolling(void);
+
 /* 模组侧已注册用户清单（FR-21 防线 3「启动对账」用）。
  * 返回：>= 0 模组清单数量（**可以是 0**，0 与「没取到」必须区分开）；
  *       -1    该后端没有「模组清单」概念（fake / none）；

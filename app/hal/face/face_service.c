@@ -227,6 +227,17 @@ safe_err_t face_service_verify_once(void)
     return s_backend->verify_once();
 }
 
+int32_t face_service_face_state(void)
+{
+    if(s_backend == NULL || s_backend->face_state == NULL) return -1;
+    return s_backend->face_state();
+}
+
+bool face_service_enrolling(void)
+{
+    return s_enroll_pending;
+}
+
 const face_result_t * face_service_last_result(void)
 {
     pthread_mutex_lock(&s_last_lock);

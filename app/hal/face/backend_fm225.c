@@ -73,6 +73,11 @@ static int           s_uart_fd = -1;
 
 /* 待应答命令的簿记：重发需要原始帧 */
 static uint8_t  s_pending_cmd;             /* H>>M 命令字 */
+
+/* 模组实时人脸状态（NOTE NID_FACE_STATE 的 state 字段，face 线程写 / 主线程读）。
+ * 语义（手册 §NOTE）：0=正常 1=未检测到 2=太靠上 3=太靠下 4=太靠左 5=太靠右；
+ * -1 = 尚未收到任何状态帧。volatile 标量，与 s_fg 同一跨线程纪律。 */
+static volatile int32_t s_face_state = -1;
 static uint8_t  s_pending_frame[64];       /* 已下发帧（重发原样） */
 static size_t   s_pending_len;
 static uint32_t s_pending_at_ms;           /* 下发（或上次重发）时刻 */
@@ -213,6 +218,11 @@ static safe_err_t fm225_verify_once(void)
     safe_err_t e = fm225_send_cmd(FM225_CMD_VERIFY, p, sizeof(p));
     if(e == SAFE_OK) s_state = FM225_WAIT_VERIFY;
     return e;
+}
+
+static int32_t fm225_face_state(void)
+{
+    return s_face_state;
 }
 
 /* face 线程接入点（§5.19）：start 时把 fd 借给 face 线程 poll。 */
@@ -385,12 +395,23 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
             s_recon_at_ms  = 0;
             printf("[fm225] NOTE READY：模组就绪\n");
         }
-        /* NID_FACE_STATE：录入/验证过程中的人脸状态引导流。实测（2026-09-15 真模组）帧长
-         * 17B = nid(1) + s_note_data_face{state,left,top,right,bottom,yaw,pitch,roll}
-         * （各 int16，手册 P24），约 2.1 条/秒；无人脸时 state = 1（FACE_STATE_NOFACE）。
-         * 这就是 FR-19「多方向交互录入的实时引导」现成的数据源（「请正对镜头」「距离太远」
-         * 不必再去问模组别的接口）。当前 UI 未消费 → 本链路暂不解析，但**不把它当垃圾帧**：
-         * 它同时是「模组在活跃工作」的证据，将来 FR-23 健康监测可复用。 */
+        /* NID_FACE_STATE：录入/验证过程中的人脸状态实时引导（FR-19）。实测（真模组）
+         * 帧长 17B = nid(1) + s_note_data_face{state,left,top,right,bottom,yaw,pitch,roll}
+         * （各 int16、高字节在前，手册 P24），约 2.1 条/秒；无人脸时 state = 1（NOFACE）。
+         * 解析 state 存入 volatile 标量供页面实时引导小字消费（face 线程写、主线程读）；
+         * 坐标/姿态字段留作后续多角度引导升级。仅状态翻转打一条日志（排错用，不刷屏）。 */
+        if(f->mid_or_nid == FM225_NID_FACE_STATE && f->data_len >= 3) {
+            /* ⚠ 字节序实测（2026-09-15）：state 是**小端** int16（GET_ALL_USERID 的
+             * 用户 ID 才是手册标注的大端）——按大端解析会得到 0x0100 类垃圾值。 */
+            int st = (int)(f->data[1] | (f->data[2] << 8));
+            if(st != s_face_state) {
+                s_face_state = st;
+                printf("[fm225] 人脸状态：%s\n",
+                       st == 0 ? "正常" : st == 1 ? "未检测到" :
+                       st == 2 ? "太靠上" : st == 3 ? "太靠下" :
+                       st == 4 ? "太靠左" : st == 5 ? "太靠右" : "未知");
+            }
+        }
         return;
     }
 
@@ -713,6 +734,7 @@ static const face_backend_t backend = {
     .delete_tpl    = fm225_delete_tpl,
     .module_users  = fm225_module_users,
     .module_health = fm225_module_health,
+    .face_state   = fm225_face_state,
     .inject        = fm225_inject,
 };
 

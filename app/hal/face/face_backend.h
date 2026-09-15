@@ -49,6 +49,11 @@ typedef struct face_backend {
      * 可为 NULL —— 视为 FACE_MOD_UNKNOWN（该后端没有模组级健康监测，如 fake / none）。 */
     face_module_health_t (*module_health)(void);
 
+    /* 模组实时人脸状态（FR-19 引导，NOTE NID_FACE_STATE 的 state 字段）。
+     * 语义见 hal_face.h 的 face_service_face_state()。
+     * 可为 NULL（视为 -1 未知，如 fake / none）。 */
+    int32_t (*face_state)(void);
+
     /* 注入模拟结果，仅 FACE_CAP_INJECT 后端需要实现 */
     safe_err_t (*inject)(int32_t face_id, face_reason_t reason);
 } face_backend_t;
