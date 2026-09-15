@@ -40,6 +40,10 @@ typedef struct face_backend {
      * 可为 NULL（视为 -1）。 */
     int32_t (*module_users)(int32_t * ids, int32_t cap);
 
+    /* 模组健康只读三态（FR-23）。语义见 hal_face.h 的 face_module_health_t。
+     * 可为 NULL —— 视为 FACE_MOD_UNKNOWN（该后端没有模组级健康监测，如 fake / none）。 */
+    face_module_health_t (*module_health)(void);
+
     /* 注入模拟结果，仅 FACE_CAP_INJECT 后端需要实现 */
     safe_err_t (*inject)(int32_t face_id, face_reason_t reason);
 } face_backend_t;

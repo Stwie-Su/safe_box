@@ -56,6 +56,8 @@
 #define FM225_VERIFY_REARM_MS    2000   /* verify 会话断链后的重开退避 */
 #define FM225_RECON_RETRY_MS     1500   /* 0x24 清单查询的重试间隔（静默查询，无 ERROR 上报） */
 #define FM225_RECON_MAX_IDS      128    /* 本地缓存上限（实测模组容量 100） */
+#define FM225_HEALTH_ROUND_MS    5000u  /* 健康评估轮长：每轮看是否有合法帧（FR-23） */
+#define FM225_HEALTH_FAIL_ROUNDS 3u     /* 连续 3 轮无应答 → 不健康（≈15s） */
 
 typedef enum {
     FM225_IDLE = 0,
@@ -83,6 +85,16 @@ static fm225_proto_ctx_t s_proto;
 static int32_t  s_mod_ids[FM225_RECON_MAX_IDS];
 static int32_t  s_mod_id_count = -1;
 static uint32_t s_recon_at_ms;             /* 上次发出清单查询的时刻（节流用） */
+
+/* 模组健康监测（FR-23「模组健康与降级」）。
+ * s_health 只由主线程（fm225_tick / fm225_init / fm225_deinit）写、fm225_module_health 读；
+ * s_rx_in_round 由 face 线程（on_fm225_frame）置位、主线程读取并清零——跨线程单标量，
+ * 最坏情况漏/迟一拍，对「本轮是否收到过帧」的判定无实质影响（与 s_mod_id_count 同风格）。 */
+static face_module_health_t s_health = FACE_MOD_UNKNOWN;
+static bool     s_health_monitor;      /* 监测开关：init 开、deinit 关 */
+static uint32_t s_health_round_at_ms;  /* 本轮起点（0 = 尚未开始计时） */
+static uint32_t s_health_miss_rounds;  /* 连续无应答轮次 */
+static bool     s_rx_in_round;         /* 本轮是否收到过合法帧 */
 
 /* ---------------- 帧下发 ---------------- */
 
@@ -214,6 +226,56 @@ static safe_err_t fm225_resend(void)
     return e;
 }
 
+/* ---------------- 模组健康监测（FR-23） ---------------- */
+
+/* 收到任何合法帧：标记本轮有应答（FR-23 恢复判据）。在 face 线程内调用
+ * （on_fm225_frame 首行）。只置标志，状态翻转统一由主线程 fm225_health_tick 判定，
+ * 避免 face 线程与主线程同时写 s_health。 */
+static void fm225_health_on_rx(void)
+{
+    s_rx_in_round = true;
+}
+
+/* 状态翻转时打**一条**日志（FR-23 防刷屏）：仅在状态真正变化时打印。
+ * UNKNOWN→OK 静默（启动首次出帧不算故障翻转）；UNKNOWN→FAIL 打印（从未知进入不健康）。 */
+static void fm225_set_health(face_module_health_t st)
+{
+    if(st == s_health) return;
+    face_module_health_t old = s_health;
+    s_health = st;
+    if(st == FACE_MOD_FAIL) {
+        printf("[fm225] 模组健康：%s -> 不健康（连续 %u 轮无应答，约 %us）\n",
+               old == FACE_MOD_UNKNOWN ? "未知" : "健康",
+               (unsigned)s_health_miss_rounds,
+               (unsigned)(FM225_HEALTH_ROUND_MS / 1000u * FM225_HEALTH_FAIL_ROUNDS));
+    }
+    else if(st == FACE_MOD_OK && old == FACE_MOD_FAIL) {
+        printf("[fm225] 模组健康：不健康 -> 健康（收到合法帧，恢复）\n");
+    }
+}
+
+/* 健康监测（主线程 20ms tick 驱动，FR-23，不新增线程）：以 5s 为一轮，连续 3 轮（≈15s）
+ * 内没有任何合法帧 → 不健康；本轮内收到过帧即清零连无应答计数并立即恢复。 */
+static void fm225_health_tick(uint32_t now_ms)
+{
+    if(!s_health_monitor) return;
+    if(s_health_round_at_ms == 0) { s_health_round_at_ms = now_ms; return; }  /* 首轮基准 */
+
+    if(s_rx_in_round) {
+        s_rx_in_round        = false;      /* 本轮有应答：清零连无应答计数 */
+        s_health_miss_rounds = 0;
+        s_health_round_at_ms = now_ms;     /* 以最近一次应答重启轮计时 */
+        fm225_set_health(FACE_MOD_OK);     /* 不健康 -> 健康 立即恢复 */
+        return;
+    }
+
+    if((now_ms - s_health_round_at_ms) < FM225_HEALTH_ROUND_MS) return;   /* 本轮未结束 */
+
+    s_health_round_at_ms = now_ms;         /* 一轮无应答结束 */
+    if(s_health_miss_rounds < FM225_HEALTH_FAIL_ROUNDS) s_health_miss_rounds++;
+    if(s_health_miss_rounds >= FM225_HEALTH_FAIL_ROUNDS) fm225_set_health(FACE_MOD_FAIL);
+}
+
 /* ---------------- 帧回调（face 线程内执行） ---------------- */
 
 /* 把 UTF-8 名字拷进定长字段，不切断多字节字符（放不下的整字丢弃，末尾补 NUL）。
@@ -269,6 +331,8 @@ static face_reason_t mr_to_reason(uint8_t result)
 static void on_fm225_frame(const fm225_frame_t * f, void * user)
 {
     (void)user;
+
+    fm225_health_on_rx();   /* FR-23：收到任何合法帧即为「有应答」（恢复判据） */
 
     if(f->msgid == FM225_MSGID_NOTE) {
         if(f->mid_or_nid == FM225_NID_READY) {
@@ -410,6 +474,14 @@ static safe_err_t fm225_init(void)
     s_mod_id_count = -1;      /* 清单未取得 */
     s_recon_at_ms  = 0;
 
+    /* 健康监测复位并开启（FR-23）：串口没起（PC 无设备）时也要能判「模组无响应」，
+     * 故监测只跟后端是否在用有关，与串口是否打开无关。 */
+    s_health             = FACE_MOD_UNKNOWN;
+    s_health_monitor     = true;
+    s_health_round_at_ms = 0;
+    s_health_miss_rounds = 0;
+    s_rx_in_round        = false;
+
     fm225_proto_init(&s_proto, on_fm225_frame, NULL);
 
     safe_err_t e = fm225_open();
@@ -425,6 +497,8 @@ static safe_err_t fm225_init(void)
 
 static safe_err_t fm225_deinit(void)
 {
+    s_health_monitor = false;                 /* 停止健康监测（FR-23） */
+    s_health         = FACE_MOD_UNKNOWN;
     fm225_close();
     return SAFE_OK;
 }
@@ -471,6 +545,9 @@ static void fm225_tick(uint32_t now_ms)
 {
     /* 协议状态机半帧超时推进（feed 在 face 线程，tick 在主线程，见 §5.20 线程模型） */
     fm225_proto_tick(&s_proto, now_ms);
+
+    /* 模组健康监测（FR-23）：复用主线程 20ms tick，不新增线程 */
+    fm225_health_tick(now_ms);
 
     /* 启动对账：空闲时取一次模组用户清单（FR-21 防线 3） */
     fm225_recon_poll(now_ms);
@@ -572,6 +649,12 @@ static int32_t fm225_module_users(int32_t * ids, int32_t cap)
     return s_mod_id_count;
 }
 
+/* 模组健康只读三态（FR-23）。语义见 hal_face.h。 */
+static face_module_health_t fm225_module_health(void)
+{
+    return s_health;
+}
+
 static safe_err_t fm225_inject(int32_t face_id, face_reason_t reason)
 {
     (void)face_id; (void)reason;
@@ -594,6 +677,7 @@ static const face_backend_t backend = {
     .enroll        = fm225_enroll,
     .delete_tpl    = fm225_delete_tpl,
     .module_users  = fm225_module_users,
+    .module_health = fm225_module_health,
     .inject        = fm225_inject,
 };
 

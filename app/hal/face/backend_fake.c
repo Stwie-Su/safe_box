@@ -139,6 +139,7 @@ static const face_backend_t backend = {
     .enroll        = fake_enroll,
     .delete_tpl    = fake_delete_tpl,
     .module_users  = fake_module_users,
+    .module_health = NULL,            /* fake 无模组级健康监测 → 未知 */
     .inject        = fake_inject,
 };
 

@@ -783,11 +783,13 @@ static void face_ph_show(bool show, const char * text)
     else      lv_obj_set_hidden(s_ph, true);
 }
 
-/* 健康状态：由后端能力 + 运行状态 + 是否有帧推导（真实来源，非写死） */
+/* 健康状态：先看模组级健康（FR-23），再按后端能力 + 运行状态 + 是否有帧推导（真实来源，非写死） */
 static const char * face_health_str(void)
 {
     const face_caps_t * caps = face_service_caps();
     if (caps == NULL || caps->name == NULL || strcmp(caps->name, "none") == 0) return "未启用";
+    /* FR-23：模组连续多轮无应答 → 明确告警「模组无响应」，优先于其它推导 */
+    if (face_service_module_health() == FACE_MOD_FAIL) return "模组无响应";
     if (!face_service_running()) return "异常";
     if (!s_got_frame)            return "待机";
     if (hal_camera_fd() < 0)     return "降级";

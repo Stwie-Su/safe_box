@@ -64,6 +64,10 @@ static char *build_status(int code, const char *msg, const char *req_id)
     cJSON_AddStringToObject(j, "time_src", hal_time_source() == TIME_SRC_RTC ? "rtc" : "sys");
     cJSON_AddNumberToObject(j, "mqtt_online", mqtt_is_connected() ? 1 : 0);
     cJSON_AddStringToObject(j, "fw", SAFE_VERSION_STRING);
+    /* FR-23：模组健康纳入远程上报（ok / fail / unknown）。用 cJSON 拼串，不经过定长
+     * 缓冲，天然规避 -Wformat-truncation。 */
+    cJSON_AddStringToObject(j, "mod_health",
+                            face_module_health_name(face_service_module_health()));
     if (code) cJSON_AddNumberToObject(j, "code", code);
     if (msg) cJSON_AddStringToObject(j, "msg", msg);
     if (req_id && *req_id) cJSON_AddStringToObject(j, "req_id", req_id);

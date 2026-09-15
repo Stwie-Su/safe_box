@@ -6,6 +6,7 @@ set(SAFE_CORE_SRC
     config.c
     store/store.c
     auth/auth_fsm.c
+    auth/cred_reconcile.c
     auth/totp.c
     auth/unlock_backend.c
     support/worker.c

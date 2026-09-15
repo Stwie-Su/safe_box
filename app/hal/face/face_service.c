@@ -164,6 +164,13 @@ int32_t face_service_module_users(int32_t * ids, int32_t cap)
     return s_backend->module_users(ids, cap);
 }
 
+face_module_health_t face_service_module_health(void)
+{
+    /* 后端未编入健康监测 → 未知（fake / none 无模组级健康概念） */
+    if(s_backend == NULL || s_backend->module_health == NULL) return FACE_MOD_UNKNOWN;
+    return s_backend->module_health();
+}
+
 safe_err_t face_service_delete_async(int32_t face_id)
 {
     if(s_backend == NULL) return SAFE_ERR_STATE;
@@ -213,6 +220,16 @@ const char * face_reason_name(face_reason_t r)
         case FACE_RES_TIMEOUT:      return "timeout";
         case FACE_RES_ERROR:        return "error";
         default:                    return "unknown";
+    }
+}
+
+/* 健康三态名（FR-23，RPC status / 日志用） */
+const char * face_module_health_name(face_module_health_t h)
+{
+    switch(h) {
+        case FACE_MOD_OK:   return "ok";
+        case FACE_MOD_FAIL: return "fail";
+        default:            return "unknown";
     }
 }
 

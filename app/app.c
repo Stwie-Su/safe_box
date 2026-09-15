@@ -15,6 +15,7 @@
 
 #include "core/config.h"
 #include "core/auth/auth_fsm.h"
+#include "core/auth/cred_reconcile.h"
 #include "core/event_bus.h"
 #include "core/remote/mqtt_client.h"
 #include "core/remote/rpc.h"
@@ -118,6 +119,12 @@ void app_tick_fast(void)
      * now_ms 必须与后端内部的 hal_time_ms() 同源（见 face_backend.h 契约）：此前传
      * 进程内自增计数，与后端的单调绝对毫秒跨基，超时判定恒真、每 tick 刷屏（D1）。 */
     face_service_tick(hal_time_ms());
+
+    /* FR-21 防线 3「启动对账」：模组用户清单首次取得后触发一次孤儿凭据核对
+     * （文件 IO 由 cred_reconcile_tick 内部经 worker_post 下沉后台线程，主线程不落盘）。
+     * 放在主线程 20ms 泵里，是因为这里既是 face_service_module_users() 的合法调用点，
+     * 也是 worker_post() 的合法调用点，且不引入新线程。 */
+    cred_reconcile_tick();
 }
 
 void app_tick_slow(void)

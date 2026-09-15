@@ -14,6 +14,7 @@ endmacro()
 
 safe_add_test(test_totp)
 safe_add_test(test_auth_fsm)
+safe_add_test(test_cred_reconcile)
 safe_add_test(test_event_bus)
 safe_add_test(test_fm225_proto)
 safe_add_test(test_store)

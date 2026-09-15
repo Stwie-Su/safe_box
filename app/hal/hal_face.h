@@ -123,6 +123,27 @@ safe_err_t face_service_delete_async(int32_t face_id);
  * 上层用它核对「本地凭据 ↔ 模组存量」，孤儿凭据（本地有、模组无）应标失效且不用于放行。 */
 int32_t face_service_module_users(int32_t * ids, int32_t cap);
 
+/* ---------------- 模组健康（FR-23） ---------------- */
+
+/* 模组健康三态（FR-23「模组健康与降级」）。与 face_service_module_users 的三态风格一致，
+ * 业务层（UI / RPC）只读，不得直接读后端全局变量：
+ *   FACE_MOD_UNKNOWN = 未知：后端无模组级监测（fake / none），或尚未得出判定；
+ *   FACE_MOD_OK      = 健康：近期收到过模组合法帧（NOTE READY / VERIFY 应答 / 清单应答）；
+ *   FACE_MOD_FAIL    = 不健康：连续多轮无任何应答（约 15s），判定为模组无响应。
+ * 不健康时上层应界面告警并自动降级为 PIN / 动态码认证（本接口只读，不改变模组状态）。 */
+typedef enum {
+    FACE_MOD_UNKNOWN = 0,
+    FACE_MOD_OK      = 1,
+    FACE_MOD_FAIL    = 2,
+} face_module_health_t;
+
+/* 只读查询当前模组健康（FR-23）。返回上面三态之一。 */
+face_module_health_t face_service_module_health(void);
+
+/* 健康三态的可读名（日志 / RPC status 用）："unknown" / "ok" / "fail"。
+ * 实现在 face_service.c。非法值返回 "unknown"。 */
+const char * face_module_health_name(face_module_health_t h);
+
 /* 最近一次识别结果；没有任何结果时返回 NULL。 */
 const face_result_t * face_service_last_result(void);
 

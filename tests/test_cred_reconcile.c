@@ -1,0 +1,108 @@
+/**
+ * @file test_cred_reconcile.c
+ * FR-21 防线 3「启动对账：孤儿凭据标失效」用例（需求 §5）。
+ *
+ * 场景：本地 2 个用户绑定 face_id=1、2，模组清单只有 [1]
+ *   → 只有 face_id=2 的用户被置 face_enable=false；
+ *   → face_id=1 不受影响；face_id=-1（未绑定）不动；
+ *   → 审计日志有记录；再跑一次无重复动作（幂等）。
+ * 另测：清单返回 -1（无此概念）/ -2（尚未取得）时不对账；清单为空（0）时全部绑定凭据皆为孤儿。
+ *
+ * 说明：store_init() 的 bootstrap 会自动创建管理员 admin（face_id=1、face_enable=true），
+ * 它即「本地绑定 face_id=1 的用户」，故不再另建 face_id=1 的用户（避免重复绑定）。
+ */
+#include "test_util.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "core/auth/cred_reconcile.h"
+#include "core/store/store.h"
+
+#define TEST_DATA_DIR "/tmp/safe_test_recon"
+
+static void add_user(const char * name, int face_id, bool face_enable)
+{
+    safe_user_t u;
+    memset(&u, 0, sizeof(u));
+    u.id = user_next_id();
+    strncpy(u.name, name, sizeof(u.name) - 1);
+    strcpy(u.role, "user");
+    uint8_t salt[16];
+    pin_hash("1234", salt, u.pin_hash);
+    test_salt_to_hex(salt, u.pin_salt);
+    u.enabled     = true;
+    u.face_id     = face_id;
+    u.face_enable = face_enable;
+    CHECK(user_add(&u) == 0);
+}
+
+int main(void)
+{
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s", TEST_DATA_DIR, TEST_DATA_DIR);
+    if(system(cmd) != 0) {}
+    store_set_dir(TEST_DATA_DIR);
+    store_init();     /* bootstrap 自动建 admin：face_id=1、face_enable=true */
+
+    /* 前提自检：admin 即「本地绑定 face_id=1」的用户 */
+    safe_user_t chk;
+    CHECK(user_find_by_name("admin", &chk) == 0);
+    CHECK(chk.face_id == 1);
+    CHECK(chk.face_enable == true);
+
+    add_user("bob",   2, true);    /* 本地绑定 face_id=2（模组清单里没有 → 孤儿） */
+    add_user("carol", -1, true);   /* 未绑定人脸 → 不是孤儿 */
+
+    const int32_t mod[1] = { 1 };  /* 模组侧只有 face_id=1 */
+
+    /* ---- 第一次对账：只有 bob（face_id=2）被标失效 ---- */
+    int changed = cred_reconcile_apply(mod, 1);
+    CHECK(changed == 1);
+
+    CHECK(user_find_by_face(1, &chk) == 0);
+    CHECK(chk.face_enable == true);         /* face_id=1（admin）不受影响 */
+    CHECK(user_find_by_face(2, &chk) == 0);
+    CHECK(chk.face_enable == false);        /* face_id=2 被标失效 */
+    CHECK(chk.enabled == true);             /* 只标失效，不删 / 不停用用户 */
+    CHECK(user_find_by_name("carol", &chk) == 0);
+    CHECK(chk.face_id == -1);
+    CHECK(chk.face_enable == true);         /* 未绑定人脸：不许动 */
+
+    /* ---- 审计日志有记录（事件名 "ALARM"，与写入侧同大小写） ---- */
+    log_entry_t * logs = NULL;
+    int ln = 0;
+    CHECK(log_query("ALARM", 0, &logs, &ln) == 0);
+    CHECK(ln >= 1);
+    if(logs) free(logs);
+
+    /* ---- 幂等：再跑一次无重复动作（第二次不再改动任何用户、不新增日志） ---- */
+    int changed2 = cred_reconcile_apply(mod, 1);
+    CHECK(changed2 == 0);
+    {
+        log_entry_t * logs2 = NULL;
+        int ln2 = 0;
+        CHECK(log_query("ALARM", 0, &logs2, &ln2) == 0);
+        CHECK(ln2 == ln);                  /* 日志条数不变：无重复记录 */
+        if(logs2) free(logs2);
+    }
+
+    /* ---- 未取得 / 无此概念（-1 / -2）不执行对账，不误杀 ---- */
+    add_user("dave", 5, true);                     /* 新增一个未在清单里的绑定用户 */
+    CHECK(cred_reconcile_apply(NULL, -2) == 0);    /* 尚未取得：不执行 */
+    CHECK(user_find_by_face(5, &chk) == 0);
+    CHECK(chk.face_enable == true);                /* 未被误判失效 */
+    CHECK(cred_reconcile_apply(NULL, -1) == 0);    /* 无此概念：不执行 */
+    CHECK(user_find_by_face(5, &chk) == 0);
+    CHECK(chk.face_enable == true);
+
+    /* ---- 模组清单为空（count=0）是合法值：所有绑定凭据都是孤儿 ---- */
+    CHECK(cred_reconcile_apply(NULL, 0) == 2);     /* admin(1)、dave(5) 被标失效 */
+    CHECK(user_find_by_face(1, &chk) == 0);
+    CHECK(chk.face_enable == false);
+    CHECK(user_find_by_face(5, &chk) == 0);
+    CHECK(chk.face_enable == false);
+
+    TEST_RESULT();
+}

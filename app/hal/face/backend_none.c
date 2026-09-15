@@ -56,6 +56,7 @@ static const face_backend_t backend = {
     .enroll        = none_enroll,
     .delete_tpl    = none_delete,
     .module_users  = none_module_users,
+    .module_health = NULL,            /* none 无模组级健康监测 → 未知 */
     .inject        = none_inject,
 };
 
