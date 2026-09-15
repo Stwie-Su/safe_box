@@ -1285,6 +1285,12 @@ static void face_start_cb(lv_event_t * e)
         s_face_pending_uid = -1;
         s_face_pending_tpl = -1;
     }
+    else if (s_face_op == FACE_OP_ENROLL) {
+        /* 录入引导窗（用户验收 2026-09-15）：录入期间给明确指引；ENROLL_DONE
+         *（成功/失败/30s 兜底超时）到达时由 on_face_event_ui 统一关闭。 */
+        dlg_confirm_begin(380, 190, "录入人脸",
+                          "正在录入人脸…\n请正对模组保持不动\n（采集完成或超时后自动关闭）");
+    }
     /* 发起成功：等 EV_FACE_EVENT 应答，由 on_face_event_ui 写回 + 刷新 */
 }
 
@@ -1352,6 +1358,7 @@ static void on_face_event_ui(ev_topic_t topic, const void * payload, void * user
     s_face_op = FACE_OP_NONE;
     s_face_pending_uid = -1;
     s_face_pending_tpl = -1;
+    close_dlg();                     /* 关录入引导窗（若开着）；失败提示的 dlg_tip 随后自开新窗 */
 
     if (tpl == -2 || uid < 0) {
         /* 横幅由 ui_feedback 出（只说「失败」）；这里补一句能指导下一步操作的提示 */

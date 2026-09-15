@@ -219,6 +219,14 @@ safe_err_t face_service_delete_async(int32_t face_id)
     return s_backend->delete_tpl(face_id);
 }
 
+safe_err_t face_service_verify_once(void)
+{
+    if(s_backend == NULL) return SAFE_ERR_STATE;
+    if(!(s_backend->caps & FACE_CAP_DETECT)) return SAFE_ERR_UNSUP;
+    if(s_backend->verify_once == NULL) return SAFE_ERR_UNSUP;
+    return s_backend->verify_once();
+}
+
 const face_result_t * face_service_last_result(void)
 {
     pthread_mutex_lock(&s_last_lock);

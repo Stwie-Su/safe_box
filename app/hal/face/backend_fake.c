@@ -127,6 +127,18 @@ static safe_err_t fake_inject(int32_t face_id, face_reason_t reason)
     return SAFE_OK;
 }
 
+/* 单次识别（FR-27 拍板）：模拟一次检测作业，结果带最近一次录入的用户名（若有），
+ * 走真实 auth 链路；结束即静默，与 fm225 的按键触发语义一致。 */
+static safe_err_t fake_verify_once(void)
+{
+    if(s_detect_job) return SAFE_ERR_BUSY;
+    s_detect_face_id = (s_next_face_id > 1) ? s_next_face_id - 1 : 1;
+    s_detect_reason  = FACE_RES_OK;
+    s_detect_job     = true;
+    s_detect_at_ms   = 0;
+    return SAFE_OK;
+}
+
 static const face_backend_t backend = {
     .name          = "fake",
     .caps          = FACE_CAP_DETECT | FACE_CAP_ENROLL | FACE_CAP_DELETE | FACE_CAP_INJECT,
@@ -136,6 +148,7 @@ static const face_backend_t backend = {
     .start         = fake_start,
     .stop          = fake_stop,
     .tick          = fake_tick,
+    .verify_once  = fake_verify_once,
     .enroll        = fake_enroll,
     .delete_tpl    = fake_delete_tpl,
     .module_users  = fake_module_users,

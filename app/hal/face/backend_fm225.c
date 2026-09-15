@@ -203,6 +203,18 @@ static void fm225_recon_poll(uint32_t now_ms)
     fm225_send_silent(FM225_CMD_GET_ALL_USERID);
 }
 
+/* 单次识别（FR-27 拍板）：仅在空闲时受理一次 VERIFY 会话；结果/超时走既有
+ * 应答链，结束即静默，不再自动续发。忙 = SAFE_ERR_BUSY。 */
+static safe_err_t fm225_verify_once(void)
+{
+    if(!s_started) return SAFE_ERR_STATE;
+    if(s_pending_len > 0 || s_state != FM225_IDLE) return SAFE_ERR_BUSY;
+    const uint8_t p[] = { 0x00, FM225_VERIFY_TIMEOUT_S };
+    safe_err_t e = fm225_send_cmd(FM225_CMD_VERIFY, p, sizeof(p));
+    if(e == SAFE_OK) s_state = FM225_WAIT_VERIFY;
+    return e;
+}
+
 /* face 线程接入点（§5.19）：start 时把 fd 借给 face 线程 poll。 */
 int fm225_uart_fd(void)
 {
@@ -544,12 +556,9 @@ static safe_err_t fm225_start(void)
     face_thread_set_uart_fd(s_uart_fd);
 
     s_started = true;
-
-    /* 首轮 VERIFY：pd_rightaway=0（不断电），timeout=手册默认 10s */
-    const uint8_t p[] = { 0x00, FM225_VERIFY_TIMEOUT_S };
-    safe_err_t e = fm225_send_cmd(FM225_CMD_VERIFY, p, sizeof(p));
-    s_state = (e == SAFE_OK) ? FM225_WAIT_VERIFY : FM225_IDLE;
-    return e;
+    /* 不在 start 时布防 VERIFY（FR-27 拍板 2026-09-15）：识别由界面按钮单次
+     * 触发（face_service_verify_once），其余时间——含启动后——模组静默低功耗。 */
+    return SAFE_OK;
 }
 
 static safe_err_t fm225_stop(void)
@@ -612,17 +621,9 @@ static void fm225_tick(uint32_t now_ms)
         }
     }
 
-    /* verify 会话续发（退避，D1②）：运行中但无 pending 命令——可能是重发放弃、
-     * 应答已处理、或模组重启。等 FM225_VERIFY_REARM_MS 后重开本轮：既保活识别链路
-     * （不能一次失败就停摆），又保证轮间静默、不刷屏。s_pending_at_ms 在无 pending
-     * 时 =「上次命令下发 / 应答落地」时刻，即退避基准。 */
-    if(s_started && s_pending_len == 0 && s_state != FM225_WAIT_ENROLL &&
-       (now_ms - s_pending_at_ms) > FM225_VERIFY_REARM_MS) {
-        const uint8_t p[] = { 0x00, FM225_VERIFY_TIMEOUT_S };
-        if(fm225_send_cmd(FM225_CMD_VERIFY, p, sizeof(p)) == SAFE_OK)
-            s_state = FM225_WAIT_VERIFY;
-        /* send 失败（串口坏）：下个 tick 再试，不刷屏 */
-    }
+    /* verify 不再自动续发（FR-27 拍板 2026-09-15）：识别改为界面按钮单次触发
+     *（face_service_verify_once → fm225_verify_once），会话结束即静默低功耗。
+     * 原 REARM 自动循环随按键触发模式一并移除；重发放弃后由用户再次发起。 */
 }
 
 static safe_err_t fm225_enroll(const char * user_name)
@@ -707,6 +708,7 @@ static const face_backend_t backend = {
     .start         = fm225_start,
     .stop          = fm225_stop,
     .tick          = fm225_tick,
+    .verify_once  = fm225_verify_once,
     .enroll        = fm225_enroll,
     .delete_tpl    = fm225_delete_tpl,
     .module_users  = fm225_module_users,

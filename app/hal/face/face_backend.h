@@ -35,6 +35,11 @@ typedef struct face_backend {
     safe_err_t (*enroll)(const char * user_name);
     safe_err_t (*delete_tpl)(int32_t face_id);
 
+    /* 单次识别（FR-27 拍板：识别由界面按钮触发，不再自动循环）。受理后结果经
+     * face_service_emit(FACE_EV_DETECT) 上报，会话结束即静默（低功耗）。
+     * 忙返回 SAFE_ERR_BUSY；可为 NULL（视为不支持，SAFE_ERR_UNSUP）。 */
+    safe_err_t (*verify_once)(void);
+
     /* 模组侧已注册用户清单（FR-21 防线 3「启动对账」用）。语义同 hal_face.h 的
      * face_service_module_users：>=0 = 清单数量；-1 = 该后端无此概念；-2 = 尚未取得。
      * 可为 NULL（视为 -1）。 */

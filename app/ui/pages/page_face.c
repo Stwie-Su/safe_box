@@ -97,7 +97,10 @@ static lv_obj_t * s_fps_box;          // FPS 角标容器（右上角，两个�
 static lv_obj_t * s_fps_ui;           // UI fps 徽章
 static lv_obj_t * s_fps_vid;          // 视频 fps 徽章
 static lv_obj_t * s_face_sub;         // 标题副文案（后端/模板/健康）
-static lv_obj_t * s_face_status;      // 底部左侧状态文案
+static lv_obj_t * s_face_status;      // 状态文案（头部行内）
+static lv_obj_t * s_btn_verify;       // 开始识别（单次会话，FR-27）
+static lv_obj_t * s_btn_verify_ic;
+static lv_obj_t * s_btn_verify_lb;
 static lv_timer_t * s_frame_timer;
 
 /* 画布帧缓冲：尺寸 = **视频矩形**（不是整个面板）。理由见 rebuild_canvas()。 */
@@ -172,6 +175,8 @@ static void face_refresh_local_colors(void);
 static void face_ph_show(bool show, const char * text);
 static const char * face_health_str(void);
 static const char * face_status_from_result(void);
+static void face_set_btn_enabled(lv_obj_t * btn, bool enabled);
+static void verify_btn_cb(lv_event_t * e);
 
 /* ================================================================
  *  扫描框状态染色（UI 现代化 spec §3 后半）
@@ -281,20 +286,60 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_obj_set_style_pad_all(head, 0, 0);
     lv_obj_set_style_pad_left(head, SX(14), 0);
     lv_obj_set_style_pad_right(head, SX(14), 0);
-    lv_obj_set_style_pad_row(head, SY(2), 0);
-    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_column(head, SX(12), 0);
+    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(head, false);
 
-    lv_obj_t * title = lv_label_create(head);
+    /* 左：标题 + 副文案（纵排）。头部单行化，把高度让给预览（用户：视频放大些） */
+    lv_obj_t * hcol = lv_obj_create(head);
+    lv_obj_set_size(hcol, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(hcol, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(hcol, 0, 0);
+    lv_obj_set_style_outline_width(hcol, 0, 0);
+    lv_obj_set_style_pad_all(hcol, 0, 0);
+    lv_obj_set_style_pad_row(hcol, SY(2), 0);
+    lv_obj_set_flex_flow(hcol, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(hcol, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scrollable(hcol, false);
+
+    lv_obj_t * title = lv_label_create(hcol);
     lv_label_set_text(title, "人脸识别");
     lv_obj_add_style(title, &st_text, 0);
-    lv_obj_set_style_text_font(title, app_font_scaled(20), 0);
+    lv_obj_set_style_text_font(title, app_font_scaled(18), 0);
 
-    s_face_sub = lv_label_create(head);
+    s_face_sub = lv_label_create(hcol);
     lv_label_set_text(s_face_sub, "");   /* 由 face_update_header() 填真实值 */
     lv_obj_add_style(s_face_sub, &st_text_mut, 0);
     lv_obj_set_style_text_font(s_face_sub, app_font_scaled(12), 0);
+
+    /* 中：状态文案（自底栏移入；长文本省略号截断，不撑高头部） */
+    s_face_status = lv_label_create(head);
+    lv_label_set_text(s_face_status, "");   /* 由 face_status_timer_cb 填真实文案 */
+    lv_obj_add_style(s_face_status, &st_text_mut, 0);
+    lv_obj_set_style_text_font(s_face_status, app_font_scaled(12), 0);
+    lv_obj_set_flex_grow(s_face_status, 1);
+    lv_label_set_long_mode(s_face_status, LV_LABEL_LONG_DOT);
+
+    /* 右：「开始识别」——单次触发识别会话（FR-27 拍板：其余时间模组静默低功耗） */
+    s_btn_verify = lv_button_create(head);
+    lv_obj_set_size(s_btn_verify, SX(128), SY(38));
+    lv_obj_set_style_radius(s_btn_verify, SX(12), 0);
+    lv_obj_set_style_bg_color(s_btn_verify, theme_color(TH_ACCENT), 0);
+    lv_obj_set_style_bg_opa(s_btn_verify, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_btn_verify, 0, 0);
+    lv_obj_set_style_outline_width(s_btn_verify, 0, 0);
+    lv_obj_set_style_opa(s_btn_verify, LV_OPA_50, LV_STATE_DISABLED);
+    lv_obj_set_flex_flow(s_btn_verify, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_btn_verify, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_btn_verify, SX(8), 0);
+    lv_obj_set_style_pad_all(s_btn_verify, 0, 0);
+    s_btn_verify_ic = icon_label_colored(s_btn_verify, UI_GLYPH_FACE, 17, TH_ACCENT_INK);
+    s_btn_verify_lb = lv_label_create(s_btn_verify);
+    lv_label_set_text(s_btn_verify_lb, "开始识别");
+    lv_obj_set_style_text_font(s_btn_verify_lb, app_font_scaled(14), 0);
+    lv_obj_set_style_text_color(s_btn_verify_lb, theme_color(TH_ACCENT_INK), 0);
+    lv_obj_add_event_cb(s_btn_verify, verify_btn_cb, LV_EVENT_CLICKED, NULL);
 
     /* ---------- 画面区：视频预览面板（flex grow 占满中间） ---------- */
     s_preview = lv_obj_create(root);
@@ -415,11 +460,7 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_obj_set_flex_align(foot, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(foot, false);
 
-    s_face_status = lv_label_create(foot);
-    lv_label_set_text(s_face_status, "");   /* 由 face_status_timer_cb 填真实文案 */
-    lv_obj_add_style(s_face_status, &st_text_mut, 0);
-    lv_obj_set_style_text_font(s_face_status, app_font_scaled(13), 0);
-    lv_obj_set_flex_grow(s_face_status, 1);
+    /* 状态文案已移入头部行（视频放大些）；foot 容器无子项自然 0 高 */
 
 
     /* ---------- 启动扫描动画 + 预览拉帧定时器 ---------- */
@@ -544,7 +585,11 @@ static void compute_video_rect(int32_t cw, int32_t ch)
     int32_t sy = (int32_t)(((int64_t)avail_h * 1000) / s_src_h);
     int32_t scale = (sx < sy) ? sx : sy;
     if (scale < 1) scale = 1;
-    if (scale > s_scale_max) scale = s_scale_max;   /* 放大封顶：默认 1.3×，env 可覆盖 */
+    /* 放大封顶按 UI 缩放系数同步放大：设计基准 1024×600，窗口放大后面板原始
+     * 像素等比变大，固定千分比上限会让视频相对变小（用户验收：2048 窗口下显小）。
+     * 上限语义 = 「设计空间里的倍数」（默认 1.3×，env 可覆盖；板上 ui_scale=1 不变）。 */
+    if (scale > (int32_t)(s_scale_max * ui_scale_x()))
+        scale = (int32_t)(s_scale_max * ui_scale_x());
 
     s_vid_w = (int32_t)(((int64_t)s_src_w * scale) / 1000);
     s_vid_h = (int32_t)(((int64_t)s_src_h * scale) / 1000);
@@ -862,7 +907,24 @@ static const char * face_status_from_result(void)
     }
 }
 
-/* 状态刷新（500ms）：底部状态文案 + 画面区占位 + 按钮可用性 + 标题副文案 */
+static void face_set_btn_enabled(lv_obj_t * btn, bool enabled)
+{
+    if (btn == NULL) return;
+    if (enabled) lv_obj_remove_state(btn, LV_STATE_DISABLED);
+    else         lv_obj_add_state(btn, LV_STATE_DISABLED);
+}
+
+/* 「开始识别」：单次触发识别会话（FR-27 拍板：其余时间模组静默低功耗） */
+static void verify_btn_cb(lv_event_t * e)
+{
+    (void)e;
+    safe_err_t r = face_service_verify_once();
+    if (r == SAFE_ERR_BUSY)  ui_banner("识别会话进行中，请稍候…", UI_BANNER_INFO, UI_ANIM_BANNER_HOLD_MS_S);
+    else if (r != SAFE_OK)   ui_banner("当前后端不支持识别", UI_BANNER_INFO, UI_ANIM_BANNER_HOLD_MS_S);
+    else                     ui_banner("识别已启动，请正对模组（10 秒内）", UI_BANNER_INFO, UI_ANIM_BANNER_HOLD_MS_S);
+}
+
+/* 状态刷新（500ms）：状态文案 + 画面区占位 + 按钮可用性 + 标题副文案 */
 static void face_status_timer_cb(lv_timer_t * t)
 {
     (void)t;
@@ -896,6 +958,9 @@ static void face_status_timer_cb(lv_timer_t * t)
          * 状态由底部状态行说明。 */
         face_ph_show(false, NULL);
     }
+
+    /* ---- 「开始识别」可用性（后端能力为准） ---- */
+    face_set_btn_enabled(s_btn_verify, caps != NULL && (caps->caps & FACE_CAP_DETECT));
 
     /* ---- 标题副文案（健康可能随帧/运行状态变化） ---- */
     face_update_header();
@@ -938,5 +1003,8 @@ static void face_refresh_local_colors(void)
 
     if (s_preview) lv_obj_set_style_border_color(s_preview, theme_color(TH_BORDER), 0);
 
+    if (s_btn_verify)       lv_obj_set_style_bg_color(s_btn_verify, theme_color(TH_ACCENT), 0);
+    if (s_btn_verify_ic)    lv_obj_set_style_text_color(s_btn_verify_ic, theme_color(TH_ACCENT_INK), 0);
+    if (s_btn_verify_lb)    lv_obj_set_style_text_color(s_btn_verify_lb, theme_color(TH_ACCENT_INK), 0);
 }
 
