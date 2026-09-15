@@ -59,6 +59,20 @@
  * 的实测平衡点；面板比 416×312 还小时按面板自适应（取 min），不会过度放大。 */
 #define FACE_MAX_SCALE 1300
 
+/* 预览显示的两个 env 开关（PC 联调用；板上不设 env 即走默认，行为不变）：
+ *   SAFE_CAMERA_ROT          0/90/180/270 —— 把摄像头帧旋转后显示（模组竖装用 90/270）
+ *   SAFE_FACE_PREVIEW_SCALE  放大上限千分比（默认 1300=1.3×；PC 大窗口可设 2000 跟随
+ *                            2× 窗口。放大只增加显示像素数、不增加细节，板上勿调高） */
+static int      s_rot_deg   = 0;            /* 0/90/180/270 */
+static int32_t  s_scale_max = FACE_MAX_SCALE;
+static int32_t  s_src_w     = CAP_W;        /* 旋转后的等效源宽（90/270 时 = CAP_H） */
+static int32_t  s_src_h     = CAP_H;
+static uint16_t * s_rot_buf = NULL;         /* 旋转目标缓冲（仅 rot!=0 时分配） */
+
+static void preview_env_init(void);
+static void rotate_frame(const uint16_t * src, uint16_t * dst,
+                         int32_t sw, int32_t sh, int deg);
+
 /* FPS 统计滑窗长度 */
 #define FPS_WINDOW_MS 500
 
@@ -507,6 +521,9 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     face_update_header();
     face_status_timer_cb(NULL);
 
+    /* env 开关（旋转 / 放大上限）须在首次 SIZE_CHANGED 前生效 */
+    preview_env_init();
+
     /* 触发一次 SIZE_CHANGED 立即建 canvas（force layout 后再调用） */
     lv_obj_update_layout(root);
     preview_size_changed_cb(NULL);
@@ -587,14 +604,14 @@ static void compute_video_rect(int32_t cw, int32_t ch)
 {
     int32_t avail_h = ch;                     /* 视频最大化 */
 
-    int32_t sx = (int32_t)(((int64_t)cw * 1000) / CAP_W);
-    int32_t sy = (int32_t)(((int64_t)avail_h * 1000) / CAP_H);
+    int32_t sx = (int32_t)(((int64_t)cw * 1000) / s_src_w);
+    int32_t sy = (int32_t)(((int64_t)avail_h * 1000) / s_src_h);
     int32_t scale = (sx < sy) ? sx : sy;
     if (scale < 1) scale = 1;
-    if (scale > FACE_MAX_SCALE) scale = FACE_MAX_SCALE;   /* 放大封顶：见 FACE_MAX_SCALE 注释 */
+    if (scale > s_scale_max) scale = s_scale_max;   /* 放大封顶：默认 1.3×，env 可覆盖 */
 
-    s_vid_w = (int32_t)(((int64_t)CAP_W * scale) / 1000);
-    s_vid_h = (int32_t)(((int64_t)CAP_H * scale) / 1000);
+    s_vid_w = (int32_t)(((int64_t)s_src_w * scale) / 1000);
+    s_vid_h = (int32_t)(((int64_t)s_src_h * scale) / 1000);
     if (s_vid_w < 1) s_vid_w = 1;
     if (s_vid_h < 1) s_vid_h = 1;
     if (s_vid_w > cw) s_vid_w = cw;
@@ -623,13 +640,13 @@ static void rebuild_maps(void)
         return;
     }
     for (int32_t x = 0; x < s_vid_w; x++) {
-        int32_t v = (int32_t)(((int64_t)x * CAP_W) / s_vid_w);
-        if (v >= CAP_W) v = CAP_W - 1;
+        int32_t v = (int32_t)(((int64_t)x * s_src_w) / s_vid_w);
+        if (v >= s_src_w) v = s_src_w - 1;
         s_map_x[x] = (uint16_t)v;
     }
     for (int32_t y = 0; y < s_vid_h; y++) {
-        int32_t v = (int32_t)(((int64_t)y * CAP_H) / s_vid_h);
-        if (v >= CAP_H) v = CAP_H - 1;
+        int32_t v = (int32_t)(((int64_t)y * s_src_h) / s_vid_h);
+        if (v >= s_src_h) v = s_src_h - 1;
         s_map_y[y] = (uint16_t)v;
     }
 }
@@ -707,6 +724,53 @@ static void fps_label_update_if_due(void)
     }
 }
 
+/* ===== 预览 env 开关 + 旋转（PC 联调；板上不设 env 行为不变） ===== */
+static void preview_env_init(void)
+{
+    const char * er = getenv("SAFE_CAMERA_ROT");
+    if (er != NULL) {
+        int v = atoi(er);
+        if (v == 90 || v == 180 || v == 270) s_rot_deg = v;
+    }
+    const char * es = getenv("SAFE_FACE_PREVIEW_SCALE");
+    if (es != NULL) {
+        int32_t v = (int32_t)atoi(es);
+        if (v >= 100 && v <= 5000) s_scale_max = v;
+    }
+    /* 旋转后的等效源尺寸（视频矩形 / 映射表都按它算） */
+    s_src_w = (s_rot_deg == 90 || s_rot_deg == 270) ? CAP_H : CAP_W;
+    s_src_h = (s_rot_deg == 90 || s_rot_deg == 270) ? CAP_W : CAP_H;
+    if (s_rot_deg != 0 && s_rot_buf == NULL) {
+        s_rot_buf = (uint16_t *)malloc(sizeof(uint16_t) * CAP_W * CAP_H);
+        if (s_rot_buf == NULL) {      /* 分配失败：放弃旋转，保持原方向显示 */
+            s_rot_deg = 0;
+            s_src_w   = CAP_W;
+            s_src_h   = CAP_H;
+            printf("[FACE] 旋转缓冲分配失败，预览按原方向显示\n");
+        }
+    }
+    if (s_rot_deg != 0) printf("[FACE] 预览旋转 %d°，放大上限 %d‰\n", s_rot_deg, (int)s_scale_max);
+}
+
+/* 把 sw×sh 的 RGB565 帧旋转 deg 后写入 dst（90 = 顺时针）。7.7 万像素/帧，
+ * 15fps 下约 1~2ms，可忽略；识别链路用模组自身传感器，与此处无关。 */
+static void rotate_frame(const uint16_t * src, uint16_t * dst, int32_t sw, int32_t sh, int deg)
+{
+    if (deg == 90) {
+        for (int32_t y = 0; y < sh; y++)
+            for (int32_t x = 0; x < sw; x++)
+                dst[(size_t)x * sh + (sh - 1 - y)] = src[(size_t)y * sw + x];
+    } else if (deg == 180) {
+        for (int32_t y = 0; y < sh; y++)
+            for (int32_t x = 0; x < sw; x++)
+                dst[(size_t)(sh - 1 - y) * sw + (sw - 1 - x)] = src[(size_t)y * sw + x];
+    } else {   /* 270（= 逆时针 90） */
+        for (int32_t y = 0; y < sh; y++)
+            for (int32_t x = 0; x < sw; x++)
+                dst[(size_t)(sw - 1 - x) * sh + y] = src[(size_t)y * sw + x];
+    }
+}
+
 /* ===== 拉帧定时器：拉帧 → 最近邻缩放 → invalidate 视频区 ===== */
 static void frame_timer_cb(lv_timer_t * t)
 {
@@ -723,25 +787,31 @@ static void frame_timer_cb(lv_timer_t * t)
      * 本回调运行在主线程，取回后可直接操作 LVGL，不跨线程。无新帧时保持上一帧。 */
     hal_camera_frame_info_t info;
     if (face_thread_get_preview(s_cap_buf, &info)) {
-        /* 1. 帧已在 s_cap_buf（face 线程双帧缓冲拷贝而来），无需再拷贝 */
+        /* 1. 帧已在 s_cap_buf（face 线程双帧缓冲拷贝而来）。模组竖装时旋转
+         *    一份再显示 —— 纯预览链路，识别走模组自身传感器，不受影响。 */
+        const uint16_t * src = s_cap_buf;
+        if (s_rot_deg != 0 && s_rot_buf != NULL) {
+            rotate_frame(s_cap_buf, s_rot_buf, CAP_W, CAP_H, s_rot_deg);
+            src = s_rot_buf;
+        }
 
-        /* 2. 最近邻缩放 320×240 → 画布（画布 == 居中的 4:3 视频矩形），查表，
+        /* 2. 最近邻缩放 源(320×240 或旋转后) → 画布（画布 == 居中视频矩形），查表，
          *    绘制期零除法。画布已收缩到视频矩形，因此**没有留白要填**。 */
         int32_t dst_stride = s_canvas_w;
         uint16_t * buf = s_canvas_buf;
         for (int32_t y = 0; y < s_canvas_h; y++) {
             uint16_t * dst_row = &buf[(size_t)y * dst_stride];
             if (s_map_x && s_map_y) {
-                const uint16_t * src_row = &s_cap_buf[(size_t)s_map_y[y] * CAP_W];
+                const uint16_t * src_row = &src[(size_t)s_map_y[y] * s_src_w];
                 for (int32_t x = 0; x < s_canvas_w; x++) {
                     dst_row[x] = src_row[s_map_x[x]];
                 }
             } else {
-                /* 映射表分配失败时回退：逐像素整型除法 */
-                int32_t sy = (int32_t)(((int64_t)y * CAP_H) / s_canvas_h);
-                const uint16_t * src_row = &s_cap_buf[sy * CAP_W];
+                /* 映射表分配失败时回退：逐像素整型除法（此回退不旋转） */
+                int32_t sy = (int32_t)(((int64_t)y * s_src_h) / s_canvas_h);
+                const uint16_t * src_row = &src[sy * s_src_w];
                 for (int32_t x = 0; x < s_canvas_w; x++) {
-                    int32_t sx = (int32_t)(((int64_t)x * CAP_W) / s_canvas_w);
+                    int32_t sx = (int32_t)(((int64_t)x * s_src_w) / s_canvas_w);
                     dst_row[x] = src_row[sx];
                 }
             }
