@@ -198,6 +198,35 @@ static safe_err_t v4l2_deinit(void)
     return SAFE_OK;
 }
 
+/* MJPG 协商（决-1 软解路径）——**唯一一份** MJPG 分支，被两条路径复用：
+ *   a) VIDIOC_S_FMT(YUYV) 直接被拒（errno=EINVAL，本设备没有 YUYV 档）；
+ *   b) S_FMT 成功但驱动换成了别的格式（UVC 常见「静默改写 pixelformat」）。
+ * 修复（2026-09-16）：原实现只在 (b) 里写了 MJPG 协商，(a) 直接 return ——
+ * 纯 MJPG 摄像头（本项目这颗 UVC 实测只有 MJPG 档）S_FMT(YUYV) 必然返回
+ * -EINVAL，于是整个相机路径报废、预览全黑，(b) 那份代码永远走不到。
+ * 成功时填好 fmt 并置 s_is_mjpg=true；失败返回 SAFE_ERR_UNSUP（error 日志已打出）。 */
+static safe_err_t v4l2_negotiate_mjpg(uint16_t w, uint16_t h, struct v4l2_format * fmt)
+{
+    memset(fmt, 0, sizeof(*fmt));
+    fmt->type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    fmt->fmt.pix.width       = w ? w : 320;
+    fmt->fmt.pix.height      = h ? h : 240;
+    fmt->fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
+    fmt->fmt.pix.field       = V4L2_FIELD_NONE;
+    if (xioctl(s_fd, VIDIOC_S_FMT, fmt) < 0 ||
+        fmt->fmt.pix.pixelformat != V4L2_PIX_FMT_MJPEG) {
+        /* 到这里才是真的没救：YUYV 与 MJPG 都不被接受。
+         * 打 errno 是为了区分 EINVAL（设备真不支持）与 EBUSY（设备被别的进程
+         * 占着 / 双实例互抢）—— 二者在界面上都表现为「预览全黑」，必须能分辨。 */
+        printf("[CAMERA] MJPG 也未被接受，无可用采集格式（errno=%d）\n", errno);
+        return SAFE_ERR_UNSUP;
+    }
+    s_is_mjpg = true;
+    printf("[CAMERA] 格式协商: MJPG %ux%u（软解路径）\n",
+           fmt->fmt.pix.width, fmt->fmt.pix.height);
+    return SAFE_OK;
+}
+
 static safe_err_t v4l2_start(uint16_t w, uint16_t h)
 {
     if (s_fd < 0) return SAFE_ERR_STATE;
@@ -239,31 +268,23 @@ static safe_err_t v4l2_start(uint16_t w, uint16_t h)
     fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
     fmt.fmt.pix.field       = V4L2_FIELD_NONE;
     if (xioctl(s_fd, VIDIOC_S_FMT, &fmt) < 0) {
-        printf("[CAMERA] S_FMT 失败\n");
-        return SAFE_ERR_UNSUP;
+        /* S_FMT 直接被拒（EINVAL）：本设备根本没有 YUYV 档。这是**正常情况**
+         * 而不是故障（真机这颗 UVC 实测只有 MJPG），故用 info 级措辞并继续
+         * 协商 MJPG；只有 YUYV 与 MJPG 双双失败才算错误。 */
+        printf("[CAMERA] YUYV 不支持（本设备仅 MJPG），改用 MJPG 软解\n");
+        fmt.fmt.pix.pixelformat = 0;   /* 标记「没拿到 YUYV」，落到下面的 MJPG 分支 */
+    } else if (fmt.fmt.pix.pixelformat != V4L2_PIX_FMT_YUYV) {
+        char fourcc[5] = {0};
+        memcpy(fourcc, &fmt.fmt.pix.pixelformat, 4);
+        printf("[CAMERA] YUYV 未被接受（驱动返回 %s），改用 MJPG 软解\n", fourcc);
     }
+
     if (fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV) {
         s_is_mjpg = false;
         printf("[CAMERA] 格式协商: YUYV %ux%u (bytesperline=%u)\n",
                fmt.fmt.pix.width, fmt.fmt.pix.height, fmt.fmt.pix.bytesperline);
-    } else {
-        char fourcc[5] = {0};
-        memcpy(fourcc, &fmt.fmt.pix.pixelformat, 4);
-        printf("[CAMERA] YUYV 未被接受（驱动返回 %s），按决-1 降级 MJPG 软解\n", fourcc);
-        memset(&fmt, 0, sizeof(fmt));
-        fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        fmt.fmt.pix.width       = w ? w : 320;
-        fmt.fmt.pix.height      = h ? h : 240;
-        fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
-        fmt.fmt.pix.field       = V4L2_FIELD_NONE;
-        if (xioctl(s_fd, VIDIOC_S_FMT, &fmt) < 0 ||
-            fmt.fmt.pix.pixelformat != V4L2_PIX_FMT_MJPEG) {
-            printf("[CAMERA] MJPG 也未被接受，无可用采集格式\n");
-            return SAFE_ERR_UNSUP;
-        }
-        s_is_mjpg = true;
-        printf("[CAMERA] 格式协商: MJPG %ux%u（软解路径）\n",
-               fmt.fmt.pix.width, fmt.fmt.pix.height);
+    } else if (v4l2_negotiate_mjpg(w, h, &fmt) != SAFE_OK) {
+        return SAFE_ERR_UNSUP;      /* 两条格式都不行：日志已在函数内打出 */
     }
     s_cap_w = (uint16_t)fmt.fmt.pix.width;
     s_cap_h = (uint16_t)fmt.fmt.pix.height;
