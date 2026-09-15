@@ -20,6 +20,13 @@ lv_obj_t * page_enroll_create(lv_obj_t * parent);
  * page_face 的前台边沿会把本页可见性并入（两个窗口共用模组与相机）。 */
 bool page_enroll_is_visible(void);
 
+/* 录入结果在**本页内**展示（用户拍板 2026-09-15：录入失败不要弹 modal 对话框）。
+ *   text：结果文案（如「录入超时：没有检测到人脸，请正对镜头」）；传 NULL = 清除
+ *         结果态，底部状态行交回状态定时器托管、按钮恢复成「取消录入」。
+ *   ok  ：true = 成功（成功色），false = 失败（告警色，按钮变「重新录入」）。
+ * 由 page_users 的 on_face_event_ui 在收到 FACE_EV_ENROLL_DONE 后调用。 */
+void page_enroll_show_result(const char * text, bool ok);
+
 #ifdef __cplusplus
 }
 #endif

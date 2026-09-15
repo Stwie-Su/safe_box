@@ -16,6 +16,7 @@
 #include "core/auth/unlock_backend.h"   /* backend_admin_verify_totp：改管理员密码动态码二次确认 */
 #include "hal/hal_face.h"               /* face_service_enroll/delete_async + caps（UI 现代化 ui3） */
 #include "hal/hal_time.h"               /* R2：时间源统一走 HAL，不直接读系统时钟 */
+#include "ui/pages/page_enroll.h"       /* page_enroll_show_result：录入结果页内展示 */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,6 +70,11 @@ typedef enum {
 static face_op_t s_face_op          = FACE_OP_NONE;
 static int       s_face_pending_uid = -1;   /* 应答到达后要写回 face_id 的用户 */
 static int       s_face_pending_tpl = -1;   /* 删除路径：要解绑的模板号 */
+
+/* 最近一次发起录入的用户 —— 录入失败后页面停在 PAGE_ENROLL，用户点「重新录入」
+ * 时需要它重新装填 s_face_pending_uid（应答到达时 on_face_event_ui 靠它写回
+ * face_id）。录入失败路径会把 s_face_pending_uid 复位成 -1，故单独留一份。 */
+static int       s_last_enroll_uid  = -1;
 
 /* 键盘字号基准（实际字号 = base × ui_scale，见 ui_scale.c app_montserrat_scaled）
  * lv_keyboard 是 lv_buttonmatrix 子类，按键文本属于 LV_PART_ITEMS。
@@ -1286,11 +1292,41 @@ static void face_start_cb(lv_event_t * e)
         s_face_pending_tpl = -1;
     }
     else if (s_face_op == FACE_OP_ENROLL) {
+        s_last_enroll_uid = s_face_pending_uid;
         /* 录入是独立窗口（用户拍板 2026-09-15：录入引导与识别分开）——切到
-         * 专用「人脸录入」页（视频 + 实时引导），识别仍留在「人脸识别」页。 */
+         * 专用「人脸录入」页（视频 + 实时引导），识别仍留在「人脸识别」页。
+         * 先清掉上一轮可能残留的结果态（成功/失败文案与「重新录入」按钮）。 */
+        page_enroll_show_result(NULL, false);
         ui_switch_page(PAGE_ENROLL);
     }
     /* 发起成功：等 EV_FACE_EVENT 应答，由 on_face_event_ui 写回 + 刷新 */
+}
+
+/* 录入页「重新录入」入口（用户拍板 2026-09-15：失败不弹窗、不切页，就地重试）。
+ * 应答处理（on_face_event_ui）已把 s_face_op / s_face_pending_uid 复位，这里按
+ * s_last_enroll_uid 重新装填上下文并重发一次录入命令，使下一次 ENROLL_DONE
+ * 仍能被本页接住并写回 face_id。成功返回 true；模组忙等不受理返回 false。 */
+bool page_users_retry_enroll(void)
+{
+    if (s_last_enroll_uid < 0) return false;
+
+    /* 与 face_start_cb 同一套发起路径：把用户名带进模组，供 VERIFY 时核对归属 */
+    char uname[32] = {0};
+    safe_user_t uu;
+    if (user_find_by_id(s_last_enroll_uid, &uu) == 0) {
+        strncpy(uname, uu.name, sizeof(uname) - 1);
+    }
+
+    s_face_op          = FACE_OP_ENROLL;
+    s_face_pending_uid = s_last_enroll_uid;
+    s_face_pending_tpl = -1;
+
+    if (face_service_enroll_async(uname) != SAFE_OK) {
+        s_face_op          = FACE_OP_NONE;
+        s_face_pending_uid = -1;
+        return false;
+    }
+    return true;
 }
 
 /* 人脸操作失败原因 → 可操作提示（v1.4 / N3）。
@@ -1359,9 +1395,15 @@ static void on_face_event_ui(ev_topic_t topic, const void * payload, void * user
     s_face_pending_tpl = -1;
 
     if (tpl == -2 || uid < 0) {
-        /* 横幅由 ui_feedback 出（只说「失败」）；这里补一句能指导下一步操作的提示 */
-        if (fail_err != SAFE_OK) dlg_tip(face_err_hint(was_enroll, fail_err));
-        if (was_enroll) ui_switch_page(PAGE_USERS);   /* 从录入页回用户页 */
+        /* 横幅由 ui_feedback 出（只说「失败」）；这里补一句能指导下一步操作的提示。
+         * 用户拍板 2026-09-15：录入失败**不要再弹 modal 对话框**，文案直接送到
+         * 录入页底部状态行，页面停在录入页让人对着引导重试（按钮变「重新录入」）。
+         * 删除失败仍走用户页 dlg_tip，行为不变。 */
+        if (was_enroll) {
+            page_enroll_show_result(face_err_hint(true, fail_err), false);
+        } else if (fail_err != SAFE_OK) {
+            dlg_tip(face_err_hint(false, fail_err));
+        }
         return;
     }
 
@@ -1370,7 +1412,11 @@ static void on_face_event_ui(ev_topic_t topic, const void * payload, void * user
     a->id = uid;
     a->result = tpl;                                   /* worker 内转成 user_face_set 的入参 */
     worker_post(face_set_worker, a, face_set_done);
-    if (was_enroll) ui_switch_page(PAGE_USERS);   /* 录入结束（成功/失败）回用户页看结果 */
+    if (was_enroll) {
+        /* 录入成功：同一接口在录入页显示一句「录入成功」，再回用户页看结果 */
+        page_enroll_show_result("录入成功", true);
+        ui_switch_page(PAGE_USERS);
+    }
 }
 
 static void dlg_confirm_del(const char *msg)

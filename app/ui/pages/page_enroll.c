@@ -16,6 +16,7 @@
  * TODO(架构债)：预览管线与 page_face 重复，后续抽 ui/preview 共用组件。
  */
 #include "ui/pages/page_enroll.h"
+#include "ui/pages/page_users.h"     /* page_users_retry_enroll：失败态「重新录入」 */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,6 +62,13 @@ static uint16_t * s_rot_buf;
 static bool       s_got_frame;
 static uint32_t   s_last_frame_ms;
 
+/* 录入结果态（用户拍板 2026-09-15：录入失败**不要弹 modal**，在引导窗口内显示）。
+ * s_result_shown=true 期间 s_status 由结果文案独占，状态定时器不再覆盖（否则
+ * 500ms 后就被冲掉）；底部按钮同时切成「重新录入」。 */
+static bool       s_result_shown;
+static bool       s_result_ok;
+static lv_obj_t * s_result_btn_lb;    /* 底部按钮文字：「取消录入」/「重新录入」 */
+
 static void frame_timer_cb(lv_timer_t * t);
 static void status_timer_cb(lv_timer_t * t);
 static void cancel_cb(lv_event_t * e);
@@ -71,6 +79,7 @@ static void compute_video_rect(int32_t cw, int32_t ch);
 static void rebuild_maps(void);
 static void rebuild_canvas(void);
 static const char * guide_text(int32_t fs);
+static void refresh_foot_btn(void);
 
 /* ===== env 开关（与 page_face 共用同一组 env；板上不设即走默认） ===== */
 static void preview_env_init(void)
@@ -274,17 +283,61 @@ static void status_timer_cb(lv_timer_t * t)
     lv_label_set_text(s_sub, enrolling ? guide_text(face_service_face_state())
                                        : "未在录入会话");
 
-    /* 底部状态文案：明确、不空 */
-    const char * st;
-    if (!face_service_enrolling())     st = "未在录入会话 · 从「用户」页发起录入";
-    else if (!live)                    st = "等待摄像头出帧…";
-    else                               st = "录入会话进行中 · 完成后自动返回用户页";
-    lv_label_set_text(s_status, st);
+    /* 底部状态文案：明确、不空。
+     * 结果态（录入成功/失败文案）由 page_enroll_show_result 写入并独占 s_status，
+     * 这里不覆盖 —— 否则 500ms 后结果就被冲掉了。 */
+    if (!s_result_shown) {
+        const char * st;
+        if (!face_service_enrolling())     st = "未在录入会话 · 从「用户」页发起录入";
+        else if (!live)                    st = "等待摄像头出帧…";
+        else                               st = "录入会话进行中 · 完成后自动返回用户页";
+        lv_label_set_text(s_status, st);
+    }
+}
+
+/* 底部按钮语义：失败态 = 「重新录入」（就地重试），其余 = 「取消录入」（回用户页） */
+static void refresh_foot_btn(void)
+{
+    if (s_result_btn_lb == NULL) return;
+    lv_label_set_text(s_result_btn_lb,
+                      (s_result_shown && !s_result_ok) ? "重新录入" : "取消录入");
+}
+
+/* 录入结果在页内展示（page_users 的 on_face_event_ui 调用）。
+ * text=NULL 表示清除结果态，把 s_status 交回状态定时器托管。 */
+void page_enroll_show_result(const char * text, bool ok)
+{
+    if (s_root == NULL || s_status == NULL) return;
+
+    if (text == NULL) {
+        s_result_shown = false;
+        s_result_ok    = false;
+        lv_obj_set_style_text_color(s_status, theme_color(TH_TEXT_MUT), 0);
+        refresh_foot_btn();
+        return;
+    }
+
+    s_result_shown = true;
+    s_result_ok    = ok;
+    lv_label_set_text(s_status, text);
+    /* 成功用成功色、失败用告警色 —— 一律走 theme token，禁止硬编码颜色 */
+    lv_obj_set_style_text_color(s_status, theme_color(ok ? TH_OK : TH_WARN), 0);
+    refresh_foot_btn();
 }
 
 static void cancel_cb(lv_event_t * e)
 {
     (void)e;
+    /* 失败态：就地重新发起录入（用户拍板：不弹窗、不切页，让人对着引导重试） */
+    if (s_result_shown && !s_result_ok) {
+        if (page_users_retry_enroll()) {
+            page_enroll_show_result(NULL, false);   /* 清结果态，交回状态定时器 */
+            return;
+        }
+        /* 重发没被受理（模组忙等）：保留失败态并换一句，让用户再点一次 */
+        page_enroll_show_result("重新录入发起失败，请稍后重试", false);
+        return;
+    }
     /* 不需要显式 abort：离开本页 → duty-cycle 判定前台离开 → 0x10 RESET 终止在途会话 */
     ui_switch_page(PAGE_USERS);
 }
@@ -414,6 +467,7 @@ lv_obj_t * page_enroll_create(lv_obj_t * parent)
     lv_obj_set_style_text_font(cl, app_font_scaled(14), 0);
     lv_obj_set_style_text_color(cl, theme_color(TH_TEXT), 0);
     lv_obj_center(cl);
+    s_result_btn_lb = cl;        /* 失败态由 refresh_foot_btn 改成「重新录入」 */
 
     /* ---------- 定时器 ---------- */
     if (s_frame_timer == NULL) {
