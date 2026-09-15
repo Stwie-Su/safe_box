@@ -47,11 +47,12 @@ static auth_ui_hook_t   s_ui_hook   = NULL;
 static auth_event_cb_t  s_evt_cb    = NULL;
 
 /* 人脸事件入口：face_service_emit → event_bus(EV_FACE_EVENT) → 本回调（主线程） */
-static void handle_face_result(int32_t face_id, face_reason_t reason);
+static void handle_face_result(int32_t face_id, face_reason_t reason, const char * mod_name);
 static void on_face_event(ev_topic_t topic, const void * payload, void * user);
 static void do_unlock(const char * user, const char * via);
 static bool bump_fail_streak(const char * user, const char * detail);
 static void emit_event(const char * evt, const char * user, const char * detail, int res);
+static bool cred_name_ok(const safe_user_t * u, const char * mod_name);
 
 /* 超时（秒）
  *
@@ -92,15 +93,21 @@ void auth_fsm_init(void)
  *    TIMEOUT/ERROR 丢弃。真机连续出帧，若一律丢弃，用户刷脸成功也要干等超时；
  *  - UNLOCKED / DENY / LOCKOUT 等暂态：直接丢弃，否则开锁动画期间
  *    检测到的人脸会在回到 IDLE 后被重放误触发。 */
-static void handle_face_result(int32_t face_id, face_reason_t reason)
+static void handle_face_result(int32_t face_id, face_reason_t reason, const char * mod_name)
 {
     if(s_fsm.state == FSM_IDLE || s_fsm.state == FSM_DETECTING) {
-        auth_fsm_submit_face(face_id, reason);
+        auth_fsm_submit_face_ex(face_id, reason, mod_name);
     }
     else if(s_fsm.state == FSM_WAIT_OTP) {
         if(reason == FACE_RES_OK) {
             safe_user_t u;
             if(face_id >= 0 && user_find_by_face(face_id, &u) == 0) {
+                /* FR-21 防线 1 同样适用于「等待动态码期间的刷脸放行」这条路 */
+                if(!cred_name_ok(&u, mod_name)) {
+                    s_fsm.pending_user[0] = '\0';
+                    set_state(FSM_DENY, u.name, "人脸凭据不一致");
+                    return;
+                }
                 s_fsm.pending_user[0] = '\0';
                 do_unlock(u.name, "face");
             }
@@ -130,7 +137,8 @@ static void on_face_event(ev_topic_t topic, const void * payload, void * user)
     if(topic != EV_FACE_EVENT || payload == NULL) return;
     const ev_face_event_t * e = (const ev_face_event_t *)payload;
     if(e->ev != FACE_EV_DETECT) return;   /* ENROLL/DELETE/ERROR 与认证状态机无关 */
-    handle_face_result(e->res.face_id, e->res.reason);
+    /* mod_name：模组返回的模板名，供 FR-21 核对；空串表示模组未提供 */
+    handle_face_result(e->res.face_id, e->res.reason, e->res.user_name);
 }
 
 void auth_fsm_set_ui_hook(auth_ui_hook_t hook) { s_ui_hook = hook; }
@@ -244,8 +252,34 @@ static void liveness_fail(safe_user_t *user)
         set_state(FSM_DENY, user ? user->name : NULL, "活体检测失败");
 }
 
+/* FR-21 防线 1（v1.4）：核对模组返回的模板名与本地区名是否一致。
+ * 返回 false = 凭据不一致：已记审计与告警、且已把本地人脸凭据标记失效，调用方必须拒绝开锁。
+ * 不一致的含义不是「用户敲错了」，而是「模组侧这张脸绑的不是本地记录的这个人」
+ * —— 换绑、冒用、或模组被整体替换过，属凭据失效而非认证失败，故不并入失败计数
+ * （不是暴力尝试），但同样不放过。PIN / 动态码通道不受影响。 */
+static bool cred_name_ok(const safe_user_t * u, const char * mod_name)
+{
+    if(u == NULL) return false;
+    if(mod_name == NULL || *mod_name == '\0') return true;   /* 模组未提供名字：跳过核对 */
+    if(strcmp(mod_name, u->name) == 0) return true;
+
+    char detail[64];
+    snprintf(detail, sizeof(detail), "模组名[%s]≠本地名[%s]", mod_name, u->name);
+    log_append("ALARM", u->name, 0, detail);
+    emit_event("ALARM", u->name, "credential mismatch", 0);
+
+    safe_user_t upd;
+    if(user_find_by_name(u->name, &upd) == 0 && upd.face_enable) {
+        upd.face_enable = false;            /* 本地人脸凭据标记失效（FR-21） */
+        user_update(&upd);
+        log_append("ALARM", u->name, 0, "人脸凭据已标记失效，请管理员重新录入");
+    }
+    return false;
+}
+
 /* 解析一次人脸结果：user 为 NULL 表示模组未给出匹配身份 */
-static void resolve(int32_t face_id, face_reason_t reason, safe_user_t *user)
+static void resolve(int32_t face_id, face_reason_t reason, safe_user_t *user,
+                    const char * mod_name)
 {
     (void)face_id;   /* 命中用户已由 user_find_by_face 解析，此处仅保留接口以备审计 */
 
@@ -281,6 +315,14 @@ static void resolve(int32_t face_id, face_reason_t reason, safe_user_t *user)
         }
     }
 
+    /* FR-21 防线 1：模组说「是这个人」，还要核对它报的名字与我们记录的是否一致。
+     * 不一致时 cred_name_ok 内部已记审计与告警、并把本地人脸凭据标记失效；
+     * 这里只负责拒绝开锁 —— 它不是「未匹配」（不是暴力尝试），故不计入失败计数。 */
+    if(reason == FACE_RES_OK && !cred_name_ok(user, mod_name)) {
+        set_state(FSM_DENY, user->name, "人脸凭据不一致");
+        return;
+    }
+
     switch (reason) {
         case FACE_RES_OK:            do_unlock(user->name, "face"); break;
         case FACE_RES_NO_MATCH:      face_no_match(user);           break;
@@ -291,13 +333,19 @@ static void resolve(int32_t face_id, face_reason_t reason, safe_user_t *user)
 
 void auth_fsm_submit_face(int32_t face_id, face_reason_t reason)
 {
+    auth_fsm_submit_face_ex(face_id, reason, NULL);
+}
+
+void auth_fsm_submit_face_ex(int32_t face_id, face_reason_t reason, const char * mod_name)
+{
     if (s_fsm.state == FSM_LOCKOUT) return;
     if (reason == FACE_RES_TIMEOUT || reason == FACE_RES_ERROR) return;   /* 不计数不迁移 */
 
     s_fsm.last_reason = reason;
     safe_user_t u;
     safe_user_t *pu = (face_id >= 0 && user_find_by_face(face_id, &u) == 0) ? &u : NULL;
-    resolve(face_id, reason, pu);
+    /* mod_name 直接穿透给 resolve（本函数在主线程被 event_bus_pump 调用，无并发问题） */
+    resolve(face_id, reason, pu, mod_name);
 }
 
 void auth_fsm_submit_pin(const char *pin)

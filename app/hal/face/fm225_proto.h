@@ -46,6 +46,10 @@ extern "C" {
 #define FM225_CMD_ENROLL        0x13u
 #define FM225_CMD_DELETE_USER   0x20u
 #define FM225_CMD_DELETE_ALL    0x21u
+/* 终止录入并清除录入状态（手册 §六「录入过程中可通过 FACE RESET 指令终止录入，
+ * 先前的录入状态也会清零」）。注意与 FM225_CMD_RESET(0x10 = MID_RESET，通用复位)
+ * 不是一回事——代码注释曾把 0x10 称作 FACE RESET，属术语混用。 */
+#define FM225_CMD_FACE_RESET    0x23u
 
 /* REPLY.Data 首字节：被应答的命令字 mid */
 /* REPLY.Data 次字节：结果码 MR_* */

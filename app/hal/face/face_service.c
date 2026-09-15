@@ -141,14 +141,15 @@ bool face_service_running(void)
     return s_running;
 }
 
-safe_err_t face_service_enroll_async(void)
+safe_err_t face_service_enroll_async(const char * user_name)
 {
     if(s_backend == NULL) return SAFE_ERR_STATE;
     if(!(s_backend->caps & FACE_CAP_ENROLL)) return SAFE_ERR_UNSUP;
     if(s_enroll_pending) return SAFE_ERR_BUSY;
     if(s_backend->enroll == NULL) return SAFE_ERR_UNSUP;
 
-    safe_err_t e = s_backend->enroll();
+    /* user_name 随录入写入模组侧模板（FR-21 防线 1）；不支持写名的后端忽略该参数即可。 */
+    safe_err_t e = s_backend->enroll(user_name);
     if(e == SAFE_OK) {
         s_enroll_pending   = true;
         s_enroll_start_ms  = 0;      /* 由 tick 的 now_ms 记账，见 face_service_tick */

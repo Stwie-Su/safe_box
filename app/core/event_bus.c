@@ -16,7 +16,10 @@
 #define MAX_SUB_PER_TOPIC   8
 #define MAX_SUB_TOTAL       (EV_TOPIC_COUNT * MAX_SUB_PER_TOPIC)
 #define QUEUE_DEPTH         32
-#define PAYLOAD_MAX_BYTES   128
+/* v1.4：128 → 192。face_result_t 加了 user_name[32]（FR-21 凭据核对）后，
+ * 容纳它的 ev_face_event_t 由 100B 涨到 132B —— 不改上限会被 _Static_assert 拦住。
+ * 队列内存 32 × 192 = 6KB，对板子（512MB）无压力。 */
+#define PAYLOAD_MAX_BYTES   192
 
 /* payload 结构体尺寸拘束：超过总线拷贝上限在编译期报错（新增 payload 时同步维护）。
  * _Static_assert 是 C11 关键字，本工程以 C99 + -pedantic 编译会告警（D11），

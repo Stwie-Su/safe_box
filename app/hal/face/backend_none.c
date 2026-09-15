@@ -26,6 +26,12 @@ static safe_err_t none_delete(int32_t face_id)
     return SAFE_ERR_UNSUP;
 }
 
+static safe_err_t none_enroll(const char * user_name)
+{
+    (void)user_name;
+    return SAFE_ERR_UNSUP;
+}
+
 static safe_err_t none_inject(int32_t face_id, face_reason_t reason)
 {
     (void)face_id; (void)reason;
@@ -41,7 +47,7 @@ static const face_backend_t backend = {
     .start         = none_unsup,
     .stop          = none_ok,
     .tick          = NULL,
-    .enroll        = none_unsup,
+    .enroll        = none_enroll,
     .delete_tpl    = none_delete,
     .inject        = none_inject,
 };

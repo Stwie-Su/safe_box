@@ -18,6 +18,9 @@
 
 static bool     s_started;
 static bool     s_enroll_job;
+/* 模拟「模组侧把模板名存下来了」：录入时记名、识别成功时随结果带回，
+ * 使 PC 上（fake 后端）也能验证 FR-21 凭据一致性；真机由 FM225 的 VERIFY 应答带回。 */
+static char     s_enroll_name[32];
 static uint32_t s_enroll_done_ms;
 static int32_t  s_next_face_id = 100;
 
@@ -32,6 +35,7 @@ static safe_err_t fake_init(void)
     s_enroll_job     = false;
     s_detect_job     = false;
     s_next_face_id   = 100;
+    s_enroll_name[0] = '\0';
     return SAFE_OK;
 }
 
@@ -74,6 +78,10 @@ static void fake_tick(uint32_t now_ms)
             memset(&r, 0, sizeof(r));
             r.face_id   = s_detect_face_id;
             r.reason    = s_detect_reason;
+            /* 模拟模组把模板名带回 VERIFY 应答（真机见 backend_fm225 的应答解析）。 */
+            if(s_detect_reason == FACE_RES_OK) {
+                strncpy(r.user_name, s_enroll_name, sizeof(r.user_name) - 1);
+            }
             /* 契约（hal_face.h）：timestamp = hal_time()（Unix 秒），不是"进程/开机起算秒"。
              * 消费方 page_face 用 hal_time() 判新鲜度，用 tick 时钟会让结果恒判过期（D12）。 */
             r.timestamp = hal_time();
@@ -82,9 +90,13 @@ static void fake_tick(uint32_t now_ms)
     }
 }
 
-static safe_err_t fake_enroll(void)
+static safe_err_t fake_enroll(const char * user_name)
 {
     if(s_enroll_job) return SAFE_ERR_BUSY;
+    s_enroll_name[0] = '\0';
+    if(user_name != NULL) {
+        strncpy(s_enroll_name, user_name, sizeof(s_enroll_name) - 1);
+    }
     s_enroll_job     = true;
     s_enroll_done_ms = 0;
     return SAFE_OK;

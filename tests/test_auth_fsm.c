@@ -95,6 +95,25 @@ static void add_expired_temp_user(void)
     CHECK(user_add(&u) == 0);
 }
 
+static void add_fr21_user(void)
+{
+    /* frank：FR-21 凭据一致性用例专用（face_id=12）。
+     * 单独建一个用户而不复用 alice/bob，是为了让「凭据被标失效」这个副作用
+     * 不污染其它用例（face_enable 一旦置 false，该用户的人脸通道就此关闭）。 */
+    safe_user_t u;
+    memset(&u, 0, sizeof(u));
+    u.id = user_next_id();
+    strcpy(u.name, "frank");
+    strcpy(u.role, "user");
+    uint8_t salt[16];
+    pin_hash("3456", salt, u.pin_hash);
+    test_salt_to_hex(salt, u.pin_salt);
+    u.enabled     = true;
+    u.face_id     = 12;
+    u.face_enable = true;
+    CHECK(user_add(&u) == 0);
+}
+
 int main(void)
 {
     setup_store();
@@ -252,6 +271,36 @@ int main(void)
     auth_fsm_submit_face(7, FACE_RES_TIMEOUT);
     auth_fsm_submit_face(7, FACE_RES_ERROR);
     CHECK(auth_fsm_fail_streak() == 0);
+
+    /* ---- 1.11 FR-21 防线 1（v1.4）：核对模组返回的用户名 ----
+     * 场景：模组说「这是 face_id=12 的用户」，但它报的名字必须与本地记录一致；
+     * 不一致意味着这张脸在模组侧绑的不是本地记录的这个人（换绑 / 冒用 / 模组被换过），
+     * 属「凭据失效」而非「用户敲错了」—— 所以拒绝开锁并把本地人脸凭据标记失效。 */
+    fsm_reset();
+    add_fr21_user();                                     /* frank, face_id=12 */
+    auth_fsm_submit_face_ex(12, FACE_RES_OK, "frank");   /* 名字一致 → 正常开锁 */
+    CHECK(auth_fsm_state() == FSM_UNLOCKED);
+
+    fsm_reset();
+    auth_fsm_submit_face_ex(12, FACE_RES_OK, "mallory"); /* 名字不符 → 拒绝 */
+    CHECK(auth_fsm_state() == FSM_DENY);
+    safe_user_t chk;
+    CHECK(user_find_by_face(12, &chk) == 0);             /* 绑定关系还在… */
+    CHECK(chk.face_enable == false);                     /* …但凭据已标记失效 */
+    CHECK(auth_fsm_fail_streak() == 0);                  /* 不一致不是暴力尝试：不计失败数 */
+
+    /* 凭据失效后，模组就算报对名字也不再放行（须管理员重新录入） */
+    fsm_reset();
+    auth_fsm_submit_face_ex(12, FACE_RES_OK, "frank");
+    CHECK(auth_fsm_state() == FSM_DENY);
+
+    /* 模组未提供名字（NULL / 空串）→ 跳过核对，不误伤历史凭据（旧模板没写名） */
+    fsm_reset();
+    auth_fsm_submit_face(7, FACE_RES_OK);                /* 兼容入口，内部 mod_name=NULL */
+    CHECK(auth_fsm_state() == FSM_UNLOCKED);
+    fsm_reset();
+    auth_fsm_submit_face_ex(7, FACE_RES_OK, "");
+    CHECK(auth_fsm_state() == FSM_UNLOCKED);
 
     TEST_RESULT();
 }

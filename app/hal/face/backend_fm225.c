@@ -186,6 +186,44 @@ static safe_err_t fm225_resend(void)
 }
 
 /* ---------------- 帧回调（face 线程内执行） ---------------- */
+
+/* 把 UTF-8 名字拷进定长字段，不切断多字节字符（放不下的整字丢弃，末尾补 NUL）。
+ * 模组侧 user_name 字段是 32B 定长，中文 3B/字 → 最多 10 字（30B），实际够用。 */
+static void copy_name_utf8(char * dst, size_t cap, const char * src)
+{
+    if(dst == NULL || cap == 0) return;
+    dst[0] = '\0';
+    if(src == NULL) return;
+    size_t n = 0;
+    while(src[n] != '\0' && n + 1 < cap) {
+        unsigned char c = (unsigned char)src[n];
+        size_t w = (c < 0x80u) ? 1u : ((c >= 0xF0u) ? 4u : ((c >= 0xE0u) ? 3u : 2u));
+        if(n + w > cap - 1) break;          /* 放不下则整字丢弃，不切半个字 */
+        n += w;
+    }
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+/* MR_* → safe_err_t（v1.4 / N3）：不再把失败原因坍缩成统一的 SAFE_ERR_FAIL。
+ * 手册的 MR 码各有语义，坍缩后 UI 只能报「失败」，FR-22「同一张脸只能绑一个用户」
+ * 也无从判定。映射遵循工程既有的「错误码统一」原则（§1.2）。 */
+static safe_err_t mr_to_err(uint8_t mr)
+{
+    switch(mr) {
+        case FM225_MR_SUCCESS:                return SAFE_OK;
+        case FM225_MR_FAILED4_INVALIDPARAM:   return SAFE_ERR_PARAM;
+        case FM225_MR_FAILED4_NOMEMORY:       return SAFE_ERR_NOMEM;
+        case FM225_MR_FAILED4_MAXUSER:        return SAFE_ERR_NOMEM;   /* 模板容量已满 */
+        case FM225_MR_FAILED4_UNKNOWNUSER:    return SAFE_ERR_NOENT;
+        case FM225_MR_FAILED4_FACEENROLLED:   return SAFE_ERR_EXIST;   /* 该脸已录入（FR-22） */
+        case FM225_MR_FAILED4_TIMEOUT:        return SAFE_ERR_TIMEOUT;
+        case FM225_MR_REJECTED:               return SAFE_ERR_STATE;   /* 被拒 / 时序不允许 */
+        case FM225_MR_ABORTED:                return SAFE_ERR_STATE;
+        default:                              return SAFE_ERR_FAIL;
+    }
+}
+
 /* MR_* → face_reason_t（规约 §5.20 映射表） */
 static face_reason_t mr_to_reason(uint8_t result)
 {
@@ -212,7 +250,12 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
             }
             printf("[fm225] NOTE READY：模组就绪\n");
         }
-        /* NID_FACE_STATE：录入/验证过程中的引导信息，本链路不消费（UI 引导留待后续） */
+        /* NID_FACE_STATE：录入/验证过程中的人脸状态引导流。实测（2026-09-15 真模组）帧长
+         * 17B = nid(1) + s_note_data_face{state,left,top,right,bottom,yaw,pitch,roll}
+         * （各 int16，手册 P24），约 2.1 条/秒；无人脸时 state = 1（FACE_STATE_NOFACE）。
+         * 这就是 FR-19「多方向交互录入的实时引导」现成的数据源（「请正对镜头」「距离太远」
+         * 不必再去问模组别的接口）。当前 UI 未消费 → 本链路暂不解析，但**不把它当垃圾帧**：
+         * 它同时是「模组在活跃工作」的证据，将来 FR-23 健康监测可复用。 */
         return;
     }
 
@@ -235,16 +278,26 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
         s_state = FM225_IDLE;
         face_reason_t reason = mr_to_reason(f->result);
         int32_t uid = -1;
-        if(reason == FACE_RES_OK && f->data_len >= 2) {
-            /* verify 成功携带 user_id_heb/user_id_leb（手册 REPLY mid=VERIFY） */
-            uid = (int32_t)(((uint16_t)f->data[0] << 8) | f->data[1]);
-        }
         face_result_t r;
         memset(&r, 0, sizeof(r));
+        if(reason == FACE_RES_OK && f->data_len >= 2) {
+            /* verify 成功应答 = s_msg_reply_verify_data（手册 P34）：
+             * user_id_heb(1) + user_id_leb(1) + user_name[32] + admin(1) + unlockStatus(1)。
+             * data 已剥掉 mid/result 前缀，故用户区自 data[0] 起。 */
+            uid = (int32_t)(((uint16_t)f->data[0] << 8) | f->data[1]);
+            if(f->data_len >= 34) {
+                /* v1.4（FR-21 防线 1）：把模组侧模板名带回去，供业务层核对该脸归属。
+                 * 字段 32B 定长且不保证 NUL 结尾 —— 拷满后强制补尾 0（极端情况下丢第 32
+                 * 字节；中文名 10 字 = 30B，实际碰不到）。 */
+                memcpy(r.user_name, f->data + 2, sizeof(r.user_name));
+                r.user_name[sizeof(r.user_name) - 1] = '\0';
+            }
+        }
         r.face_id   = (reason == FACE_RES_OK) ? uid : -1;
         r.reason    = reason;
         r.timestamp = hal_time();
-        printf("[fm225] verify 应答：reason=%s uid=%d\n", face_reason_name(reason), r.face_id);
+        printf("[fm225] verify 应答：reason=%s uid=%d name=\"%s\"\n",
+               face_reason_name(reason), r.face_id, r.user_name);
         face_service_emit(FACE_EV_DETECT, &r);
         /* verify 结束：不在应答回调里立刻续发下一轮——那等于零退避轮询，模组/模拟器
          * 连答时会被打成一串 no_match 洪泛（伪造失败计数 → 自锁）。改由 fm225_tick
@@ -255,13 +308,17 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
         s_state = FM225_IDLE;
         face_enroll_result_t r;
         memset(&r, 0, sizeof(r));
-        r.err = (f->result == FM225_MR_SUCCESS) ? SAFE_OK : SAFE_ERR_FAIL;
+        r.err = mr_to_err(f->result);
         if(r.err == SAFE_OK && f->data_len >= 2) {
             r.face_id = (int32_t)(((uint16_t)f->data[0] << 8) | f->data[1]);
         } else {
             r.face_id = -1;
         }
-        printf("[fm225] enroll 应答：err=%d uid=%d\n", r.err, r.face_id);
+        /* 同时打原始 MR 码：错误码是给 UI 的语义，MR 码是给排错用的现场。
+         * 注意：本文件在 hal 层，不得调 core 的 safe_err_str（hal→core 是反向依赖，
+         * 链接期会直接 undefined reference）——只打数值，语义由 UI 层翻译。 */
+        printf("[fm225] enroll 应答：err=%d mr=0x%02X uid=%d\n",
+               (int)r.err, f->result, r.face_id);
         face_service_emit(FACE_EV_ENROLL_DONE, &r);
         break;
     }
@@ -273,8 +330,9 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
         face_delete_result_t r;
         memset(&r, 0, sizeof(r));
         r.face_id = id;
-        r.err     = (f->result == FM225_MR_SUCCESS) ? SAFE_OK : SAFE_ERR_FAIL;
-        printf("[fm225] delete 应答：err=%d id=%d\n", r.err, r.face_id);
+        r.err     = mr_to_err(f->result);
+        printf("[fm225] delete 应答：err=%d mr=0x%02X id=%d\n",
+               (int)r.err, f->result, r.face_id);
         face_service_emit(FACE_EV_DELETE_DONE, &r);
         break;
     }
@@ -338,7 +396,11 @@ static safe_err_t fm225_start(void)
 static safe_err_t fm225_stop(void)
 {
     s_started = false;
-    /* FACE_RESET：模组终止当前命令回 STANDBY（手册 §MID_RESET） */
+    /* MID_RESET(0x10)：通用复位。实测（2026-09-15 真模组）：下发后约 26ms 回
+     * REPLY(result=0x00)，且进行中的 VERIFY 会话立即停止出 NOTE（静默终止，不回 ABORTED）
+     * —— 0x10 足以让会话停下来。
+     * 术语订正：本行原注释写作「FACE_RESET」，但手册里 0x10 是 MID_RESET（通用复位），
+     * MID_FACERESET 才是 0x23（终止「录入」并清录入状态），两者不是一回事。 */
     fm225_send_cmd(FM225_CMD_RESET, NULL, 0);
     s_state        = FM225_IDLE;
     s_pending_len  = 0;
@@ -392,13 +454,29 @@ static void fm225_tick(uint32_t now_ms)
     }
 }
 
-static safe_err_t fm225_enroll(void)
+static safe_err_t fm225_enroll(const char * user_name)
 {
     if(s_state == FM225_WAIT_ENROLL) return SAFE_ERR_BUSY;
-    /* ENROLL：admin=0（业务层另行记角色，模组 admin 标记不用），姓名 32B 全 0，
-     * 方向 UNDEFINE（模组按默认正向流程交互录入），timeout=10s */
+
+    /* ENROLL 载荷（手册 §六 H>>M，共 35B）：
+     *   p[0]     admin     = 0   角色由业务层记录，模组 admin 标记不用（实测 admin=0 被接受）
+     *   p[1..32] user_name 本地用户名 —— v1.4（FR-21 防线 1）：把名字写进模组侧模板，
+     *                      VERIFY 成功应答会原样带回，供业务层核对凭据归属
+     *   p[33]    face_dir  = 0x00（UNDEFINE，走默认正向交互录入。实测 2026-09-15：
+     *                      0x00 与 0x01(FACE_DIRECTION_MIDDLE) 行为完全一致，都进入录入流程
+     *                      并在 timeout 后回 MR_FAILED4_TIMEOUT，故维持 0x00）
+     *   p[34]    timeout   = FM225_ENROLL_TIMEOUT_S
+     *
+     * ★ 会话互斥实测（2026-09-15 真模组，勿据直觉改）：VERIFY 会话进行中下发 ENROLL，
+     *   模组**接受**新命令并抢占会话 —— ENROLL 自己走满 10s 超时后正常回 REPLY；
+     *   而被抢占的 VERIFY **静默终止、不回 REPLY（也没有 ABORTED）**。
+     *   所以「每个 VERIFY 必有应答」是错的假设；当前实现自洽靠的是 fm225_send_cmd 会把
+     *   s_pending_* 覆盖成新命令（VERIFY 的应答本就不会来）。若将来改成多 pending 并行，
+     *   必须同时处理「被抢占的会话永不应答」这件事。 */
     uint8_t p[35];
     memset(p, 0, sizeof(p));
+    copy_name_utf8((char *)(p + 1), 32, user_name);
+    p[33] = 0x00;
     p[34] = FM225_ENROLL_TIMEOUT_S;
     safe_err_t e = fm225_send_cmd(FM225_CMD_ENROLL, p, sizeof(p));
     s_state = (e == SAFE_OK) ? FM225_WAIT_ENROLL : FM225_IDLE;

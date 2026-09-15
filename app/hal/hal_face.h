@@ -39,7 +39,12 @@ typedef struct {
     int32_t       face_id;  /* -1 = 未识别到已注册人脸 */
     face_reason_t reason;   /* 结果原因码（取代旧 score 字段） */
     uint32_t      seq;      /* 帧序号，用于去重与调试 */
-    uint32_t      timestamp;/* hal_time() 时间戳 */
+    uint32_t      timestamp;/* hal_time() 时间戳（Unix 秒，不是进程起算秒，见 D12） */
+    /* 模组返回的用户名（v1.4 新增，FR-21 防线 1 的数据源）。
+     * FM225 的 VERIFY 成功应答按手册 P34 s_msg_reply_verify_data 携带 user_name[32]；
+     * 业务层用它核对「这张脸是不是它声称的那个人」。空串 = 模组未提供该名字
+     * （历史模板未写名 / 非 FM225 后端）——调用方必须跳过核对，不得据此判凭据失效。 */
+    char          user_name[32];
 } face_result_t;
 
 /* 原因码的可读名（日志 / RPC status 用），非法值返回 "unknown"。
@@ -101,8 +106,11 @@ safe_err_t face_service_start(void);
 safe_err_t face_service_stop(void);
 bool       face_service_running(void);
 
-/* 异步录入：立即返回，结果通过 FACE_EV_ENROLL_DONE 上报。 */
-safe_err_t face_service_enroll_async(void);
+/* 异步录入：立即返回，结果通过 FACE_EV_ENROLL_DONE 上报。
+ * user_name（v1.4）：本地用户名，由后端写入模组侧模板，使 VERIFY 应答能把它带回来
+ * 供 FR-21 凭据一致性核对（backend → face_result_t.user_name → auth_fsm）。
+ * 传 NULL 或空串 = 不写名（核对会自动跳过）。 */
+safe_err_t face_service_enroll_async(const char * user_name);
 
 /* 异步删除指定模板。 */
 safe_err_t face_service_delete_async(int32_t face_id);

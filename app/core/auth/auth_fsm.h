@@ -59,6 +59,13 @@ int              auth_fsm_lock_remaining(void);    /* 0 = 无锁定 */
 int              auth_fsm_fail_streak(void);
 
 void auth_fsm_submit_face(int32_t face_id, face_reason_t reason);  /* 注入一次人脸结果（HAL→FSM） */
+
+/* v1.4（FR-21 防线 1）：带「模组返回用户名」的注入变体。
+ * mod_name 为 NULL / 空串表示模组未提供名字（历史模板未写名、或非 FM225 后端）→ 跳过核对，
+ * 不得据此判失效，否则会让所有历史凭据一夜之间全部失效。
+ * 非空且与本地用户名不符 → 判凭据失效：拒绝开锁 + 防伪告警 + 本地人脸凭据标记失效
+ * （PIN / 动态码通道不受影响）。 */
+void auth_fsm_submit_face_ex(int32_t face_id, face_reason_t reason, const char * mod_name);
 void auth_fsm_submit_pin(const char * pin);            /* PIN 通道入口（主页键盘） */
 void auth_fsm_submit_otp(const char * code);           /* 动态码页提交 */
 void auth_fsm_cancel_otp(void);

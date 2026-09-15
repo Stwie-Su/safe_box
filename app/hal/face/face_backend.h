@@ -28,8 +28,11 @@ typedef struct face_backend {
      * 超时判定恒真（D1）。这是契约，不许改。 */
     void (*tick)(uint32_t now_ms);
 
-    /* 异步录入：返回 SAFE_OK 表示已受理，结果由 face_service_emit(FACE_EV_ENROLL_DONE) 上报 */
-    safe_err_t (*enroll)(void);
+    /* 异步录入：返回 SAFE_OK 表示已受理，结果由 face_service_emit(FACE_EV_ENROLL_DONE) 上报。
+     * user_name（v1.4）：本地用户名，后端应写入模组侧模板名（FM225 的 ENROLL 载荷
+     * 带 user_name[32] 字段），使 VERIFY 应答能带回该名供 FR-21 核对。后端可以忽略
+     * 该参数（不支持写名的后端），此时模组返回用户名为空、核对自动跳过。 */
+    safe_err_t (*enroll)(const char * user_name);
     safe_err_t (*delete_tpl)(int32_t face_id);
 
     /* 注入模拟结果，仅 FACE_CAP_INJECT 后端需要实现 */

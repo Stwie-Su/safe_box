@@ -1243,7 +1243,15 @@ static void face_start_cb(lv_event_t * e)
     (void)e;
     safe_err_t r;
     if (s_face_op == FACE_OP_ENROLL) {
-        r = face_service_enroll_async();          /* hal_face.h:104，立即返回 */
+        /* v1.4（FR-21 防线 1）：把用户名字带进模组，使 VERIFY 应答能带回该名做凭据核对。
+         * 这里读一次 store 属点击路径（非认证路径），与列表刷新同源；查不到就传空名
+         * —— 空名只会让核对跳过，不影响录入本身。 */
+        char uname[32] = {0};
+        safe_user_t uu;
+        if (s_face_pending_uid >= 0 && user_find_by_id(s_face_pending_uid, &uu) == 0) {
+            strncpy(uname, uu.name, sizeof(uname) - 1);
+        }
+        r = face_service_enroll_async(uname);     /* hal_face.h，立即返回 */
     } else if (s_face_op == FACE_OP_DELETE) {
         r = face_service_delete_async(s_face_pending_tpl);   /* hal_face.h:107 */
     } else {
@@ -1260,6 +1268,26 @@ static void face_start_cb(lv_event_t * e)
         s_face_pending_tpl = -1;
     }
     /* 发起成功：等 EV_FACE_EVENT 应答，由 on_face_event_ui 写回 + 刷新 */
+}
+
+/* 人脸操作失败原因 → 可操作提示（v1.4 / N3）。
+ * 后端现在按模组 MR_* 码给出可区分的 safe_err_t（如 SAFE_ERR_EXIST = 该脸已录入），
+ * UI 才有话可说；此前一律坍缩成 SAFE_ERR_FAIL，界面只能说「失败」，用户不知道下一步做什么。 */
+static const char * face_err_hint(bool enroll, safe_err_t e)
+{
+    switch (e) {
+        case SAFE_ERR_EXIST:   return enroll ? "这张脸已经录入过（同一张脸只能绑定一个用户）"
+                                             : "模组侧未完成删除，请重试";
+        case SAFE_ERR_NOMEM:   return enroll ? "模组模板已满，请先删除不需要的人脸"
+                                             : "模组内存不足";
+        case SAFE_ERR_PARAM:   return "模组拒绝了请求参数";
+        case SAFE_ERR_TIMEOUT: return enroll ? "录入超时：没有检测到人脸，请正对镜头"
+                                             : "模组响应超时";
+        case SAFE_ERR_NOENT:   return "模组侧没有该模板（可能已被清除）";
+        case SAFE_ERR_BUSY:    return "模组忙碌，请稍后重试";
+        case SAFE_ERR_STATE:   return "模组拒绝了该操作（当前状态不允许）";
+        default:               return enroll ? "录入失败，请重试" : "删除失败，请重试";
+    }
 }
 
 /* face_id 写回 users.json —— 文件 IO 下沉 worker 线程，主线程不阻塞（CLAUDE.md §8） */
@@ -1287,14 +1315,16 @@ static void on_face_event_ui(ev_topic_t topic, const void * payload, void * user
 
     const ev_face_event_t * e = (const ev_face_event_t *)payload;
     int tpl = -1;
+    safe_err_t fail_err = SAFE_OK;                    /* v1.4：失败原因，用于给可操作提示 */
+    bool was_enroll = (s_face_op == FACE_OP_ENROLL);
 
     if (e->ev == FACE_EV_ENROLL_DONE) {
         if (s_face_op != FACE_OP_ENROLL) return;      /* 不是本页发起的（如 RPC），只出横幅 */
-        if (e->enroll.err != SAFE_OK) tpl = -2;       /* 失败：不写回 */
+        if (e->enroll.err != SAFE_OK) { tpl = -2; fail_err = e->enroll.err; }  /* 失败：不写回 */
         else tpl = e->enroll.face_id;
     } else if (e->ev == FACE_EV_DELETE_DONE) {
         if (s_face_op != FACE_OP_DELETE) return;
-        if (e->del.err != SAFE_OK) tpl = -2;
+        if (e->del.err != SAFE_OK) { tpl = -2; fail_err = e->del.err; }
         else tpl = -1;                                /* 删除成功：清除绑定 */
     } else {
         return;
@@ -1305,7 +1335,11 @@ static void on_face_event_ui(ev_topic_t topic, const void * payload, void * user
     s_face_pending_uid = -1;
     s_face_pending_tpl = -1;
 
-    if (tpl == -2 || uid < 0) return;                 /* 失败：横幅已由 ui_feedback 出 */
+    if (tpl == -2 || uid < 0) {
+        /* 横幅由 ui_feedback 出（只说「失败」）；这里补一句能指导下一步操作的提示 */
+        if (fail_err != SAFE_OK) dlg_tip(face_err_hint(was_enroll, fail_err));
+        return;
+    }
 
     user_op_job_t * a = (user_op_job_t *)calloc(1, sizeof(*a));
     if (a == NULL) return;
