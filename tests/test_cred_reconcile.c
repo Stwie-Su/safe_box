@@ -53,7 +53,8 @@ int main(void)
     CHECK(chk.face_enable == true);
 
     add_user("bob",   2, true);    /* 本地绑定 face_id=2（模组清单里没有 → 孤儿） */
-    add_user("carol", -1, true);   /* 未绑定人脸 → 不是孤儿 */
+    add_user("carol", -1, true);   /* 故意传不一致态：face_id<0 且 enable=true，
+                                      存储层应归一化（user_add 入口不变式） */
 
     const int32_t mod[1] = { 1 };  /* 模组侧只有 face_id=1 */
 
@@ -68,7 +69,8 @@ int main(void)
     CHECK(chk.enabled == true);             /* 只标失效，不删 / 不停用用户 */
     CHECK(user_find_by_name("carol", &chk) == 0);
     CHECK(chk.face_id == -1);
-    CHECK(chk.face_enable == true);         /* 未绑定人脸：不许动 */
+    CHECK(chk.face_enable == false);        /* 构造传 true，但 face_id<0 ⟹ 存储层归一化为
+                                               false（不变式）；对账不许翻成 true */
 
     /* ---- 审计日志有记录（事件名 "ALARM"，与写入侧同大小写） ---- */
     log_entry_t * logs = NULL;

@@ -495,6 +495,11 @@ static bool parse_user_obj(const char *obj, safe_user_t *u)
     /* —— 阶段 1 新增字段：缺省给兼容默认值 —— */
     if (js_get_int(obj, "face_id", &v)) u->face_id = (int)v; else u->face_id = -1;
     js_get_bool(obj, "face_enable", &u->face_enable);
+    /* 不变式归一化（QA 三轮 A-#10）：face_id<0 ⟹ face_enable=false。
+     * 两字段在此各自独立读盘：旧固件的清绑路径（15a1456 之前 user_face_set(uid,-1)
+     * 不动 face_enable）或手工编辑会写出 face_id=-1 且 face_enable=true 的脏
+     * users.json，不归一化则不一致态被带进内存并被下次落盘原样回写。 */
+    if (u->face_id < 0) u->face_enable = false;
     js_get_bool(obj, "totp_enable", &u->totp_enable);
     js_get_str(obj, "totp_secret", u->totp_secret, sizeof(u->totp_secret));
     if (js_get_int(obj, "last_otp_counter", &v)) u->last_otp_counter = v;
@@ -663,6 +668,9 @@ int user_add(const safe_user_t *u)
     safe_user_t *nu = realloc(us, (size_t)(n + 1) * sizeof(safe_user_t));
     if (!nu) { user_list_free(us); return -1; }
     nu[n] = *u;
+    /* 不变式（QA 三轮 A-#10）：调用方传入的结构体同样强制归一化——
+     * 任何写路径都不得把 face_id<0 且 face_enable=true 的不一致态写进存储。 */
+    if (nu[n].face_id < 0) nu[n].face_enable = false;
     bool ok = save_users(nu, n + 1);
     user_list_free(nu);
     return ok ? 0 : -1;

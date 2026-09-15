@@ -159,6 +159,31 @@ int main(void)
         CHECK(old.use_limit == 0);
     }
 
+    /* ---- 旧数据兼容 #2：字段存在但互相矛盾的脏数据（QA 三轮 A-#10）----
+     * 旧固件清绑路径会写出 face_id=-1 且 face_enable=true 的 users.json；
+     * 加载边界必须归一化：face_id<0 ⟹ face_enable=false。 */
+    {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/users.json", store_dir());
+        FILE * fp = fopen(path, "w");
+        CHECK(fp != NULL);
+        fprintf(fp,
+                "{\"version\":1,"
+                "\"policy\":{\"pin_min_len\":4,\"pin_max_len\":8,\"max_failed\":5,"
+                "\"lock_seconds\":30,\"score_high\":85,\"score_mid\":60},"
+                "\"users\":[{\"id\":10,\"name\":\"dirtyuser\",\"role\":\"user\","
+                "\"pin_hash\":\"cc\",\"pin_salt\":\"dd\",\"auth_method\":\"pin\","
+                "\"enabled\":true,\"created_at\":\"2026-01-01T00:00:00\","
+                "\"failed_attempts\":0,\"lock_until\":0,"
+                "\"face_id\":-1,\"face_enable\":true}]}");
+        fclose(fp);
+
+        safe_user_t dirty;
+        CHECK(user_find_by_name("dirtyuser", &dirty) == 0);
+        CHECK(dirty.face_id == -1);
+        CHECK(dirty.face_enable == false);  /* 归一化：无绑定 ⟹ 通道停用 */
+    }
+
     /* ---- 日志 ---- */
     CHECK(log_append("UNLOCK", "carol2", 1, "test") == 0);
     log_entry_t * logs = NULL;
