@@ -115,6 +115,14 @@ safe_err_t face_service_enroll_async(const char * user_name);
 /* 异步删除指定模板。 */
 safe_err_t face_service_delete_async(int32_t face_id);
 
+/* 模组侧已注册用户清单（FR-21 防线 3「启动对账」用）。
+ * 返回：>= 0 模组清单数量（**可以是 0**，0 与「没取到」必须区分开）；
+ *       -1    该后端没有「模组清单」概念（fake / none）；
+ *       -2    后端有该能力但清单尚未取得（模组未就绪 / 尚未应答）。
+ * cap <= 0 时只查询数量（ids 可传 NULL）。
+ * 上层用它核对「本地凭据 ↔ 模组存量」，孤儿凭据（本地有、模组无）应标失效且不用于放行。 */
+int32_t face_service_module_users(int32_t * ids, int32_t cap);
+
 /* 最近一次识别结果；没有任何结果时返回 NULL。 */
 const face_result_t * face_service_last_result(void);
 

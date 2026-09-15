@@ -35,6 +35,11 @@ typedef struct face_backend {
     safe_err_t (*enroll)(const char * user_name);
     safe_err_t (*delete_tpl)(int32_t face_id);
 
+    /* 模组侧已注册用户清单（FR-21 防线 3「启动对账」用）。语义同 hal_face.h 的
+     * face_service_module_users：>=0 = 清单数量；-1 = 该后端无此概念；-2 = 尚未取得。
+     * 可为 NULL（视为 -1）。 */
+    int32_t (*module_users)(int32_t * ids, int32_t cap);
+
     /* 注入模拟结果，仅 FACE_CAP_INJECT 后端需要实现 */
     safe_err_t (*inject)(int32_t face_id, face_reason_t reason);
 } face_backend_t;

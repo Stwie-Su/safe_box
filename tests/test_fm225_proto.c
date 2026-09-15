@@ -287,6 +287,44 @@ static void test_timeout(void)
     CHECK(to2 == 0);   /* 半帧未被误杀 */
 }
 
+/* ---------------- 用例 5.5：0x24 长帧（实测 203B）必须能解出 ----------------
+ * 这是「只有真模组才暴露」的一类问题：PC 模拟器从不产生 >128B 的帧，
+ * 而真模组的 GET_ALL_USERID 应答就是 203 字节 —— 旧上限 128 会把整帧当坏帧丢弃，
+ * 对账功能静默失效（没有报错、没有告警，只是永远拿不到清单）。 */
+
+#define RECON_DATA_LEN (1 + 1 + 1 + 100 * 2)   /* mid + result + user_counts + 100×2 */
+
+static void test_get_all_userid_long_frame(void)
+{
+    uint8_t data[RECON_DATA_LEN];
+    memset(data, 0, sizeof(data));
+    data[0] = FM225_CMD_GET_ALL_USERID;   /* mid */
+    data[1] = FM225_MR_SUCCESS;           /* result */
+    data[2] = 2;                          /* user_counts */
+    data[3] = 0x00; data[4] = 0x01;       /* uid = 1   （高字节在前） */
+    data[5] = 0x01; data[6] = 0x2C;       /* uid = 300 */
+
+    static uint8_t raw[8 + RECON_DATA_LEN];
+    size_t n = build_frame(raw, FM225_MSGID_REPLY, data, (uint16_t)sizeof(data), NULL);
+    CHECK(n == sizeof(data) + 6);         /* 2 同步 + 1 msgid + 2 size + data + 1 xor */
+
+    recv_t r;
+    memset(&r, 0, sizeof(r));
+    fm225_proto_ctx_t ctx;
+    fm225_proto_init(&ctx, on_frame, &r);
+
+    fm225_proto_feed(&ctx, raw, n);       /* 一次喂完（真机也是一次 read 就拿到整帧） */
+
+    CHECK(r.n == 1);
+    CHECK(r.frames[0].msgid == FM225_MSGID_REPLY);
+    CHECK(r.frames[0].mid_or_nid == FM225_CMD_GET_ALL_USERID);
+    CHECK(r.frames[0].data_len == RECON_DATA_LEN - 2);   /* mid/result 已剥掉 */
+    CHECK(r.frames[0].data[0] == 2);                     /* user_counts */
+    CHECK(r.frames[0].data[1] == 0x00 && r.frames[0].data[2] == 0x01);   /* uid=1 */
+    CHECK(r.frames[0].data[3] == 0x01 && r.frames[0].data[4] == 0x2C);   /* uid=300 */
+    CHECK(fm225_proto_stats(&ctx, NULL, NULL, NULL) == 1);
+}
+
 /* ---------------- 用例 6：超长帧丢弃（Size > FM225_MAX_DATA） ---------------- */
 
 static void test_oversize_frame(void)
@@ -340,6 +378,7 @@ int main(void)
     test_bad_checksum();
     test_bad_checksum_resync_from_noise();
     test_timeout();
+    test_get_all_userid_long_frame();
     test_oversize_frame();
     test_empty_data_frame();
 

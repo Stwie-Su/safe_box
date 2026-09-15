@@ -803,9 +803,24 @@ static void face_update_header(void)
     if (caps == NULL || caps->name == NULL || strcmp(caps->name, "none") == 0) {
         snprintf(buf, sizeof(buf), "人脸后端未启用 · 仅显示摄像头预览");
     } else {
+        /* 模板数优先取**模组侧真实清单**（FR-21 启动对账的 0x24），而不是本地绑定数。
+         * v1.4 修正：界面曾长期显示「模板 1/1000」——那是「本地 face_id 绑定数」配
+         * 「硬编码上限 1000」拼出来的假象，模组里实际 0 个模板，还被人误读成
+         * 「模组已有 1 个模板」（与 WiFi mock 误判同族的教训：界面数字必须能追溯到硬件）。 */
         char tpl[24];
-        if (caps->max_templates < 0) snprintf(tpl, sizeof(tpl), "%d/不限", s_tpl_count);
-        else                         snprintf(tpl, sizeof(tpl), "%d/%d", s_tpl_count, caps->max_templates);
+        int32_t mod_n = face_service_module_users(NULL, 0);
+        if (mod_n >= 0) {
+            if (caps->max_templates < 0) snprintf(tpl, sizeof(tpl), "%d/不限", (int)mod_n);
+            else                         snprintf(tpl, sizeof(tpl), "%d/%d", (int)mod_n,
+                                                  caps->max_templates);
+        } else if (mod_n == -2 && caps->max_templates >= 0) {
+            /* 后端是模组、但清单还没取到（启动初期）：显式标「本地」，不给假精确值 */
+            snprintf(tpl, sizeof(tpl), "本地%d/%d", s_tpl_count, caps->max_templates);
+        } else {
+            if (caps->max_templates < 0) snprintf(tpl, sizeof(tpl), "%d/不限", s_tpl_count);
+            else                         snprintf(tpl, sizeof(tpl), "%d/%d", s_tpl_count,
+                                                  caps->max_templates);
+        }
         snprintf(buf, sizeof(buf), "后端 %s · 模板 %s · 健康：%s",
                  caps->name, tpl, face_health_str());
     }

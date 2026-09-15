@@ -32,6 +32,12 @@ static safe_err_t none_enroll(const char * user_name)
     return SAFE_ERR_UNSUP;
 }
 
+static int32_t none_module_users(int32_t * ids, int32_t cap)
+{
+    (void)ids; (void)cap;
+    return -1;                       /* 无模组清单概念 */
+}
+
 static safe_err_t none_inject(int32_t face_id, face_reason_t reason)
 {
     (void)face_id; (void)reason;
@@ -49,6 +55,7 @@ static const face_backend_t backend = {
     .tick          = NULL,
     .enroll        = none_enroll,
     .delete_tpl    = none_delete,
+    .module_users  = none_module_users,
     .inject        = none_inject,
 };
 

@@ -46,6 +46,11 @@ extern "C" {
 #define FM225_CMD_ENROLL        0x13u
 #define FM225_CMD_DELETE_USER   0x20u
 #define FM225_CMD_DELETE_ALL    0x21u
+/* 查询类命令（对账用，FR-21 防线 3）：
+ *   GETUSERINFO   按 uid 取单个用户信息（id + user_name[32] + admin）
+ *   GET_ALL_USERID 取「已注册数量 + 全部 ID 列表」（无 data 请求） */
+#define FM225_CMD_GETUSERINFO   0x22u
+#define FM225_CMD_GET_ALL_USERID 0x24u
 /* 终止录入并清除录入状态（手册 §六「录入过程中可通过 FACE RESET 指令终止录入，
  * 先前的录入状态也会清零」）。注意与 FM225_CMD_RESET(0x10 = MID_RESET，通用复位)
  * 不是一回事——代码注释曾把 0x10 称作 FACE RESET，属术语混用。 */
@@ -70,8 +75,14 @@ extern "C" {
 #define FM225_NID_READY       0x00u
 #define FM225_NID_FACE_STATE  0x01u
 
-/* 帧数据上限：识别链路只有短帧（REPLY/NOTE），IMAGE 不走本层 */
-#define FM225_MAX_DATA       128u
+/* 帧数据上限（v1.4：128 → 256）
+ *
+ * 128 装不下 GET_ALL_USERID 的应答：真机实测（2026-09-15）该帧 Size=0x00CB=203 字节
+ * （mid(1) + result(1) + user_counts(1) + users_id[100×2]），沿用 128 会把整帧当坏帧丢弃、
+ * 对账功能静默失效。**这是一条 PC 模拟器永远不产生、只有真模组才暴露的长帧**。
+ * IMAGE 传图（可达 64KB）仍不走本层（按坏帧重同步丢弃）。
+ * 代价：解析器 ctx 由 128B 涨到 256B（face 线程持一个静态 ctx，可忽略）。 */
+#define FM225_MAX_DATA       256u
 
 /* 帧内字节间超时（ms）：115200 波特率一字节约 87us，200ms 余量 2000+ 字节。
  * 超过该间隔无后续字节视为半帧作废（回 WAIT_SYNC0）。 */

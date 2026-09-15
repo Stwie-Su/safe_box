@@ -54,6 +54,8 @@
 #define FM225_SESSION_TIMEOUT_MS  ((FM225_VERIFY_TIMEOUT_S + 2u) * 1000u)
 #define FM225_MAX_RETRY          3      /* 超时重发上限，超过报 ERROR 放弃 */
 #define FM225_VERIFY_REARM_MS    2000   /* verify 会话断链后的重开退避 */
+#define FM225_RECON_RETRY_MS     1500   /* 0x24 清单查询的重试间隔（静默查询，无 ERROR 上报） */
+#define FM225_RECON_MAX_IDS      128    /* 本地缓存上限（实测模组容量 100） */
 
 typedef enum {
     FM225_IDLE = 0,
@@ -75,6 +77,12 @@ static uint8_t  s_retry;                   /* 已重发次数 */
 static int32_t  s_delete_id = -1;         /* 待删除 face_id（应答回填） */
 
 static fm225_proto_ctx_t s_proto;
+
+/* 模组侧已注册用户清单（0x24 应答缓存，FR-21 防线 3 对账用）。
+ * s_mod_id_count: -1 = 尚未取得；>=0 = 已取得（0 是合法值，必须与「没取到」区分）。 */
+static int32_t  s_mod_ids[FM225_RECON_MAX_IDS];
+static int32_t  s_mod_id_count = -1;
+static uint32_t s_recon_at_ms;             /* 上次发出清单查询的时刻（节流用） */
 
 /* ---------------- 帧下发 ---------------- */
 
@@ -159,6 +167,27 @@ static void fm225_close(void)
     if(s_uart_fd >= 0) close(s_uart_fd);
     s_uart_fd      = -1;
     s_pending_len  = 0;
+}
+
+/* 下发一条「不问结果」的即时查询（对账用）。
+ * 不走 fm225_send_cmd：那条路径会记 pending 并在超时后重发 + 报 FACE_EV_ERROR，
+ * 而清单查询失败属「尽力而为」，不该在界面弹错误横幅、更不该刷屏重发。 */
+static void fm225_send_silent(uint8_t cmd)
+{
+    const uint8_t frame[6] = { FM225_SYNC0, FM225_SYNC1, cmd, 0x00, 0x00, cmd };
+    fm225_send_raw(frame, sizeof(frame));   /* XOR = cmd ^ 0 ^ 0 = cmd */
+}
+
+/* 启动对账第一步：取模组用户清单（FR-21 防线 3）。
+ * 只在「空闲且无 pending」时发 —— 实测（2026-09-15）新命令会**抢占**进行中的会话，
+ * 且被抢占的会话静默无应答；识别链路优先，查询让路。 */
+static void fm225_recon_poll(uint32_t now_ms)
+{
+    if(s_mod_id_count >= 0) return;                     /* 已取得，不再查 */
+    if(!s_started || s_pending_len > 0 || s_state != FM225_IDLE) return;
+    if(s_recon_at_ms != 0 && (now_ms - s_recon_at_ms) < FM225_RECON_RETRY_MS) return;
+    s_recon_at_ms = now_ms;
+    fm225_send_silent(FM225_CMD_GET_ALL_USERID);
 }
 
 /* face 线程接入点（§5.19）：start 时把 fd 借给 face 线程 poll。 */
@@ -248,6 +277,9 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
                 s_state        = FM225_IDLE;
                 s_pending_len = 0;
             }
+            /* 模组可能刚重启（断电期间模板被人改过是可能的）→ 清单作废、重新取一次 */
+            s_mod_id_count = -1;
+            s_recon_at_ms  = 0;
             printf("[fm225] NOTE READY：模组就绪\n");
         }
         /* NID_FACE_STATE：录入/验证过程中的人脸状态引导流。实测（2026-09-15 真模组）帧长
@@ -264,9 +296,12 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
     /* REPLY 应答受理策略：
      *  - VERIFY 一律受理——模组一个会话只有一条 VERIFY 在飞，迟到/跨重发应答
      *    比丢弃好（模组侧已出结果，丢了就永远丢）；
+     *  - GET_ALL_USERID 一律受理——它是「静默查询」（fm225_send_silent 不记 pending），
+     *    若按 pending 过滤会被整条丢掉，对账永远拿不到清单；
      *  - ENROLL/DELETE 须对上 pending 命令——防与其它命令应答串话；无 pending
      *    时的迟到应答丢弃（作业早已超时上报）。 */
     if(f->mid_or_nid != FM225_CMD_VERIFY &&
+       f->mid_or_nid != FM225_CMD_GET_ALL_USERID &&
        (s_pending_len == 0 || f->mid_or_nid != s_pending_cmd)) return;
     if(s_pending_len != 0 && f->mid_or_nid == s_pending_cmd) {
         s_pending_len   = 0;                 /* 应答落地，停止重发计时 */
@@ -336,6 +371,29 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
         face_service_emit(FACE_EV_DELETE_DONE, &r);
         break;
     }
+    case FM225_CMD_GET_ALL_USERID: {
+        /* 应答 = mid(1) + result(1) + user_counts(1) + users_id[N*2]（每个 ID 先存高八位）
+         * 手册 §MID_GET_ALL_USERID；实测（2026-09-15）data 203B、容量 100。
+         * 注意 data_len 已剥掉 mid/result，故：data[0]=user_counts。 */
+        s_state = FM225_IDLE;
+        int32_t cnt = 0;
+        if(f->result == FM225_MR_SUCCESS && f->data_len >= 3) {
+            cnt = (int32_t)f->data[2];
+            int32_t avail = (int32_t)((f->data_len - 3) / 2);
+            if(cnt > avail) cnt = avail;                  /* 声明多于实际：按实际截断，不越界读 */
+            if(cnt > FM225_RECON_MAX_IDS) cnt = FM225_RECON_MAX_IDS;
+            for(int32_t i = 0; i < cnt; i++) {
+                s_mod_ids[i] = (int32_t)(((uint16_t)f->data[3 + i * 2] << 8) |
+                                          (uint16_t)f->data[4 + i * 2]);
+            }
+        }
+        s_mod_id_count = cnt;
+        printf("[fm225] 模组用户清单：%d 个（应答 data %u 字节）\n",
+               (int)s_mod_id_count, (unsigned)f->data_len);
+        for(int32_t i = 0; i < cnt && i < 8; i++)
+            printf("         uid[%d] = %d\n", (int)i, (int)s_mod_ids[i]);
+        break;
+    }
     default:
         break;   /* 其余命令的应答（GET_STATUS 等）：不消费 */
     }
@@ -349,6 +407,8 @@ static safe_err_t fm225_init(void)
     s_started      = false;
     s_pending_len  = 0;
     s_delete_id    = -1;
+    s_mod_id_count = -1;      /* 清单未取得 */
+    s_recon_at_ms  = 0;
 
     fm225_proto_init(&s_proto, on_fm225_frame, NULL);
 
@@ -411,6 +471,9 @@ static void fm225_tick(uint32_t now_ms)
 {
     /* 协议状态机半帧超时推进（feed 在 face 线程，tick 在主线程，见 §5.20 线程模型） */
     fm225_proto_tick(&s_proto, now_ms);
+
+    /* 启动对账：空闲时取一次模组用户清单（FR-21 防线 3） */
+    fm225_recon_poll(now_ms);
 
     /* 命令应答超时重发。now_ms 与 s_pending_at_ms 同为 hal_time_ms() 同源单调毫秒，
      * 差值才是真实等待时长（D1 前：20ms 自增计数 vs 绝对 ms 跨基 → 回绕后恒真）。
@@ -498,6 +561,17 @@ static safe_err_t fm225_delete_tpl(int32_t face_id)
 }
 
 /* 真实模组不支持注入，调用方应在调用前查 FACE_CAP_INJECT */
+/* 模组侧已注册用户清单（FR-21 防线 3）。语义见 hal_face.h。 */
+static int32_t fm225_module_users(int32_t * ids, int32_t cap)
+{
+    if(s_mod_id_count < 0) return -2;                 /* 有能力，但尚未取得 */
+    if(ids != NULL && cap > 0) {
+        int32_t n = (s_mod_id_count < cap) ? s_mod_id_count : cap;
+        for(int32_t i = 0; i < n; i++) ids[i] = s_mod_ids[i];
+    }
+    return s_mod_id_count;
+}
+
 static safe_err_t fm225_inject(int32_t face_id, face_reason_t reason)
 {
     (void)face_id; (void)reason;
@@ -507,7 +581,11 @@ static safe_err_t fm225_inject(int32_t face_id, face_reason_t reason)
 static const face_backend_t backend = {
     .name          = "fm225",
     .caps          = FACE_CAP_DETECT | FACE_CAP_ENROLL | FACE_CAP_DELETE | FACE_CAP_LIVENESS,
-    .max_templates = 1000,
+    /* 容量上限（v1.4 修正，原为硬编码 1000）：实测 0x24 应答 payload = 201B
+     * = user_counts(1) + 100×2 → 模组实际可容纳 100 个用户；手册命令表写
+     * MAX_USER_COUNTS=50，与实测不符 —— 以实测为准（若固件升级需复测）。
+     * 原来的 1000 无任何依据，会让界面长期显示「n/1000」这种假精确。 */
+    .max_templates = 100,
     .init          = fm225_init,
     .deinit        = fm225_deinit,
     .start         = fm225_start,
@@ -515,6 +593,7 @@ static const face_backend_t backend = {
     .tick          = fm225_tick,
     .enroll        = fm225_enroll,
     .delete_tpl    = fm225_delete_tpl,
+    .module_users  = fm225_module_users,
     .inject        = fm225_inject,
 };
 

@@ -110,6 +110,13 @@ static safe_err_t fake_delete_tpl(int32_t face_id)
     return SAFE_OK;
 }
 
+/* fake 后端没有「模组清单」概念：返回 -1（上层据此回退用本地绑定数显示）。 */
+static int32_t fake_module_users(int32_t * ids, int32_t cap)
+{
+    (void)ids; (void)cap;
+    return -1;
+}
+
 static safe_err_t fake_inject(int32_t face_id, face_reason_t reason)
 {
     if(reason < FACE_RES_OK || reason > FACE_RES_ERROR) return SAFE_ERR_PARAM;
@@ -131,6 +138,7 @@ static const face_backend_t backend = {
     .tick          = fake_tick,
     .enroll        = fake_enroll,
     .delete_tpl    = fake_delete_tpl,
+    .module_users  = fake_module_users,
     .inject        = fake_inject,
 };
 

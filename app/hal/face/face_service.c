@@ -157,6 +157,13 @@ safe_err_t face_service_enroll_async(const char * user_name)
     return e;
 }
 
+int32_t face_service_module_users(int32_t * ids, int32_t cap)
+{
+    /* 后端未编入实现 → 视为「无此概念」（-1）；有实现但尚未取得 → 由后端返回 -2 */
+    if(s_backend == NULL || s_backend->module_users == NULL) return -1;
+    return s_backend->module_users(ids, cap);
+}
+
 safe_err_t face_service_delete_async(int32_t face_id)
 {
     if(s_backend == NULL) return SAFE_ERR_STATE;
