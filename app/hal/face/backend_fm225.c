@@ -438,18 +438,16 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
     case FM225_CMD_GET_ALL_USERID: {
         /* 应答 = mid(1) + result(1) + user_counts(1) + users_id[N*2]（每个 ID 先存高八位）
          * 手册 §MID_GET_ALL_USERID；实测（2026-09-15）data 203B、容量 100。
-         * 注意 data_len 已剥掉 mid/result，故：data[0]=user_counts。 */
+         * 解析委托给纯函数 fm225_parse_userid_list()：它吃的正是「已剥掉 mid/result
+         * 前缀后的 Data 区」（f->data / f->data_len），data[0] 即 user_counts。
+         * ⚠️ 历史缺陷（QA 复核 高危#1）：本分支曾直接读 data[2]/data[3..]，等于把
+         * user_counts 当成 data[2]、整体错位 2 字节 —— 空模块（全 0）恰好掩盖了它，
+         * 真机非空清单会漏掉用户 / 把 uid 读成垃圾。抽函数 + 单测固化防复发。 */
         s_state = FM225_IDLE;
         int32_t cnt = 0;
-        if(f->result == FM225_MR_SUCCESS && f->data_len >= 3) {
-            cnt = (int32_t)f->data[2];
-            int32_t avail = (int32_t)((f->data_len - 3) / 2);
-            if(cnt > avail) cnt = avail;                  /* 声明多于实际：按实际截断，不越界读 */
-            if(cnt > FM225_RECON_MAX_IDS) cnt = FM225_RECON_MAX_IDS;
-            for(int32_t i = 0; i < cnt; i++) {
-                s_mod_ids[i] = (int32_t)(((uint16_t)f->data[3 + i * 2] << 8) |
-                                          (uint16_t)f->data[4 + i * 2]);
-            }
+        if(f->result == FM225_MR_SUCCESS) {
+            cnt = (int32_t)fm225_parse_userid_list(f->data, f->data_len,
+                                                   s_mod_ids, FM225_RECON_MAX_IDS);
         }
         s_mod_id_count = cnt;
         printf("[fm225] 模组用户清单：%d 个（应答 data %u 字节）\n",

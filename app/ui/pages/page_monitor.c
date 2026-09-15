@@ -18,7 +18,7 @@
  *   - 注册用户：user_load_all() 计数
  *   - 今日事件：log_query() 全量后按当天日期过滤计数
  *   - 人脸识别：user_load_all() 中 face_enable && face_id>=0 的人数
- *   - 存储占用：statvfs() 统计数据目录所在文件系统的已用百分比
+ *   - 存储占用：hal_storage_used_pct(store_dir()) 统计数据目录所在文件系统的已用百分比
  *   - 最近事件：log_query() 返回「倒序（最新在前）」，取前 4 条
  *   - 最后开启：log_query("UNLOCK", 1) 的第一条
  *     （旧版写的是小写 "unlock"，与 auth_fsm.c 实际写入的 "UNLOCK" 不匹配，
@@ -39,12 +39,12 @@
 #include "core/support/worker.h"
 #include "core/auth/auth_fsm.h"
 #include "hal/hal_actuator.h"
+#include "hal/hal_storage.h"  /* 存储占用：平台调用 statvfs 收进 hal，ui 不碰平台实现头 */
 #include "hal/hal_time.h"     /* R2：时间源统一走 HAL，不直接读系统时钟 */
 #include <time.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/statvfs.h>      /* 存储占用：统计真实文件系统使用率 */
 
 #define EV_ROWS   4           /* 最近事件最多展示行数（= 预建行数） */
 
@@ -494,14 +494,13 @@ static int count_today_events(void)
     return cnt;
 }
 
-/* 存储占用：统计数据目录所在文件系统的已用百分比（真实值，非占位） */
+/* 存储占用：统计数据目录所在文件系统的已用百分比（真实值，非占位）。
+ * 平台调用（statvfs）已下沉到 hal_storage_used_pct()，ui 层不再直接 <sys/statvfs.h>
+ * —— 分层检查禁止 ui 出现平台实现头。 */
 static int storage_used_pct(void)
 {
-    struct statvfs vfs;
-    if (statvfs(store_dir(), &vfs) != 0) return 0;
-    if (vfs.f_blocks == 0) return 0;
-    uint64_t used = (uint64_t)(vfs.f_blocks - vfs.f_bfree);
-    return (int)((used * 100u) / (uint64_t)vfs.f_blocks);
+    int pct = hal_storage_used_pct(store_dir());
+    return pct < 0 ? 0 : pct;   /* 无法查询按 0%（与旧 statvfs 失败时行为一致） */
 }
 
 /* 时间格式化：今天 → "今天 HH:MM"；昨天 → "昨天 HH:MM"；更早 → "MM-DD HH:MM" */

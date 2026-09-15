@@ -125,6 +125,21 @@ void fm225_proto_tick(fm225_proto_ctx_t * ctx, uint32_t now_ms);
 size_t fm225_proto_stats(const fm225_proto_ctx_t * ctx,
                          size_t * bad_checksum, size_t * resync, size_t * timeout);
 
+/* ---------------- 业务载荷解析（纯函数） ----------------
+ *
+ * GET_ALL_USERID(0x24) 应答载荷解析。入参 data/data_len 是【已剥掉 REPLY 的
+ * mid/result 前缀】的 Data 区（即 fm225_frame_t.data / data_len）：
+ *   data[0]           = user_counts（声明的用户数，1B）
+ *   data[1 .. 1+2n-1] = n 个「高字节在前」的 16 位 uid（每 2B 一个）
+ * 本函数只认「剥前缀后的视图」——若把 mid/result 也算进来就会整体错位 2 字节
+ * （backend_fm225.c 曾因此读 data[2]、把空模块的 0 当成数量而掩盖问题）。抽成
+ * 纯函数以便脱离串口单测固化边界：声明量>实际、空清单、奇数尾字节、缓冲上限。
+ *
+ * 容错：声明量 > 实际可容纳 uid 数时按实际截断（绝不越界读）；data=NULL/data_len<1/
+ * data[0]<=0 返回 0；cap 为 ids 缓冲容量（<0 视为 0）。返回解析出的 uid 个数（>= 0）。 */
+int fm225_parse_userid_list(const uint8_t * data, uint16_t data_len,
+                            int32_t * ids, int32_t cap);
+
 /* 内部状态（外部只分配，不直接访问；定义放 .c 里防扩散实现细节）。
  * 尺寸对齐 4 字节方便静态/栈上分配。 */
 struct fm225_proto_ctx {

@@ -173,3 +173,31 @@ size_t fm225_proto_stats(const fm225_proto_ctx_t * ctx,
     if(timeout)       *timeout     = ctx->timeouts;
     return ctx->frames;
 }
+
+/* GET_ALL_USERID(0x24) 应答载荷解析（纯函数，见头文件契约）。
+ * 契约核心：data 是【已剥掉 mid/result】的 Data 区，data[0] = user_counts。 */
+int fm225_parse_userid_list(const uint8_t * data, uint16_t data_len,
+                            int32_t * ids, int32_t cap)
+{
+    if(data == NULL || data_len < 1) return 0;
+
+    int32_t declared = (int32_t)data[0];              /* user_counts */
+    if(declared <= 0) return 0;
+
+    /* 除 user_counts 外每 2B 一个 uid：可容纳数 = (data_len - 1) / 2
+     * （商向下取整 → 奇数个尾字节是半个 uid，自然被忽略，不越界读）。 */
+    int32_t avail = (int32_t)((data_len - 1) / 2);
+    if(cap < 0) cap = 0;
+
+    int32_t cnt = declared;
+    if(cnt > avail) cnt = avail;                      /* 声明多于实际：按实际截断 */
+    if(cnt > cap)   cnt = cap;                        /* 输出缓冲上限 */
+
+    if(ids != NULL) {
+        for(int32_t i = 0; i < cnt; i++) {
+            ids[i] = (int32_t)(((uint16_t)data[1 + i * 2] << 8) |
+                                (uint16_t)data[2 + i * 2]);
+        }
+    }
+    return (int)cnt;
+}

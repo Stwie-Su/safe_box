@@ -325,6 +325,53 @@ static void test_get_all_userid_long_frame(void)
     CHECK(fm225_proto_stats(&ctx, NULL, NULL, NULL) == 1);
 }
 
+/* ---------------- 用例 5.6：0x24 应答「剥前缀视图」解析（纯函数） ----------------
+ * backend_fm225.c 的 0x24 分支修好后调用 fm225_parse_userid_list()，这里直接单测它。
+ * 关键约定：fm225_proto 已把 REPLY 的 mid/result 前缀剥掉，所以喂进来的 data[0] 就是
+ * user_counts —— 这正是旧实现读 data[2] 错位的根因（空模块全 0 时被掩盖）。 */
+static void test_parse_userid_list(void)
+{
+    int32_t ids[8];
+
+    /* (a) 真机形状：data_len=201（203B 帧剥掉 mid/result），counts=2，uid={1,300} */
+    uint8_t d_a[201];
+    memset(d_a, 0, sizeof(d_a));
+    d_a[0] = 2;
+    d_a[1] = 0x00; d_a[2] = 0x01;   /* uid = 1   */
+    d_a[3] = 0x01; d_a[4] = 0x2C;   /* uid = 300 */
+    memset(ids, 0, sizeof(ids));
+    CHECK(fm225_parse_userid_list(d_a, sizeof(d_a), ids, 8) == 2);
+    CHECK(ids[0] == 1);
+    CHECK(ids[1] == 300);
+
+    /* (b) 空清单（空模块）：counts=0 -> 0 个 */
+    const uint8_t d_b[] = { 0 };
+    CHECK(fm225_parse_userid_list(d_b, sizeof(d_b), ids, 8) == 0);
+
+    /* (c) 截断：声明 200 个但只带了 3 个 uid -> 按实际 3 个，绝不越界读 */
+    const uint8_t d_c[] = { 200, 0x00,0x07, 0x00,0x08, 0x00,0x09 };
+    memset(ids, 0, sizeof(ids));
+    CHECK(fm225_parse_userid_list(d_c, sizeof(d_c), ids, 8) == 3);
+    CHECK(ids[0] == 7 && ids[1] == 8 && ids[2] == 9);
+
+    /* (d) 输出缓冲上限：声明 2、cap=1 -> 只回 1 个 */
+    const uint8_t d_d[] = { 2, 0x00,0x01, 0x01,0x2C };
+    memset(ids, 0, sizeof(ids));
+    CHECK(fm225_parse_userid_list(d_d, sizeof(d_d), ids, 1) == 1);
+    CHECK(ids[0] == 1);
+
+    /* (e) 边界：NULL / data_len=0 / 只有 counts 无 uid -> 0，不崩 */
+    CHECK(fm225_parse_userid_list(NULL, 0, ids, 8) == 0);
+    const uint8_t d_e[] = { 5 };                       /* 声明 5 个却没带字节 */
+    CHECK(fm225_parse_userid_list(d_e, sizeof(d_e), ids, 8) == 0);
+
+    /* (f) 奇数尾字节（半个 uid）应被忽略：声明 2 个但只够 1 个完整 uid */
+    const uint8_t d_f[] = { 2, 0x00,0x01, 0x02 };
+    memset(ids, 0, sizeof(ids));
+    CHECK(fm225_parse_userid_list(d_f, sizeof(d_f), ids, 8) == 1);
+    CHECK(ids[0] == 1);
+}
+
 /* ---------------- 用例 6：超长帧丢弃（Size > FM225_MAX_DATA） ---------------- */
 
 static void test_oversize_frame(void)
@@ -379,6 +426,7 @@ int main(void)
     test_bad_checksum_resync_from_noise();
     test_timeout();
     test_get_all_userid_long_frame();
+    test_parse_userid_list();
     test_oversize_frame();
     test_empty_data_frame();
 

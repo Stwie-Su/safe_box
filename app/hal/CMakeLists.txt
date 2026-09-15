@@ -15,6 +15,7 @@ set(SAFE_HAL_SRC
     time/time_rtc.c
     actuator/actuator_service.c
     actuator/actuator_mock.c
+    storage/storage_service.c
     camera/camera_service.c
     camera/camera_null.c
     camera/camera_v4l2.c)

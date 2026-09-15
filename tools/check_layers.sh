@@ -30,7 +30,7 @@ out=$(grep -rn 'MQTTAsync\|paho' app/ui --include='*.c' --include='*.h')
 [ -n "$out" ] && { echo "$out" | report "ui 出现 MQTT 底层实现"; } || echo "  [OK] ui 不接触 MQTT 底层"
 
 # 4. hal 公共头文件不含平台实现头
-for h in app/hal/hal_face.h app/hal/hal_time.h app/hal/hal_actuator.h app/hal/hal_camera.h; do
+for h in app/hal/hal_face.h app/hal/hal_time.h app/hal/hal_actuator.h app/hal/hal_camera.h app/hal/hal_storage.h; do
     out=$(grep -nE '#include\s+["<](linux/|SDL2/|sys/|termios|unistd\.h)' "$h")
     [ -n "$out" ] && { echo "$out" | report "$h 含平台头文件"; } || echo "  [OK] $h 干净"
 done

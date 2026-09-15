@@ -102,6 +102,26 @@ int main(void)
         CHECK(strcmp(u.role, "user") == 0);
         CHECK(u.pin_hash[0] != '\0');
         CHECK(pin_check("8888", u.pin_salt, u.pin_hash) == 0);
+
+        /* QA 复核 高危#2：凭据恢复路径 —— 绑定有效模板号时必须把 face_enable 置回 true，
+         * 否则「重新录入人脸」后 auth_fsm.resolve() 仍按 face_enable==false 永久拒绝开锁。 */
+        CHECK(user_find_by_id(carol_id, &u) == 0);
+        u.face_enable = false;                     /* 模拟：名字核对不符 / 对账标孤儿 置失效 */
+        u.face_id     = -1;                        /* 同时解除旧绑定 */
+        CHECK(user_update(&u) == 0);
+        CHECK(user_find_by_id(carol_id, &got) == 0);
+        CHECK(got.face_enable == false);
+
+        CHECK(user_face_set(carol_id, 30) == 0);   /* 重新录入 -> 写回模板号 30 */
+        CHECK(user_find_by_id(carol_id, &got) == 0);
+        CHECK(got.face_id == 30);
+        CHECK(got.face_enable == true);            /* 恢复：人脸通道被重新启用 */
+
+        /* 清除绑定（-1）不改 face_enable（避免与「管理员开关」语义互相覆盖） */
+        CHECK(user_face_set(carol_id, -1) == 0);
+        CHECK(user_find_by_id(carol_id, &got) == 0);
+        CHECK(got.face_id == -1);
+        CHECK(got.face_enable == true);            /* 保持 true，不被清除动作改动 */
     }
 
     /* ---- 旧数据兼容：缺人脸/TOTP 字段的 JSON 反序列化给默认值 ---- */

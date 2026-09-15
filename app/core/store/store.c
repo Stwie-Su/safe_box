@@ -744,6 +744,13 @@ int user_face_set(int user_id, int face_id)
         }
     }
     us[idx].face_id = face_id;
+    /* 绑定/重绑有效模板号（face_id >= 0）时顺带启用该用户的人脸通道 —— 这是「凭据
+     * 恢复」路径。face_enable 会被三条通道置 false：auth_fsm 的名字核对不符
+     * （FR-21 防线 1）、启动对账标孤儿（FR-21 防线 3）、管理员手动关闭。若此处只写
+     * face_id 不写 face_enable，用户重新录入人脸后 resolve() 仍会因 face_enable==false
+     * 永久拒绝（QA 复核 高危#2：真机复录后无法人脸开锁）。
+     * face_id < 0（清除绑定）时不动 face_enable：不与「管理员开关」语义互相覆盖。 */
+    if (face_id >= 0) us[idx].face_enable = true;
 
     bool ok = save_users(us, n);
     user_list_free(us);

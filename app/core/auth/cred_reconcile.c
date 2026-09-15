@@ -25,7 +25,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "core/event_bus.h"
 #include "core/store/store.h"
 #include "core/support/worker.h"
 #include "hal/hal_face.h"
@@ -103,8 +102,10 @@ static void cred_reconcile_done(void * p)
     cred_recon_job_t * job = (cred_recon_job_t *)p;
     if(job->changed > 0) {
         printf("[recon] 启动对账完成：%d 条孤儿凭据已标记失效\n", job->changed);
-        /* 让 UI（用户页 / 主页统计）刷新；EV_USER_CHANGED 无 payload（按需订阅）。 */
-        event_bus_publish(EV_USER_CHANGED, NULL);
+        /* 这里**不**广播 EV_USER_CHANGED —— 全工程没有任何订阅者，属死代码
+         * （QA 复核 低危#3）。UI 的「最后开启 / 用户数」等统计各有独立定时器刷新，
+         * 对账结果最迟一个刷新周期内可见，无需事件驱动。
+         * （若将来确有订阅者，再连同 event_bus.h 一起恢复，勿单留一条空广播。） */
     }
     free(job);
 }
@@ -113,15 +114,23 @@ void cred_reconcile_tick(void)
 {
     if(s_done) return;                                   /* 只跑一次（幂等） */
 
-    int32_t count = face_service_module_users(NULL, 0);
-    if(count < 0) return;                                /* -1 无此概念 / -2 尚未取得：不触发 */
-    if(count > CRED_RECON_MAX_IDS) count = CRED_RECON_MAX_IDS;
-
+    /* 一次性取「数量 + 清单」——**必须单次调用**：此前分两次调用（先以
+     * face_service_module_users(NULL,0) 取 count，再取 ids）之间存在竞态
+     * （QA 复核 低危#4）——首次取完 count 后，face 线程若收到 NOTE READY 会把
+     * s_mod_id_count 复位成 -1，第二次取 ids 即返回 -2 且**不写** job->ids（全 0）；
+     * 于是 job->count >= 0 而 ids 全 0，对账把所有已绑定用户误判成孤儿、整片标失效。
+     * 合并成一次调用后 count 与 ids 取自同一快照，窗口消失。 */
     cred_recon_job_t * job = (cred_recon_job_t *)calloc(1, sizeof(*job));
     if(job == NULL) return;                              /* 分配失败：下个 tick 再试，不算已跑 */
-    job->count = count;
-    if(count > 0) face_service_module_users(job->ids, count);
 
+    int32_t count = face_service_module_users(job->ids, CRED_RECON_MAX_IDS);
+    if(count < 0) {                                      /* -1 无此概念 / -2 尚未取得：不触发 */
+        free(job);
+        return;
+    }
+    if(count > CRED_RECON_MAX_IDS) count = CRED_RECON_MAX_IDS;   /* 与已写入的 ids 数对齐 */
+
+    job->count = count;
     s_done = true;                                       /* 投递即置位：杜绝重复对账 */
     worker_post(cred_reconcile_worker, job, cred_reconcile_done);
 }
