@@ -300,8 +300,28 @@ static void fm225_fg_tick(uint32_t now_ms)
     }
 }
 
+/* 本轮是否「向模组要过东西」—— 只有在这种轮次里，「没收到应答」才是故障信号。
+ *
+ * 背景（FR-27 后识别改为界面按钮单次触发）：空闲期模组**故意**完全静默，不发任何
+ * 帧。若仍按「连续 N 轮无帧」判不健康，空闲 15s 必然误报 —— 真机实测（2026-09-16）
+ * 日志就是「模组用户清单：0 个（应答 data 201 字节）」之后紧接着
+ * 「模组健康：健康 -> 不健康」，模组明明在答，界面却显示「模组无响应」。
+ * 判据因此改成：**没提问，就无所谓无应答**。
+ *
+ * 计入的三类「有在途期待」：
+ *   1) s_pending_len > 0            已下发命令、还没收到它的 REPLY；
+ *   2) s_state != FM225_IDLE        会话进行中（录入/验证/删除），模组应持续上报 NOTE；
+ *   3) s_mod_id_count < 0           启动对账的 0x24 清单查询还没拿到结果。
+ *      ★ 这一项保住「上电即失联」的检测：它对账应答永远不会来，必须能判死。
+ * 不计入：FR-27 空闲静默期（对账已完成、无在途命令）。 */
+static bool fm225_health_expecting_reply(void)
+{
+    return (s_pending_len > 0) || (s_state != FM225_IDLE) || (s_mod_id_count < 0);
+}
+
 /* 健康监测（主线程 20ms tick 驱动，FR-23，不新增线程）：以 5s 为一轮，连续 3 轮（≈15s）
- * 内没有任何合法帧 → 不健康；本轮内收到过帧即清零连无应答计数并立即恢复。 */
+ * **在向模组要过东西的前提下**没收到任何合法帧 → 不健康；本轮内收到过帧即清零
+ * 连无应答计数并立即恢复。空闲静默轮不计数（详见 fm225_health_expecting_reply）。 */
 static void fm225_health_tick(uint32_t now_ms)
 {
     if(!s_health_monitor) return;
@@ -321,6 +341,8 @@ static void fm225_health_tick(uint32_t now_ms)
     if((now_ms - s_health_round_at_ms) < FM225_HEALTH_ROUND_MS) return;   /* 本轮未结束 */
 
     s_health_round_at_ms = now_ms;         /* 一轮无应答结束 */
+    if(!fm225_health_expecting_reply()) return;   /* 空闲静默轮：不计数 */
+
     if(s_health_miss_rounds < FM225_HEALTH_FAIL_ROUNDS) s_health_miss_rounds++;
     if(s_health_miss_rounds >= FM225_HEALTH_FAIL_ROUNDS) fm225_set_health(FACE_MOD_FAIL);
 }
