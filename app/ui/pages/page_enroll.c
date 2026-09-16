@@ -52,7 +52,7 @@ static int32_t    s_canvas_w, s_canvas_h;
 static int32_t    s_vid_x, s_vid_y, s_vid_w, s_vid_h;
 static uint16_t * s_map_x, * s_map_y;
 static uint16_t   s_cap_buf[CAP_W * CAP_H];
-static int        s_rot_deg;
+static int        s_rot_deg = FACE_PREVIEW_ROT_DEFAULT;   /* 默认值见 preview_cfg.h */
 static int32_t    s_scale_max = FACE_MAX_SCALE;   /* 放大上限默认值必须与 page_face 同源，否则 0 → 视频矩形夹成 1×1 空白 */
 static int32_t    s_src_w = CAP_W, s_src_h = CAP_H;
 static uint16_t * s_rot_buf;
@@ -84,7 +84,7 @@ static void preview_env_init(void)
     const char * er = getenv("SAFE_CAMERA_ROT");
     if (er != NULL) {
         int v = atoi(er);
-        if (v == 90 || v == 180 || v == 270) s_rot_deg = v;
+        if (v == 0 || v == 90 || v == 180 || v == 270) s_rot_deg = v;   /* 显式 0 也受理 */
     }
     const char * es = getenv("SAFE_FACE_PREVIEW_SCALE");
     if (es != NULL) {

@@ -50,10 +50,11 @@
 #include "ui/pages/preview_cfg.h"
 
 /* 预览显示的两个 env 开关（PC 联调用；板上不设 env 即走默认，行为不变）：
- *   SAFE_CAMERA_ROT          0/90/180/270 —— 把摄像头帧旋转后显示（模组竖装用 90/270）
+ *   SAFE_CAMERA_ROT          0/90/180/270 —— 把摄像头帧旋转后显示（不设则用
+ *                              preview_cfg.h 的 FACE_PREVIEW_ROT_DEFAULT）
  *   SAFE_FACE_PREVIEW_SCALE  放大上限千分比（默认 1300=1.3×；PC 大窗口可设 2000 跟随
  *                            2× 窗口。放大只增加显示像素数、不增加细节，板上勿调高） */
-static int      s_rot_deg   = 0;            /* 0/90/180/270 */
+static int      s_rot_deg   = FACE_PREVIEW_ROT_DEFAULT;   /* 0/90/180/270，默认值见 preview_cfg.h */
 static int32_t  s_scale_max = FACE_MAX_SCALE;
 static int32_t  s_src_w     = CAP_W;        /* 旋转后的等效源宽（90/270 时 = CAP_H） */
 static int32_t  s_src_h     = CAP_H;
@@ -700,7 +701,8 @@ static void preview_env_init(void)
     const char * er = getenv("SAFE_CAMERA_ROT");
     if (er != NULL) {
         int v = atoi(er);
-        if (v == 90 || v == 180 || v == 270) s_rot_deg = v;
+        if (v == 0 || v == 90 || v == 180 || v == 270) s_rot_deg = v;
+        /* 显式 0 必须受理：默认已改为 270，否则无法用 env 回到「不旋转」 */
     }
     const char * es = getenv("SAFE_FACE_PREVIEW_SCALE");
     if (es != NULL) {
