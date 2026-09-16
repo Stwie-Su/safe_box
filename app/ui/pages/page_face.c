@@ -45,18 +45,9 @@
 #include <string.h>
 #include <stdio.h>
 
-/* 采集分辨率：320×240（需求 v1.6 FR-16 锁定，4:3 原始比例） */
-#define CAP_W  320
-#define CAP_H  240
-#define PREVIEW_MS 50      /* 20fps 拉帧周期；YUYV@320x240 实测上限 20fps */
-
-/* 显示放大倍数上限（千分比，1300 = 1.3×）。
- * 为什么封顶：LVGL 的绘制耗时与「显示像素数」近似成正比（板上实测 223k 像素 →
- * 渲染周期 121ms ≈ 8fps；130k 像素 → 23ms ≈ 21.6fps）。而采集源固定 320×240，
- * 放大 1.3× 之后每个源像素仍被显示（1.3 个显示像素/源像素），继续放大只是最近邻
- * 复制，不增加任何细节，却线性地吃掉帧率。取 1.3× 是「画面够大」与「UI ≥20fps」
- * 的实测平衡点；面板比 416×312 还小时按面板自适应（取 min），不会过度放大。 */
-#define FACE_MAX_SCALE 1300
+/* 预览帧管线共用常量（CAP_W/CAP_H/PREVIEW_MS/FACE_FRAME_STALE_MS/FACE_MAX_SCALE）：
+ * 与 page_enroll 人脸录入页**共用同一份默认值**（2026-09-15 BugFix 收敛）。 */
+#include "ui/pages/preview_cfg.h"
 
 /* 预览显示的两个 env 开关（PC 联调用；板上不设 env 即走默认，行为不变）：
  *   SAFE_CAMERA_ROT          0/90/180/270 —— 把摄像头帧旋转后显示（模组竖装用 90/270）
@@ -75,9 +66,6 @@ static void rotate_frame(const uint16_t * src, uint16_t * dst,
 
 /* FPS 统计滑窗长度 */
 #define FPS_WINDOW_MS 500
-
-/* 画面「陈旧」判定：超过此时长没有新帧即视为无信号（占位重新显示） */
-#define FACE_FRAME_STALE_MS 2500
 
 /* 识别结果「保鲜」秒数：超时的旧结果不再驱动状态文案 */
 #define FACE_RESULT_FRESH_S 8

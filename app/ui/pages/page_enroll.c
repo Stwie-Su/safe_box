@@ -32,12 +32,9 @@
 #include "hal/face/face_thread.h"
 #include "hal/hal_time.h"
 
-#define CAP_W  320
-#define CAP_H  240
-#define PREVIEW_MS 50
-
-/* 画面「陈旧」判定：超过此时长没有新帧即视为无信号 */
-#define FACE_FRAME_STALE_MS 2500
+/* 预览帧管线共用常量（CAP_W/CAP_H/PREVIEW_MS/FACE_FRAME_STALE_MS/FACE_MAX_SCALE）：
+ * 与 page_face 人脸识别页**共用同一份默认值**，避免两页各抄一份、漏初值而分叉。 */
+#include "ui/pages/preview_cfg.h"
 
 /* ===== 静态句柄 ===== */
 static lv_obj_t * s_root;
@@ -56,7 +53,7 @@ static int32_t    s_vid_x, s_vid_y, s_vid_w, s_vid_h;
 static uint16_t * s_map_x, * s_map_y;
 static uint16_t   s_cap_buf[CAP_W * CAP_H];
 static int        s_rot_deg;
-static int32_t    s_scale_max;
+static int32_t    s_scale_max = FACE_MAX_SCALE;   /* 放大上限默认值必须与 page_face 同源，否则 0 → 视频矩形夹成 1×1 空白 */
 static int32_t    s_src_w = CAP_W, s_src_h = CAP_H;
 static uint16_t * s_rot_buf;
 static bool       s_got_frame;
