@@ -156,6 +156,7 @@ static safe_err_t fm225_open(void)
      * 上板：SAFE_FM225_DEV=/dev/ttymxc2（i.MX6ULL UART3，115200 8N1）。 */
     const char * dev = getenv("SAFE_FM225_DEV");
     if(dev == NULL || *dev == '\0') dev = getenv("SAFE_FACE_DEV");
+        if(dev == NULL || *dev == '\0') dev = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0";
     if(dev == NULL || *dev == '\0') dev = "/tmp/fm225_host";
 
     s_uart_fd = open(dev, O_RDWR | O_NOCTTY | O_NONBLOCK);

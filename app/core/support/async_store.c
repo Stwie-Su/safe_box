@@ -7,6 +7,8 @@
 #include "core/support/worker.h"
 #include <stdlib.h>
 #include <string.h>
+#include "core/auth/unlock_backend.h"
+#include "core/store/store.h"
 
 /* ---------------- load users ---------------- */
 typedef struct {
@@ -146,7 +148,16 @@ typedef struct {
 static void va_worker(void * p)
 {
     va_job_t * a = (va_job_t *)p;
-    a->result = user_verify_pin("admin", a->pin);
+    /* 二级确认要求「任一启用管理员」的 PIN，而非写死名为 "admin" 的用户——
+     * 管理员改名 / 多管理员时原来会误判 PIN 错误（用户报：删人脸输入正确 PIN 却报错）。 */
+    char name[32] = {0};
+    unlock_result_t r = backend_verify_pin(a->pin, name, sizeof(name));
+    if (r != UNLOCK_OK) { a->result = (r == UNLOCK_LOCKED) ? 2 : 1; return; }
+    safe_user_t u;
+    if (user_find_by_name(name, &u) == 0 && strcmp(u.role, "admin") == 0)
+        a->result = 0;
+    else
+        a->result = 1;   /* PIN 命中非管理员用户 */
 }
 
 static void va_done(void * p)

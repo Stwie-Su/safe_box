@@ -6,7 +6,7 @@
 # ============================================================
 
 # ---------------- 人脸后端 ----------------
-set(SAFE_FACE_BACKEND "fake" CACHE STRING "人脸后端：fake(模拟) / fm225(真实模组) / none(停用)")
+set(SAFE_FACE_BACKEND "fm225" CACHE STRING "人脸后端：fake(模拟) / fm225(真实模组) / none(停用)")
 set_property(CACHE SAFE_FACE_BACKEND PROPERTY STRINGS fake fm225 none)
 
 # ---------------- 特性开关 ----------------
