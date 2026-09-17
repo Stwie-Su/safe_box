@@ -1,16 +1,19 @@
 # CLAUDE.md — lv_port_linux（智能保险柜 UI / i.MX6ULL）
 
-> 规约 / 计划 / 进度均在 `~/桌面/规约/`，**开工前必读**。需求规约 v1.6、技术路线规约 v1.3。
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+> 规约 / 计划 / 进度均在 `~/桌面/规约/`，**开工前必读**。需求规约 v1.7、技术路线规约 v1.4。
 
 ## 1. 文档与资料（绝对路径）
 
 | 类别 | 路径 |
 |---|---|
-| 需求规约（做什么）v1.6 | `~/桌面/规约/需求规约.md` |
-| 技术路线规约（怎么做）v1.3 | `~/桌面/规约/技术路线规约.md` |
-| 执行计划（步骤 0–4 + 验收） | `~/桌面/规约/Sprint3_Ubuntu先行计划.md` |
+| 需求规约（做什么）v1.7 | `~/桌面/规约/需求规约.md` |
+| 技术路线规约（怎么做）v1.4 | `~/桌面/规约/技术路线规约.md` |
+| 执行计划（当前阶段） | `~/桌面/规约/下一步行动计划_2026-09-14.md`（Sprint3 计划已全部完成，原件在 `归档/`） |
 | **开发进度（唯一真源）** | `~/桌面/规约/开发进度.md` |
 | FM225 手册（协议唯一依据） | `~/桌面/资料/FM22x系列人脸锁算法模组用户开发手册V1.7.pdf` |
+| FM225 上板接线与自检 | `~/桌面/规约/FM225_上板接线与自检清单.md` |
 | 旧版归档 | `~/桌面/规约/归档/` |
 
 ## 2. 工作纪律（铁律）
@@ -18,7 +21,7 @@
 1. 动手前先读《技术路线规约》相关节 + 计划当前步骤；冲突以规约为准并回改计划。
 2. 按计划步骤顺序执行**不跳步**；当前步骤**只能**从《开发进度.md》读（§0 标记 + §4 指针），不得凭记忆猜。
 3. 接口签名变更**先回改技术路线规约 §5，再改代码**。
-4. 当前阶段**不上板**：不碰 FBDEV / Buildroot / 交叉编译 / 设备树。
+4. 板上工作**受控进行**：板上构建 `build_board`（见 §5）与 FM225 真模组 USB 联调已解锁；仍不碰设备树 / Buildroot 定制，除非行动计划明确安排。
 
 ## 3. 进度维护（强制，两端共用）
 
@@ -27,13 +30,13 @@ Windows 端 WorkBuddy 与 Ubuntu 端 Claude Code 共用同一份进度文件，*
 **会话开始（必做）**：
 
 ```bash
-sed -n '1,20p' ~/桌面/规约/开发进度.md              # §0 标记 + §4 当前步指针
-sed -n '1,60p' ~/桌面/规约/Sprint3_Ubuntu先行计划.md  # 当前步骤验收标准
+sed -n '1,20p' ~/桌面/规约/开发进度.md                     # §0 标记 + §4 当前步指针
+sed -n '1,60p' ~/桌面/规约/下一步行动计划_2026-09-14.md      # 当前阶段执行计划与拍板决策
 ```
 
 不一致时以进度文件为准，并顺手修正计划文档。
 
-**每完成一步 / 子项（立即，别等会话结束）**：更新《开发进度.md》（§0 标记 + §4 打 ✅ 填实测数据 + 里程碑一行）→ 更新计划文档该步骤 ✅ → 独立 commit `s3u<N>: <摘要>`。
+**每完成一步 / 子项（立即，别等会话结束）**：更新《开发进度.md》（§0 标记 + §4 打 ✅ 填实测数据 + 里程碑一行）→ 更新行动计划文档该步骤 ✅ → 独立 commit（Sprint3 期间用 `s3u<N>: <摘要>`，当前阶段沿用 `feat:/fix:` 风格）。
 
 **会话结束（必做）**：留下可接续状态——做到哪一步、进行到哪个子项、当前阻塞、下一步建议。
 
@@ -41,7 +44,7 @@ sed -n '1,60p' ~/桌面/规约/Sprint3_Ubuntu先行计划.md  # 当前步骤验�
 
 多用户共享保险柜（民宿短租 / 小型办公室 / 多成员家庭）→ 多用户权限、TOTP、远程管理、审计日志、限时授权均为必需项。基于 **LVGL v9**；目标硬件 100ask i.MX6ULL（Cortex-A7 单核 / 512MB / 1024×600 触摸屏）。
 
-**当前阶段：Sprint3 Ubuntu 先行**（USB 摄像头 + socat 虚拟串口对，不上板）。FM225、DS3231 未到货：接口与空壳已就位，业务链路用模拟后端完整验证。
+**当前阶段：FM225 真模组闭环**（USB 串口 by-id + UVC 摄像头自动扫描，板上构建已打通）。DS3231 未到货：RTC 后端壳已就位（`time_rtc.c`，`SAFE_RTC_DEV`），业务链路以 fake/sys 后端验证。进度详见《开发进度.md》§13。
 
 ## 5. 构建
 
@@ -57,7 +60,13 @@ ctest --test-dir build_pc --output-on-failure
 # 无桌面登录时（DISPLAY=:0 不可用）
 Xvfb :99 -screen 0 1280x800x24 & DISPLAY=:99 ./build_pc/bin/lvglsim
 
-# 开发板（交叉编译）
+# 跑单个测试
+ctest --test-dir build_pc -R test_fm225_proto --output-on-failure
+
+# FM225 真模组启动器（单实例守卫 + by-id 稳定串口 + 相机自动扫描）
+./run_fm225.sh
+
+# 开发板（交叉编译，产物 build_board/bin/lvglsim）
 BR=~/100ask_imx6ull-sdk/Buildroot_2020.02.x
 export PATH=~/tools/cmake-3.22.1-linux-x86_64/bin:$BR/output/host/bin:$PATH
 cmake -B build_board -DLV_PORT_DEFCONFIG=configs/board.defconfig \
@@ -68,7 +77,9 @@ cmake --build build_board -j$(nproc)
 
 可选特性（`cmake/SafeFeatures.cmake`，缺依赖自动降级、不会让构建失败）：`SAFE_FEATURE_MQTT`（PC 自动探测）/ `SAFE_FACE_BACKEND=fake|fm225|none` / `SAFE_BUILD_TESTS`（PC ON、交叉 OFF）/ `SAFE_DATA_DIR`（PC `data/`，板子 `/var/lib/safe`）。
 
-调试环境变量：`SAFE_DATA_DIR`、`SAFE_TEST_PAGE`（HOME/LOGS/SETTINGS/USERS/NETWORK/SYSTEM/KEYPAD/FACE）、`SAFE_TEST_THEME`(0..3)、`SAFE_TEST_DLG`(add_user|auth|change_pwd)、`SAFE_TEST_SHOT`、`SAFE_TEST_UNLOCK=1`、`SAFE_PERF_LOG=1`、`SAFE_MQTT_HOST|PORT`、`SAFE_MQTT_OFF=1`。
+调试环境变量（`grep -r 'getenv("SAFE_' app` 为准）：`SAFE_DATA_DIR`、`SAFE_TEST_PAGE`（HOME/LOGS/SETTINGS/USERS/NETWORK/SYSTEM/KEYPAD/FACE）、`SAFE_TEST_THEME`(0..3)、`SAFE_TEST_DLG`(add_user|auth|change_pwd)、`SAFE_TEST_SHOT` / `SAFE_TEST_SHOT_MS`、`SAFE_TEST_UNLOCK=1`、`SAFE_TEST_TRANS_MS` / `SAFE_TEST_TRANS_PAGE`、`SAFE_TEST_FACE`、`SAFE_ICON_CHECK`、`SAFE_PERF_LOG=1`、`SAFE_MQTT_HOST|PORT`、`SAFE_MQTT_OFF=1`、`SAFE_FACE_BACKEND` / `SAFE_FACE_DEV`、`SAFE_FM225_DEV`（真模组串口，建议 by-id 路径）、`SAFE_FACE_PREVIEW_SCALE`、`SAFE_CAMERA_BACKEND` / `SAFE_CAMERA_DEV` / `SAFE_CAMERA_ROT`、`SAFE_TIME_BACKEND` / `SAFE_RTC_DEV`。
+
+辅助脚本：`tools/fm225_sim.py`（socat 虚拟串口对扮模组）、`tools/fm225_selftest.py`（不启主程序的串口链路 30 秒自检）、`tools/crash_consistency_test.sh`（store 崩溃一致性长跑）。
 
 ## 6. 目录结构
 
@@ -90,7 +101,7 @@ app/
 └── platform/       platform_sdl / fbdev / null、perf_probe、debug_hooks
 ports/lv_port/      LVGL 官方 Linux 移植层
 third_party/        aes、sha256
-tests/              CTest：totp / auth_fsm / store / check_layers
+tests/              CTest（7 项）：totp / auth_fsm / cred_reconcile / event_bus / fm225_proto / store / store_crash + check_layers
 data/               PC 运行时数据（不入库）
 ```
 
@@ -127,10 +138,10 @@ data/               PC 运行时数据（不入库）
 
 | 硬件到货 | 改动位置 | 业务代码 |
 |---|---|---|
-| FM225 人脸模组 | `app/hal/face/backend_fm225.c`（补 UART 帧解析，TODO-FM225）+ `-DSAFE_FACE_BACKEND=fm225` | 不动 |
-| DS3231 RTC | 新增 `app/hal/time/time_rtc.c`，`time_service.c` 换默认后端 | 不动 |
+| FM225 人脸模组 ✅已接入 | `app/hal/face/backend_fm225.c` + `fm225_proto.c`（UART 帧解析）+ `-DSAFE_FACE_BACKEND=fm225`；剩余缺口 N1~N5 见《开发进度.md》§13.2 | 不动 |
+| 摄像头预览 ✅已接入 | `app/hal/camera/camera_v4l2.c`（UVC 自动扫描 + MJPG，旋转用 `SAFE_CAMERA_ROT`） | 不动 |
+| DS3231 RTC | `app/hal/time/time_rtc.c` 壳已在（`SAFE_RTC_DEV`），到货后实测对接 | 不动 |
 | 电磁锁 / 继电器 | 新增 `app/hal/actuator/actuator_gpio.c`，`actuator_service.c` 换默认后端 | 不动 |
-| 摄像头预览 | 新增 `app/hal/camera/camera_v4l2.c` | 不动 |
 
 ## 11. 已知坑
 
@@ -149,5 +160,5 @@ data/               PC 运行时数据（不入库）
 
 ## 12. 范围与边界
 
-- 本期做：目录分层、构建模块化、人脸接口预留与模拟后端、单元测试、PC 全链路验证。
-- 本期不做：真实人脸采集、DS3231 驱动、视频解码链路、公网穿透、小程序、指纹/NFC/4G/CAN、数据库。
+- 本期做：FM225 录入/解锁闭环（N1~N5 缺口补齐）、FR-21 凭据一致性、FR-23 模组健康降级、D10 hal_net + NETWORK 页、M6 自研 MQTT（R9：poll 状态机 + QoS1 + 退避 + LWT + 断线补传，已拍板一步到位）、DS3231 驱动、电磁锁 GPIO 后端、单元测试、板上验证。
+- 本期不做：公网穿透、小程序、指纹/NFC/4G/CAN、数据库（SQLite 留接口）。
