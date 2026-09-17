@@ -161,8 +161,9 @@ void face_service_set_foreground(bool active)
     if(s_fg == active) return;
     s_fg = active;
     /* 相机流跟着前台走：STREAMOFF 后模组 UVC 传感断电（stop 幂等）；恢复时按
-     * 预览契约的 320x240 重启。识别会话由 fm225 后端在 tick 里响应该标志
-     * （0x10 RESET 终止 / REARM 退避自然重开）。 */
+     * 预览契约的 320x240 重启。识别会话由 fm225 后端在 tick 里响应该标志：
+     * 离开时 0x10 MID_RESET 终止在途会话 + 作废排队中的录入请求；进入时不主动发包
+     * （FR-27：识别由界面按钮单次触发，不再有 REARM 自动续发）。 */
     if(active) {
         safe_err_t e = hal_camera_start(320, 240);
         if(e != SAFE_OK) printf("[face] 相机恢复失败（err=%d）\n", (int)e);

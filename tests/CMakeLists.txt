@@ -26,10 +26,19 @@ safe_add_test(test_auth_fsm)
 safe_add_test(test_cred_reconcile)
 safe_add_test(test_event_bus)
 safe_add_test(test_fm225_proto)
+# FM225 后端「录入会话独占 + 静默无应答兜底」状态机测试。
+# 用 posix_openpt 造 pty 假串口直接驱动真实后端（不需要真模组、不需要 socat）。
+safe_add_test(test_fm225_enroll)
 safe_add_test(test_store)
+# 解锁后端：PIN 精确/虚位（FR-18）、管理员二次确认边界（§5.5）、
+# 临时授权过期与次数耗尽（FR-9）、动态码与防重放（FR-3）。
+safe_add_test(test_unlock_backend)
 # 崩溃一致性自测（R1）：循环写盘期间 kill -9，校验 users.json 可解析且非旧即新。
 # 默认 20 轮，长跑用 tools/crash_consistency_test.sh <更大轮次>。
 safe_add_test(test_store_crash)
+# 远程指令轻量访问控制：req_id 去重（防重放）、请求时效窗口（±120s）、命令分级。
+# 纯逻辑（rpc_guard），不启 broker / 不依赖 paho。
+safe_add_test(test_rpc)
 
 # 分层检查：core 不碰 LVGL/平台头，hal 头文件不带平台实现，ui 不碰底层协议
 find_program(SAFE_BASH bash)

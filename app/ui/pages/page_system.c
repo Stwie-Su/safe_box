@@ -35,11 +35,14 @@
 #include <string.h>
 #include <time.h>
 #include <stdio.h>
+#include <stdlib.h>     /* calloc/free：虚位开关的异步落盘作业 */
 
 static lv_obj_t * s_clock_lbl;
 static lv_obj_t * s_failed_lbl;
 static lv_obj_t * s_lock_lbl;
 static lv_obj_t * s_otp_lbl;
+static lv_obj_t * s_vpin_sw;        /* 虚位密码开关（FR-18）—— 可点，不再是只读 info_row */
+static bool       s_vpin_pending = false;   /* 待写入的开关目标值（管理员验证通过后才落盘） */
 static lv_obj_t * s_theme_btns[THEME_COUNT];
 static lv_obj_t * s_theme_cur;      /* 当前主题名（切换后刷新） */
 
@@ -60,6 +63,13 @@ static void factory_done(void * p);
 static void factory_btn_cb(lv_event_t * e);
 static void refresh_policy(void);
 
+/* 虚位密码开关（FR-18）：落盘走后台线程，不在 UI 线程做文件 IO */
+static lv_obj_t * toggle_row(lv_obj_t * parent, const char * name, const char * hint,
+                             lv_obj_t ** sw_out);
+static void vpin_click_cb(lv_event_t * e);
+static void vpin_refresh(void);
+static void vpin_write_async(bool enable);
+
 /* ---- 管理员二次验证（操作处鉴权，FR-7 2026-09-14 变更）----
  * 原设计把鉴权放在「设置中枢」页级入口；但主导航本就直接暴露 系统/用户/网络，
  * 页级验证可被 rail 绕过（鉴权口径不一致）。中枢取消后，鉴权下沉到**敏感操作处**：
@@ -69,6 +79,7 @@ typedef enum {
     ADMIN_ACT_NONE = 0,
     ADMIN_ACT_SAVE_POLICY,
     ADMIN_ACT_FACTORY,
+    ADMIN_ACT_VIRTUAL_PIN,
 } admin_action_t;
 
 static void admin_verify_open(admin_action_t act);
@@ -105,6 +116,7 @@ static lv_obj_t * info_row(lv_obj_t * parent, const char * name, lv_obj_t ** val
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_scrollable(row, false);   /* 同「页面自滚动」根因：纯布局容器一律关滚动 */
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
@@ -119,6 +131,77 @@ static lv_obj_t * info_row(lv_obj_t * parent, const char * name, lv_obj_t ** val
     lv_obj_add_style(v, &st_text, 0);
     lv_obj_set_style_text_font(v, app_font_scaled(14), 0);
     if (val_out) *val_out = v;
+    return row;
+}
+
+/**
+ * @brief 可点开关行：左侧「主标签 + 次要说明」两行，右侧开关按钮。
+ *
+ * FR-18 的虚位密码原本是一个只读 info_row（只显示「已启用/已停用」），管理员
+ * 没有任何入口改它 —— 这里换成真正的开关。
+ *
+ * 为什么用 lv_button + CHECKED 而不是 lv_switch：
+ *   - CHECKED 直接挂 st_ghost_btn / st_accent_btn 两套已有主题样式，换主题自动
+ *     跟随，不需要额外注册刷新回调，也不会像 lv_switch 那样引入新的绘制部件；
+ *   - 无阴影、无大圆角（圆角只有高度的一半，属按钮常规形态），符合板端帧率要求。
+ *
+ * @param name    主标签（功能名）
+ * @param hint    次要说明（可选，NULL 不显示）
+ * @param sw_out  回传开关按钮句柄（可为 NULL）
+ */
+static lv_obj_t * toggle_row(lv_obj_t * parent, const char * name, const char * hint,
+                             lv_obj_t ** sw_out)
+{
+    lv_obj_t * row = lv_obj_create(parent);
+    lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_scrollable(row, false);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    /* 左：主标签 + 说明（信息层次：功能名用正文色，说明用次要色、字号更小） */
+    lv_obj_t * col = lv_obj_create(row);
+    lv_obj_set_flex_grow(col, 1);
+    lv_obj_set_height(col, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(col, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(col, 0, 0);
+    lv_obj_set_style_pad_all(col, 0, 0);
+    lv_obj_set_style_pad_row(col, SY(1), 0);
+    lv_obj_set_scrollable(col, false);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t * k = lv_label_create(col);
+    lv_label_set_text(k, name);
+    lv_obj_add_style(k, &st_text, 0);
+    lv_obj_set_style_text_font(k, app_font_scaled(14), 0);
+
+    if (hint) {
+        lv_obj_t * h = lv_label_create(col);
+        lv_label_set_text(h, hint);
+        lv_obj_add_style(h, &st_text_mut, 0);
+        lv_obj_set_style_text_font(h, app_font_scaled(11), 0);
+    }
+
+    /* 右：开关按钮。文字由 vpin_refresh() 按真实策略值刷新。 */
+    lv_obj_t * sw = lv_button_create(row);
+    lv_obj_set_size(sw, SX(92), SY(30));
+    lv_obj_add_style(sw, &st_ghost_btn, 0);
+    lv_obj_add_style(sw, &st_accent_btn, LV_STATE_CHECKED);
+    lv_obj_set_style_pad_hor(sw, SX(6), 0);
+    lv_obj_set_style_pad_ver(sw, 0, 0);
+    lv_obj_set_style_radius(sw, SX(8), 0);
+    lv_obj_add_event_cb(sw, vpin_click_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * sl = lv_label_create(sw);
+    lv_label_set_text(sl, "已关闭");
+    lv_obj_set_style_text_font(sl, app_font_scaled(13), 0);
+    lv_obj_center(sl);
+
+    if (sw_out) *sw_out = sw;
     return row;
 }
 
@@ -300,13 +383,13 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     lv_obj_set_scrollable(sep, false);
 
     info_row(left, "人脸连续未匹配转动态码", &s_otp_lbl);
-    lv_obj_t * vpin = NULL;
-    info_row(left, "虚位密码", &vpin);
-    if (vpin) {
-        bool en = pol->virtual_pin_enable;
-        lv_label_set_text(vpin, en ? "已启用" : "已停用");
-        lv_obj_add_style(vpin, en ? &st_ok_text : &st_warn_text, 0);
-    }
+    /* 虚位密码（FR-18）：可点开关。改它属「策略修改」= 敏感操作（FR-7），
+     * 点击后先验管理员 PIN，通过才在后台线程落盘。 */
+    /* 说明里的长度上限取自统一常量，避免策略改了界面还在说旧数字（v1.9：20→12） */
+    char vpin_hint[64];
+    snprintf(vpin_hint, sizeof(vpin_hint),
+             "开启后 PIN 前后可加干扰位（最长 %d 位）", SAFE_VIRTUAL_PIN_MAX_INPUT);
+    toggle_row(left, "虚位密码", vpin_hint, &s_vpin_sw);
     lv_obj_t * verify_t = NULL;
     info_row(left, "人脸验证超时（秒）", &verify_t);
     if (verify_t) {
@@ -407,6 +490,7 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     (void)fr;
 
     refresh_policy();
+    vpin_refresh();
     lv_timer_create(clock_timer_cb, 1000, NULL);
     clock_timer_cb(NULL);
     return root;
@@ -500,6 +584,64 @@ static void theme_change_refresh(int idx)
         snprintf(tb, sizeof(tb), "当前：%s", theme_name(idx));
         lv_label_set_text(s_theme_cur, tb);
     }
+}
+
+/* ---------------- 虚位密码开关（FR-18） ----------------
+ * 写路径：点击 → 管理员二次验证（FR-7 敏感操作）→ worker_post 后台写 users.json
+ *         → 主线程 done 回调刷新控件。
+ * ★ 不在 UI 线程做文件 IO：user_policy_set_virtual_pin() 内部要 load + save
+ *   整个 users.json（PBKDF2 之外的纯磁盘操作），放在主线程会卡帧（NFR-8 / NFR-3）。
+ * ★ 也刻意不走 async_store：本轮改动范围限定在 UI 与 store 两处，
+ *   core/support 目录是别人刚改完的文件，不碰（同样的 worker_post 组合在本工程
+ *   的 page_users 里已是既定写法）。 */
+
+typedef struct { bool enable; } vpin_job_t;
+
+static void vpin_worker(void * p)
+{
+    vpin_job_t * j = (vpin_job_t *)p;
+    user_policy_set_virtual_pin(j->enable);
+}
+
+static void vpin_done(void * p)
+{
+    vpin_job_t * j = (vpin_job_t *)p;
+    /* 以落盘后的真实策略值刷新界面，而不是直接信 j->enable —— 万一 store 侧
+     * 将来加了拒绝条件，界面也会如实反映，不会出现「显示已开启、实际没开」。 */
+    vpin_refresh();
+    astore_append_log("setting_change", "admin", 1,
+                      j->enable ? "virtual_pin on" : "virtual_pin off");
+    free(j);
+}
+
+static void vpin_write_async(bool enable)
+{
+    vpin_job_t * j = (vpin_job_t *)calloc(1, sizeof(*j));
+    if (!j) return;
+    j->enable = enable;
+    worker_post(vpin_worker, j, vpin_done);
+}
+
+/** 按当前生效策略刷新开关的选中态与文字（换主题时会由样式自动跟随颜色）。 */
+static void vpin_refresh(void)
+{
+    if (!s_vpin_sw) return;
+    const safe_policy_t * pol = user_policy();
+    bool en = pol->virtual_pin_enable;
+
+    if (en) lv_obj_add_state(s_vpin_sw, LV_STATE_CHECKED);
+    else    lv_obj_remove_state(s_vpin_sw, LV_STATE_CHECKED);
+
+    lv_obj_t * lb = lv_obj_get_child(s_vpin_sw, 0);
+    if (lb) lv_label_set_text(lb, en ? "已开启" : "已关闭");
+}
+
+static void vpin_click_cb(lv_event_t * e)
+{
+    (void)e;
+    const safe_policy_t * pol = user_policy();
+    s_vpin_pending = !pol->virtual_pin_enable;   /* 目标值 = 取反 */
+    admin_verify_open(ADMIN_ACT_VIRTUAL_PIN);
 }
 
 /* ---------------- 恢复出厂 ---------------- */
@@ -649,8 +791,15 @@ static void admin_verify_open(admin_action_t act)
     lv_obj_set_size(s_av_disp, 240, 50);
     lv_obj_set_pos(s_av_disp, 70, 54);
 
+    /* 说清「为什么现在要输 PIN」：三个入口（保存策略 / 恢复出厂 / 虚位开关）
+     * 共用同一套验证弹窗，不写清动作会让人以为点错了按钮。 */
+    const char * why = "请输入管理员 PIN";
+    if (act == ADMIN_ACT_SAVE_POLICY)  why = "修改安全策略需管理员验证";
+    else if (act == ADMIN_ACT_FACTORY) why = "恢复出厂需管理员验证";
+    else if (act == ADMIN_ACT_VIRTUAL_PIN) why = "切换虚位密码需管理员验证";
+
     s_av_msg = lv_label_create(s_av_win);
-    lv_label_set_text(s_av_msg, "请输入管理员 PIN");
+    lv_label_set_text(s_av_msg, why);
     lv_obj_add_style(s_av_msg, &st_text_mut, 0);
     lv_obj_set_style_text_font(s_av_msg, app_font_scaled(14), 0);
     lv_obj_set_width(s_av_msg, 380);
@@ -781,6 +930,10 @@ static void admin_verify_dispatch(void)
         break;
     case ADMIN_ACT_FACTORY:
         dlg_factory();          /* 验证通过后再弹恢复出厂确认框（破坏性操作双重确认） */
+        break;
+    case ADMIN_ACT_VIRTUAL_PIN:
+        /* 虚位密码开关落盘：后台线程写 users.json，完成后回调刷新控件 */
+        vpin_write_async(s_vpin_pending);
         break;
     case ADMIN_ACT_NONE:
     default:

@@ -93,9 +93,17 @@ static void preview_env_init(void)
     }
     s_src_w = (s_rot_deg == 90 || s_rot_deg == 270) ? CAP_H : CAP_W;
     s_src_h = (s_rot_deg == 90 || s_rot_deg == 270) ? CAP_W : CAP_H;
-    if (s_rot_deg != 0 && s_rot_buf == NULL) {
+
+    /* 旋转缓冲随「需要的旋转角度」生命周期管理（消除体检项：分配后无 free）：
+     *   - 重复分配前先 free 并置 NULL → 页面重建/重复调用不泄漏、不复用陈旧缓冲；
+     *   - rot==0 时不需要旋转缓冲，直接释放，尽量少占内存（板上仅 512MB）。
+     * 时序安全：本函数与 frame_timer_cb 同在 LVGL 主线程串行执行，且帧回调以
+     * (s_rot_deg != 0 && s_rot_buf != NULL) 双重判定，释放后绝不会被读到。 */
+    free(s_rot_buf);
+    s_rot_buf = NULL;
+    if (s_rot_deg != 0) {
         s_rot_buf = (uint16_t *)malloc(sizeof(uint16_t) * CAP_W * CAP_H);
-        if (s_rot_buf == NULL) {
+        if (s_rot_buf == NULL) {      /* 分配失败：放弃旋转，保持原方向显示 */
             s_rot_deg = 0;
             s_src_w   = CAP_W;
             s_src_h   = CAP_H;
@@ -364,10 +372,43 @@ static void preview_size_changed_cb(lv_event_t * e)
     }
 }
 
+/* 页面根对象被 LVGL 删除时的释放点：回收帧管线全部堆缓冲（旋转/画布/映射表）
+ * 并清空句柄，使页面重建时重新走分配路径（不泄漏、不复用陈旧缓冲）。
+ *
+ * 时序安全（本处 free 不会引入 UAF，逐条论证）：
+ *   1) 本回调由根对象 LV_EVENT_DELETE 触发，位于 LVGL obj_delete_core() 的
+ *      「递归删除子对象」**之前**；从 free 发生到画布真正析构之间，全程为
+ *      单线程同步路径（主线程，lv_timer_handler 不会穿插），其间不发生任何
+ *      渲染或建帧，因此不会有代码再读这些缓冲。
+ *   2) 画布析构（lv_canvas_destructor → lv_image_destructor）只调用
+ *      lv_image_cache_drop() 按 src 指针摘除解码缓存，**不解引用像素数据、
+ *      也不 free 用户缓冲**（缓冲所有权在本模块），故不存在二次释放。
+ *   3) 末尾置空 s_root：frame_timer_cb / status_timer_cb 均以 s_root==NULL 早退，
+ *      页面销毁后不再访问任何帧缓冲，同时消除悬挂指针。
+ * 结论：在此处回收 s_canvas_buf/s_map_x/s_map_y 是安全的（QA 已确认无现行 UAF），
+ * 修复「页面销毁→重建」路径上的堆泄漏。 */
+static void page_enroll_deleted_cb(lv_event_t * e)
+{
+    (void)e;
+    free(s_rot_buf);
+    s_rot_buf = NULL;
+    free(s_canvas_buf);
+    s_canvas_buf = NULL;
+    free(s_map_x);
+    s_map_x = NULL;
+    free(s_map_y);
+    s_map_y = NULL;
+    s_canvas_w = 0;
+    s_canvas_h = 0;
+    s_root    = NULL;
+}
+
 lv_obj_t * page_enroll_create(lv_obj_t * parent)
 {
     lv_obj_t * root = lv_obj_create(parent);
     s_root = root;
+    /* 页面销毁释放点：回收旋转缓冲并清空句柄，使页面重建时重新走分配路径。 */
+    lv_obj_add_event_cb(root, page_enroll_deleted_cb, LV_EVENT_DELETE, NULL);
     lv_obj_set_size(root, lv_pct(100), lv_pct(100));
     lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(root, 0, 0);

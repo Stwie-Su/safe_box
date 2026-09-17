@@ -178,6 +178,21 @@ static safe_err_t v4l2_init(void)
     return SAFE_OK;
 }
 
+/* 释放全部已 mmap 的驱动缓冲并复位计数（幂等）。
+ * 用途有二：(1) deinit 正常收尾；(2) start 中途失败（QUERYBUF / mmap 失败）的清理——
+ * 后者若不清理，会把**前序已映射**的缓冲泄漏（真机表现为反复进退人脸页后映射数耗尽、
+ * 进程 RSS 缓慢上涨，最终 V4L2 取不到缓冲、预览全黑）。 */
+static void unmap_bufs(void)
+{
+    for (int i = 0; i < s_buf_count; i++) {
+        if (s_bufs[i].start != NULL && s_bufs[i].start != MAP_FAILED)
+            munmap(s_bufs[i].start, s_bufs[i].length);
+        s_bufs[i].start  = NULL;
+        s_bufs[i].length = 0;
+    }
+    s_buf_count = 0;
+}
+
 static safe_err_t v4l2_deinit(void)
 {
     if (s_streaming) {
@@ -185,12 +200,7 @@ static safe_err_t v4l2_deinit(void)
         xioctl(s_fd, VIDIOC_STREAMOFF, &type);
         s_streaming = false;
     }
-    for (int i = 0; i < s_buf_count; i++) {
-        if (s_bufs[i].start) munmap(s_bufs[i].start, s_bufs[i].length);
-        s_bufs[i].start  = NULL;
-        s_bufs[i].length = 0;
-    }
-    s_buf_count = 0;
+    unmap_bufs();
     s_is_mjpg = false;
     if (s_fd >= 0) { close(s_fd); s_fd = -1; }
     free(s_out); s_out = NULL; s_out_size = 0;
@@ -318,12 +328,21 @@ static safe_err_t v4l2_start(uint16_t w, uint16_t h)
         b.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         b.memory = V4L2_MEMORY_MMAP;
         b.index  = (unsigned)i;
-        if (xioctl(s_fd, VIDIOC_QUERYBUF, &b) < 0) return SAFE_ERR_FAIL;
+        if (xioctl(s_fd, VIDIOC_QUERYBUF, &b) < 0) {
+            printf("[CAMERA] QUERYBUF[%d] 失败\n", i);
+            unmap_bufs();               /* 释放前序已映射缓冲，杜绝泄漏 */
+            return SAFE_ERR_FAIL;
+        }
         s_bufs[i].length = b.length;
         s_bufs[i].start  = mmap(NULL, b.length,
                                 PROT_READ | PROT_WRITE, MAP_SHARED,
                                 s_fd, b.m.offset);
-        if (s_bufs[i].start == MAP_FAILED) return SAFE_ERR_FAIL;
+        if (s_bufs[i].start == MAP_FAILED) {
+            s_bufs[i].start = NULL;     /* 复位，避免后续 unmap 对 MAP_FAILED 误操作 */
+            printf("[CAMERA] mmap[%d] 失败: %s\n", i, strerror(errno));
+            unmap_bufs();               /* 中途失败：释放前序已映射缓冲（体检项修复） */
+            return SAFE_ERR_FAIL;
+        }
     }
 
     /* ---- 4. 转换输出缓冲（320×240×2 = 150KB）---- */

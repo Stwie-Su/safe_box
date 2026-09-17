@@ -51,19 +51,45 @@
 /* 会话型命令（VERIFY/ENROLL）的应答超时：模组要等人脸/录入完成才回最终 REPLY，
  * 过程中只回 NOTE（手册 §MID_VERIFY「解锁过程中，模组返回 NOTE 和 REPLY 两种
  * 消息」）。pending 超时必须 ≥ 模组超时 + 余量——D17：此前沿用 800ms 即时超时，
- * sim 秒回应答掩盖了该语义差异，真模组在 800ms 判定下永远「无应答」。 */
-#define FM225_SESSION_TIMEOUT_MS  ((FM225_VERIFY_TIMEOUT_S + 2u) * 1000u)
-#define FM225_MAX_RETRY          3      /* 超时重发上限，超过报 ERROR 放弃 */
+ * sim 秒回应答掩盖了该语义差异，真模组在 800ms 判定下永远「无应答」。
+ * D18 补：取 VERIFY / ENROLL 两者中较大的模组超时做基准，避免以后单独调大
+ * 某一个（比如把录入放宽到 20s）时，会话超时仍按 verify 的 10s 算而误判超时。 */
+#define FM225_SESSION_CMD_TIMEOUT_S \
+    ((FM225_VERIFY_TIMEOUT_S > FM225_ENROLL_TIMEOUT_S) ? \
+     (FM225_VERIFY_TIMEOUT_S) : (FM225_ENROLL_TIMEOUT_S))
+#define FM225_SESSION_TIMEOUT_MS  ((FM225_SESSION_CMD_TIMEOUT_S + 2u) * 1000u)
+/* 下发会话型命令（ENROLL）前强制留出的静默窗口（ms）。
+ * 两个用途：
+ *  ① 给模组消化「上一条命令」的时间 —— 0x10 MID_RESET 实测约 26ms 回执，
+ *     0x24 清单应答 203B 在 115200（1B≈87us）下约 18ms，300ms 有 10x 余量；
+ *  ② 静默命令（fm225_send_silent：不进 pending、不重发）没有超时出口，用同一
+ *     窗口兜底判定「它已经不会再来了」，避免模组永不应答 0x24 时永久阻塞 ENROLL。
+ * 代价：最坏情况录入多等 300ms 才真正下发（用户无感）。 */
+#define FM225_SETTLE_MS          300u
+/* 录入会话进行到这个时长、模组还没上报过一条 NOTE 人脸状态时，打一条提示日志
+ * （FR-19 可观测性）：区分「模组没进录入」与「人没站到镜头前」。 */
+#define FM225_ENROLL_HINT_MS     3000u
+#define FM225_MAX_RETRY          3      /* 即时命令超时重发上限；会话型命令不重发（见 fm225_tick） */
 #define FM225_VERIFY_REARM_MS    2000   /* verify 会话断链后的重开退避 */
 #define FM225_RECON_RETRY_MS     1500   /* 0x24 清单查询的重试间隔（静默查询，无 ERROR 上报） */
 #define FM225_RECON_MAX_IDS      128    /* 本地缓存上限（实测模组容量 100） */
 #define FM225_HEALTH_ROUND_MS    5000u  /* 健康评估轮长：每轮看是否有合法帧（FR-23） */
 #define FM225_HEALTH_FAIL_ROUNDS 3u     /* 连续 3 轮无应答 → 不健康（≈15s） */
 
+/* 0x10 与 0x23 的分工（手册订正，勿再混用）
+ *   0x10 MID_RESET（手册 §3）：「模组将取消之前正在执行的命令（例如录入、解锁等），
+ *        返回 STANDBY 状态」——通用取消，覆盖面包含录入与解锁。
+ *   0x23 MID_FACERESET / FACE RESET（手册 H>>M 命令表 + §录入流程）：「录入过程中
+ *        可通过 FACE RESET 指令终止录入，先前的录入状态也会清零」——只管录入状态。
+ * 本文件的用法：
+ *   - 需要「把模组拉回 STANDBY / 取消任何在途会话」→ 0x10（stop、离页、录入前清场、
+ *     会话超时放弃）。只有它能取消在飞的 VERIFY。
+ *   - 需要「清掉录入残留状态」→ 0x23（录入以失败/超时收尾后）。 */
 typedef enum {
     FM225_IDLE = 0,
     FM225_WAIT_VERIFY,
-    FM225_WAIT_ENROLL,
+    FM225_ENROLL_ARMING,   /* 录入请求已受理、尚未下发：等模组空闲 + 静默窗口 */
+    FM225_WAIT_ENROLL,     /* ENROLL 已下发：模组录入会话进行中（独占，禁插其它命令） */
     FM225_WAIT_DELETE,
 } fm225_state_t;
 
@@ -84,7 +110,66 @@ static uint32_t s_pending_at_ms;           /* 下发（或上次重发）时刻 
 static uint8_t  s_retry;                   /* 已重发次数 */
 static int32_t  s_delete_id = -1;         /* 待删除 face_id（应答回填） */
 
+/* 录入请求（受理与下发分离，见 fm225_enroll / fm225_enroll_issue）：
+ * 点按钮只做「受理」，真正下发 ENROLL 由 tick 在「模组空闲 + 静默窗口已过」后完成。 */
+static bool     s_enroll_req;                          /* 有录入请求待下发 */
+static char     s_enroll_name[32];                     /* 待录入的名字（UTF-8，NUL 结尾） */
+static uint32_t s_enroll_arm_at_ms;                    /* 受理时刻（静默窗口基准） */
+static uint32_t s_enroll_sent_at_ms;                   /* ENROLL 实际下发时刻 */
+static uint32_t s_enroll_note_count;                   /* 本次录入会话收到的 NOTE 人脸状态条数 */
+static int32_t  s_enroll_last_state;                   /* 会话期间末次人脸状态（-1 = 从未上报） */
+static bool     s_enroll_hint_done;                    /* 「模组没上报过状态」提示是否已打过 */
+
+/* ---------- NOTE 明细诊断（env SAFE_FM225_NOTE_DEBUG，默认关） ----------
+ * 用途：定位「模组进了录入会话却看不到脸」这类问题——需要看模组**到底上报了什么**：
+ * state 数值、人脸框 left/top/right/bottom、姿态 yaw/pitch/roll，以及原始字节
+ * （用于反推字节序，历史结论是 state 为小端但手册未明写）。
+ * 默认关闭：打开后逐帧打印（真机约 2.1 帧/秒）会刷屏，仅诊断期开。
+ * 取值语义**白名单式**：只有 1/true/yes/on（大小写不敏感）算开启，其余（含空、"0"、
+ * "false"、"no"、乱写）一律关闭——与远程通道 SAFE_ALLOW_INJECT 同一纪律：
+ * 诊断开关绝不能因歧义输入被意外打开。 */
+static bool     s_note_dbg;
+static uint32_t s_note_frames;                              /* 收到的 FACE_STATE 帧数 */
+static uint32_t s_note_state_cnt[8];                        /* 按 state 计数（越界归 7） */
+static uint32_t s_note_box_nonzero;                         /* 人脸框非全零的帧数 */
+static uint32_t s_note_dbg_next_ms;                         /* 下一次汇总打印时刻 */
+
+/* 大小写不敏感的字符串相等（避免引入 strcasecmp 的平台差异） */
+static bool ci_eq(const char * a, const char * b)
+{
+    if(a == NULL || b == NULL) return false;
+    while(*a != '\0' && *b != '\0') {
+        char ca = *a, cb = *b;
+        if(ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+        if(cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+        if(ca != cb) return false;
+        a++; b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool env_flag_on(const char * v)
+{
+    if(v == NULL) return false;
+    while(*v == ' ' || *v == '\t') v++;
+    return ci_eq(v, "1") || ci_eq(v, "true") || ci_eq(v, "yes") || ci_eq(v, "on");
+}
+
+/* 在途的静默命令（fm225_send_silent 下发：不进 pending、不重发、不报 ERROR）。
+ * 它们同样会抢占模组侧进行中的会话，所以必须单独占一个「在途」标记，否则录入
+ * 会在 0x24 清单查询还没被消化时就下发，把模组打成「后到的抢占先到的」。
+ * 0 = 无在途；非 0 = 命令字（0x10 清场 / 0x24 清单查询 / 0x23 清录入状态）。 */
+static uint8_t  s_silent_cmd;
+static uint32_t s_silent_at_ms;
+
 static fm225_proto_ctx_t s_proto;
+
+/* 当前 tick 时刻（fm225_tick 的 now_ms 快照）。
+ * 用途：ENROLL 应答打日志时要算「出结果耗时」，而应答回调在 face 线程里跑、没有
+ * now_ms 参数；这里由主线程在 tick 开头留一份同源于 now_ms 的时刻，与
+ * s_enroll_sent_at_ms 相减即为真实等待时长（两者同一时钟基，不会跨基回绕）。
+ * 跨线程只写这一个标量、只用于日志，纪律同 s_face_state。 */
+static uint32_t s_now_ms;
 
 /* 模组侧已注册用户清单（0x24 应答缓存，FR-21 防线 3 对账用）。
  * s_mod_id_count: -1 = 尚未取得；>=0 = 已取得（0 是合法值，必须与「没取到」区分）。 */
@@ -177,6 +262,14 @@ static safe_err_t fm225_open(void)
     }
     /* pty 侧 tcsetattr 可能失败（虚拟串口不支持全部参数）——非致命，字节流照通 */
 
+    /* NOTE 明细诊断开关：每次 open（= 每次 start）重新读取并清零计数 */
+    s_note_dbg          = env_flag_on(getenv("SAFE_FM225_NOTE_DEBUG"));
+    s_note_frames       = 0;
+    s_note_box_nonzero  = 0;
+    memset(s_note_state_cnt, 0, sizeof(s_note_state_cnt));
+    s_note_dbg_next_ms  = 0;
+    printf("[fm225] NOTE 明细诊断 %s（env SAFE_FM225_NOTE_DEBUG）\n",
+           s_note_dbg ? "开启" : "关闭");
     printf("[fm225] 已打开 %s（fd=%d，115200 8N1）\n", dev, s_uart_fd);
     return SAFE_OK;
 }
@@ -188,29 +281,138 @@ static void fm225_close(void)
     s_pending_len  = 0;
 }
 
-/* 下发一条「不问结果」的即时查询（对账用）。
+/* 把 UTF-8 名字拷进定长字段，不切断多字节字符（放不下的整字丢弃，末尾补 NUL）。
+ * 模组侧 user_name 字段是 32B 定长，中文 3B/字 → 最多 10 字（30B），实际够用。
+ * （放在帧下发段最前：录入请求的延迟下发路径也要用它把名字写进 ENROLL 载荷。） */
+static void copy_name_utf8(char * dst, size_t cap, const char * src)
+{
+    if(dst == NULL || cap == 0) return;
+    dst[0] = '\0';
+    if(src == NULL) return;
+    size_t n = 0;
+    while(src[n] != '\0' && n + 1 < cap) {
+        unsigned char c = (unsigned char)src[n];
+        size_t w = (c < 0x80u) ? 1u : ((c >= 0xF0u) ? 4u : ((c >= 0xE0u) ? 3u : 2u));
+        if(n + w > cap - 1) break;          /* 放不下则整字丢弃，不切半个字 */
+        n += w;
+    }
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+/* 下发一条「不问结果」的命令（0x10 清场 / 0x24 清单查询 / 0x23 清录入状态）。
  * 不走 fm225_send_cmd：那条路径会记 pending 并在超时后重发 + 报 FACE_EV_ERROR，
- * 而清单查询失败属「尽力而为」，不该在界面弹错误横幅、更不该刷屏重发。 */
+ * 而清场/查询失败属「尽力而为」，不该在界面弹错误横幅、更不该刷屏重发。
+ * ⚠️ 但它**同样会抢占模组侧进行中的会话**（实测 2026-09-15），因此必须占住
+ * s_silent_cmd 这个「在途」标记，否则 ENROLL 会在这条命令还没被模组消化完时
+ * 就下发 —— 先到的那条会被静默挤掉、无应答。 */
 static void fm225_send_silent(uint8_t cmd)
 {
     const uint8_t frame[6] = { FM225_SYNC0, FM225_SYNC1, cmd, 0x00, 0x00, cmd };
-    fm225_send_raw(frame, sizeof(frame));   /* XOR = cmd ^ 0 ^ 0 = cmd */
+    if(fm225_send_raw(frame, sizeof(frame)) == SAFE_OK) {   /* XOR = cmd ^ 0 ^ 0 = cmd */
+        s_silent_cmd   = cmd;
+        s_silent_at_ms = hal_time_ms();
+    }
+}
+
+/* 模组是否「正被别的会话占用」——会话型命令（ENROLL / VERIFY / DELETE）下发前的判据。
+ * 三种占用来源：
+ *   ① s_pending_len > 0   有命令已下发、还在等它的 REPLY；
+ *   ② 会话状态机在跑       WAIT_VERIFY / WAIT_ENROLL / WAIT_DELETE；
+ *   ③ s_silent_cmd != 0    有静默命令在途（它不进 pending，但一样会抢占会话）。
+ * ★ FM225_ENROLL_ARMING 不算「被别人占用」——那是本次录入请求自己占的排队位。 */
+static bool fm225_module_busy(void)
+{
+    if(s_pending_len > 0) return true;
+    if(s_state == FM225_WAIT_VERIFY || s_state == FM225_WAIT_ENROLL ||
+       s_state == FM225_WAIT_DELETE) return true;
+    if(s_silent_cmd != 0) return true;
+    return false;
 }
 
 /* 启动对账第一步：取模组用户清单（FR-21 防线 3）。
  * 只在「空闲且无 pending」时发 —— 实测（2026-09-15）新命令会**抢占**进行中的会话，
- * 且被抢占的会话静默无应答；识别链路优先，查询让路。 */
+ * 且被抢占的会话静默无应答；识别链路优先，查询让路。
+ * 新增两条守卫：录入排队/进行中一律不插查询（s_state != FM225_IDLE 已覆盖排队与
+ * 进行中两种态），上一条静默查询还没消化完也不重发。 */
 static void fm225_recon_poll(uint32_t now_ms)
 {
     if(s_mod_id_count >= 0) return;                     /* 已取得，不再查 */
     if(!s_started || s_pending_len > 0 || s_state != FM225_IDLE) return;
+    if(s_enroll_req) return;                            /* 录入排队中：不插查询 */
+    if(s_silent_cmd != 0) return;                       /* 上一条静默查询还在途 */
     if(s_recon_at_ms != 0 && (now_ms - s_recon_at_ms) < FM225_RECON_RETRY_MS) return;
     s_recon_at_ms = now_ms;
     fm225_send_silent(FM225_CMD_GET_ALL_USERID);
 }
 
+/* 录入请求的实际下发点（tick 驱动，见 fm225_enroll 里「为什么要延迟下发」）。
+ * 返回 true 表示本次 tick 真的把 ENROLL 打下去了。 */
+static bool fm225_enroll_issue(uint32_t now_ms)
+{
+    if(!s_enroll_req) return false;
+
+    if(!s_started) {                    /* 排队期间被 stop / 离页：丢弃请求 */
+        s_enroll_req = false;
+        if(s_state == FM225_ENROLL_ARMING) s_state = FM225_IDLE;
+        if(s_enroll_arm_at_ms != 0) {
+            printf("[fm225] 录入请求作废：后端已停止（未下发 ENROLL）\n");
+        }
+        return false;
+    }
+    if(fm225_module_busy()) return false;
+    /* 静默窗口未过（有符号比较：now_ms 早于 arm 时刻时差为负，也判为未过） */
+    if((int32_t)(now_ms - s_enroll_arm_at_ms) < (int32_t)FM225_SETTLE_MS) return false;
+
+    /* ENROLL 载荷（手册 §六 H>>M，共 35B）：
+     *   p[0]     admin     = 0   角色由业务层记录，模组 admin 标记不用（实测 admin=0 被接受）
+     *   p[1..32] user_name 本地用户名 —— v1.4（FR-21 防线 1）：把名字写进模组侧模板，
+     *                      VERIFY 成功应答会原样带回，供业务层核对凭据归属
+     *   p[33]    face_dir  = 0x00（FACE_DIRECTION_UNDEFINE，手册标注「未定义，默认为
+     *                      正向」；实测 2026-09-15：0x00 与 0x01(FACE_DIRECTION_MIDDLE)
+     *                      行为完全一致，都进入录入流程并在 timeout 后回
+     *                      MR_FAILED4_TIMEOUT，故维持 0x00）
+     *                      ★ 当前拍板（用户 2026-09-15）：**单帧模式**（一次采集即成模板，
+     *                      最简单可靠）；多角度方向录入为后续升级项，勿在本函数顺手加）
+     *   p[34]    timeout   = FM225_ENROLL_TIMEOUT_S */
+    uint8_t p[35];
+    memset(p, 0, sizeof(p));
+    copy_name_utf8((char *)(p + 1), 32, s_enroll_name);
+    p[33] = 0x00;
+    p[34] = FM225_ENROLL_TIMEOUT_S;
+
+    safe_err_t e = fm225_send_cmd(FM225_CMD_ENROLL, p, sizeof(p));
+    s_enroll_req = false;
+
+    if(e != SAFE_OK) {
+        s_state = FM225_IDLE;
+        printf("[fm225] ENROLL 下发失败：err=%d（模组未进入录入）\n", (int)e);
+        face_enroll_result_t r;
+        memset(&r, 0, sizeof(r));
+        r.face_id = -1;
+        r.err     = e;
+        face_service_emit(FACE_EV_ENROLL_DONE, &r);
+        return false;
+    }
+
+    s_state              = FM225_WAIT_ENROLL;
+    s_enroll_sent_at_ms  = now_ms;
+    s_enroll_note_count  = 0;
+    s_enroll_last_state  = -1;
+    s_enroll_hint_done   = false;
+    printf("[fm225] ENROLL 下发：name=\"%s\" dir=0x%02X timeout=%us"
+           "（模组已空闲，录入会话独占开始，会话超时 %ums）\n",
+           s_enroll_name, (unsigned)p[33], (unsigned)p[34],
+           (unsigned)FM225_SESSION_TIMEOUT_MS);
+    return true;
+}
+
 /* 单次识别（FR-27 拍板）：仅在空闲时受理一次 VERIFY 会话；结果/超时走既有
- * 应答链，结束即静默，不再自动续发。忙 = SAFE_ERR_BUSY。 */
+ * 应答链，结束即静默，不再自动续发。忙 = SAFE_ERR_BUSY。
+ * 「空闲」= 无 pending、无会话态（含 ENROLL_ARMING / WAIT_ENROLL —— 录入期间不受理
+ * 识别，否则 VERIFY 会把录入会话挤掉）、无在途静默命令。
+ * 注：在途静默命令这里**不挡**——清单查询只在启动对账期（s_mod_id_count < 0）出现，
+ * 挡住会让该期间的识别按钮间歇性返回 BUSY；真要撞上，被挤掉的只是可重发的查询。 */
 static safe_err_t fm225_verify_once(void)
 {
     if(!s_started) return SAFE_ERR_STATE;
@@ -291,10 +493,11 @@ static void fm225_fg_tick(uint32_t now_ms)
     if(!fg) {
         if(s_pending_len > 0 || s_state != FM225_IDLE) {
             fm225_send_silent(FM225_CMD_RESET);
-            printf("[fm225] 离开人脸页：0x10 RESET 终止会话\n");
+            printf("[fm225] 离开人脸页：0x10 MID_RESET 终止会话\n");
         }
         s_pending_len = 0;
         s_state       = FM225_IDLE;
+        s_enroll_req  = false;      /* 排队中的录入请求一并作废（模组已被静默） */
     }
     else {
         printf("[fm225] 进入人脸页：恢复识别会话\n");
@@ -350,24 +553,6 @@ static void fm225_health_tick(uint32_t now_ms)
 
 /* ---------------- 帧回调（face 线程内执行） ---------------- */
 
-/* 把 UTF-8 名字拷进定长字段，不切断多字节字符（放不下的整字丢弃，末尾补 NUL）。
- * 模组侧 user_name 字段是 32B 定长，中文 3B/字 → 最多 10 字（30B），实际够用。 */
-static void copy_name_utf8(char * dst, size_t cap, const char * src)
-{
-    if(dst == NULL || cap == 0) return;
-    dst[0] = '\0';
-    if(src == NULL) return;
-    size_t n = 0;
-    while(src[n] != '\0' && n + 1 < cap) {
-        unsigned char c = (unsigned char)src[n];
-        size_t w = (c < 0x80u) ? 1u : ((c >= 0xF0u) ? 4u : ((c >= 0xE0u) ? 3u : 2u));
-        if(n + w > cap - 1) break;          /* 放不下则整字丢弃，不切半个字 */
-        n += w;
-    }
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
-
 /* MR_* → safe_err_t（v1.4 / N3）：不再把失败原因坍缩成统一的 SAFE_ERR_FAIL。
  * 手册的 MR 码各有语义，坍缩后 UI 只能报「失败」，FR-22「同一张脸只能绑一个用户」
  * 也无从判定。映射遵循工程既有的「错误码统一」原则（§1.2）。 */
@@ -384,6 +569,29 @@ static safe_err_t mr_to_err(uint8_t mr)
         case FM225_MR_REJECTED:               return SAFE_ERR_STATE;   /* 被拒 / 时序不允许 */
         case FM225_MR_ABORTED:                return SAFE_ERR_STATE;
         default:                              return SAFE_ERR_FAIL;
+    }
+}
+
+/* MR_* 结果码的可读名（排错日志用）。
+ * ⚠️ 只做「结果码数值 → 手册常量名」的翻译，不碰 core 的 safe_err_str —— 本文件在
+ * hal 层，hal→core 是反向依赖，链接期会 undefined reference（历史踩过）。
+ * 面向用户的语义文案由 UI 层翻译（page_users.c）。 */
+static const char * fm225_mr_name(uint8_t mr)
+{
+    switch(mr) {
+        case FM225_MR_SUCCESS:               return "SUCCESS";
+        case FM225_MR_REJECTED:              return "REJECTED";
+        case FM225_MR_ABORTED:               return "ABORTED";
+        case FM225_MR_FAILED4_CAMERA:        return "FAILED4_CAMERA";
+        case FM225_MR_FAILED4_UNKNOWN:       return "FAILED4_UNKNOWN";
+        case FM225_MR_FAILED4_INVALIDPARAM:  return "FAILED4_INVALIDPARAM";
+        case FM225_MR_FAILED4_NOMEMORY:      return "FAILED4_NOMEMORY";
+        case FM225_MR_FAILED4_UNKNOWNUSER:   return "FAILED4_UNKNOWNUSER";
+        case FM225_MR_FAILED4_MAXUSER:       return "FAILED4_MAXUSER";
+        case FM225_MR_FAILED4_FACEENROLLED:  return "FAILED4_FACEENROLLED";
+        case FM225_MR_FAILED4_LIVENESS:      return "FAILED4_LIVENESS";
+        case FM225_MR_FAILED4_TIMEOUT:       return "FAILED4_TIMEOUT";
+        default:                             return "UNKNOWN_MR";
     }
 }
 
@@ -416,6 +624,7 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
             /* 模组可能刚重启（断电期间模板被人改过是可能的）→ 清单作废、重新取一次 */
             s_mod_id_count = -1;
             s_recon_at_ms  = 0;
+            s_silent_cmd   = 0;   /* 模组重启：在途静默命令的应答永远不会来了 */
             printf("[fm225] NOTE READY：模组就绪\n");
         }
         /* NID_FACE_STATE：录入/验证过程中的人脸状态实时引导（FR-19）。实测（真模组）
@@ -427,6 +636,44 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
             /* ⚠ 字节序实测（2026-09-15）：state 是**小端** int16（GET_ALL_USERID 的
              * 用户 ID 才是手册标注的大端）——按大端解析会得到 0x0100 类垃圾值。 */
             int st = (int)(f->data[1] | (f->data[2] << 8));
+            /* 录入会话可观测（FR-19 排错）：统计模组在本次会话里到底上报过几条人脸
+             * 状态。这条计数是「模组有没有真的在跑录入」的判据 —— 0 条 = 模组大概率
+             * 没进录入（命令被抢占 / 没落地）；有若干条却都是 state=1 = 模组在跑、
+             * 只是没看见脸。两种情况的处置完全不同，日志必须能区分。 */
+            if(s_state == FM225_WAIT_ENROLL) {
+                s_enroll_note_count++;
+                s_enroll_last_state = st;
+            }
+            if(s_note_dbg) {
+                /* 完整解析 LE int16 × 8：v[0]=state, v[1..4]=left/top/right/bottom,
+                 * v[5..7]=yaw/pitch/roll。越过 data_len 的字段补 0（不读越界）。
+                 * raw 打前 4 字节：字节序若与实现假设不符，这一行即可反推。 */
+                int32_t v[8];
+                for(int k = 0; k < 8; k++) {
+                    size_t o = (size_t)(1 + k * 2);
+                    v[k] = (o + 1 < (size_t)f->data_len)
+                               ? (int32_t)(int16_t)((uint16_t)f->data[o] | ((uint16_t)f->data[o + 1] << 8))
+                               : 0;
+                }
+                s_note_frames++;
+                s_note_state_cnt[(st >= 0 && st < 8) ? (size_t)st : 7u]++;
+                if(v[1] || v[2] || v[3] || v[4]) s_note_box_nonzero++;
+                printf("[NOTE-DBG] state=%d L=%d T=%d R=%d B=%d yaw=%d pitch=%d roll=%d "
+                       "raw=%02X %02X %02X %02X len=%u\n",
+                       st, v[1], v[2], v[3], v[4], v[5], v[6], v[7],
+                       f->data[0], f->data[1], f->data[2], f->data[3], (unsigned)f->data_len);
+
+                uint32_t ndbg_now = hal_time_ms();
+                if((int32_t)(ndbg_now - s_note_dbg_next_ms) >= 0) {
+                    s_note_dbg_next_ms = ndbg_now + 5000u;
+                    printf("[NOTE-DBG] 汇总：帧=%u 非零框=%u | state 0:%u 1:%u 2:%u 3:%u 4:%u 5:%u 6:%u 7:%u\n",
+                           (unsigned)s_note_frames, (unsigned)s_note_box_nonzero,
+                           (unsigned)s_note_state_cnt[0], (unsigned)s_note_state_cnt[1],
+                           (unsigned)s_note_state_cnt[2], (unsigned)s_note_state_cnt[3],
+                           (unsigned)s_note_state_cnt[4], (unsigned)s_note_state_cnt[5],
+                           (unsigned)s_note_state_cnt[6], (unsigned)s_note_state_cnt[7]);
+                }
+            }
             if(st != s_face_state) {
                 s_face_state = st;
                 printf("[fm225] 人脸状态：%s\n",
@@ -498,9 +745,24 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
         }
         /* 同时打原始 MR 码：错误码是给 UI 的语义，MR 码是给排错用的现场。
          * 注意：本文件在 hal 层，不得调 core 的 safe_err_str（hal→core 是反向依赖，
-         * 链接期会直接 undefined reference）——只打数值，语义由 UI 层翻译。 */
-        printf("[fm225] enroll 应答：err=%d mr=0x%02X uid=%d\n",
-               (int)r.err, f->result, r.face_id);
+         * 链接期会直接 undefined reference）——只打数值，语义由 UI 层翻译。
+         * 一并打出「会话期间模组上报人脸状态条数 / 末次状态 / 出结果耗时」：
+         * 真机「录入总是失败」时，这三项直接区分「模组没进录入」（0 条）、
+         * 「模组在跑但没看见脸」（有若干条、末次 state=1）与「录入真失败了」。 */
+        printf("[fm225] enroll 应答：err=%d mr=0x%02X(%s) uid=%d"
+               "（NOTE 人脸状态 %u 条，末次 state=%d，耗时 %ums）\n",
+               (int)r.err, f->result, fm225_mr_name(f->result), r.face_id,
+               (unsigned)s_enroll_note_count, (int)s_enroll_last_state,
+               (unsigned)(s_now_ms - s_enroll_sent_at_ms));
+        /* 录入未成功：0x23 FACE RESET 清录入残留状态（手册 §录入流程：「录入过程中
+         * 可通过 FACE RESET 指令终止录入，先前的录入状态也会清零」）。
+         * ★ 只在失败时发：成功时模组已经出过 REPLY、模板已落库，此时再发 0x23
+         * 有把刚写入的模板清掉的风险（收益是臆测的、代价不可逆），故成功路径不动。
+         * 失败/超时路径留下的「未完成的录入上下文」正是「下一次录入总是失败」的嫌疑点。 */
+        if(r.err != SAFE_OK) {
+            fm225_send_silent(FM225_CMD_FACE_RESET);
+            printf("[fm225] 录入未成功：0x23 FACE RESET 清除录入残留状态\n");
+        }
         face_service_emit(FACE_EV_ENROLL_DONE, &r);
         break;
     }
@@ -527,6 +789,7 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
          * user_counts 当成 data[2]、整体错位 2 字节 —— 空模块（全 0）恰好掩盖了它，
          * 真机非空清单会漏掉用户 / 把 uid 读成垃圾。抽函数 + 单测固化防复发。 */
         s_state = FM225_IDLE;
+        if(s_silent_cmd == FM225_CMD_GET_ALL_USERID) s_silent_cmd = 0;  /* 静默查询已应答 */
         int32_t cnt = 0;
         if(f->result == FM225_MR_SUCCESS) {
             cnt = (int32_t)fm225_parse_userid_list(f->data, f->data_len,
@@ -554,6 +817,17 @@ static safe_err_t fm225_init(void)
     s_delete_id    = -1;
     s_mod_id_count = -1;      /* 清单未取得 */
     s_recon_at_ms  = 0;
+
+    /* 录入请求与静默命令在途标记复位（会话独占相关，见 fm225_module_busy） */
+    s_enroll_req        = false;
+    s_enroll_name[0]    = '\0';
+    s_enroll_arm_at_ms  = 0;
+    s_enroll_sent_at_ms = 0;
+    s_enroll_note_count = 0;
+    s_enroll_last_state = -1;
+    s_enroll_hint_done  = false;
+    s_silent_cmd        = 0;
+    s_silent_at_ms      = 0;
 
     /* 健康监测复位并开启（FR-23）：串口没起（PC 无设备）时也要能判「模组无响应」，
      * 故监测只跟后端是否在用有关，与串口是否打开无关。 */
@@ -608,19 +882,64 @@ static safe_err_t fm225_start(void)
 static safe_err_t fm225_stop(void)
 {
     s_started = false;
-    /* MID_RESET(0x10)：通用复位。实测（2026-09-15 真模组）：下发后约 26ms 回
-     * REPLY(result=0x00)，且进行中的 VERIFY 会话立即停止出 NOTE（静默终止，不回 ABORTED）
-     * —— 0x10 足以让会话停下来。
-     * 术语订正：本行原注释写作「FACE_RESET」，但手册里 0x10 是 MID_RESET（通用复位），
-     * MID_FACERESET 才是 0x23（终止「录入」并清录入状态），两者不是一回事。 */
+    s_enroll_req = false;                 /* 排队中的录入请求一并作废 */
+    /* MID_RESET(0x10)：通用复位。手册 §3——「模组将取消之前正在执行的命令（例如
+     * 录入、解锁等），返回 STANDBY 状态」；实测（2026-09-15 真模组）下发后约 26ms
+     * 回 REPLY(result=0x00)，进行中的会话立即停止出 NOTE（静默终止，不回 ABORTED）。
+     * ★ 这里**不用** 0x23 FACE RESET：手册里 0x23 只清「录入状态」，取消不掉在飞的
+     * VERIFY；stop 要的是「把模组拉回 STANDBY」，只有 0x10 做得到。
+     *   0x23 的用途见 ENROLL 应答分支（录入失败后清录入残留状态）。
+     * 术语订正：本行原注释把 0x10 称作「FACE RESET」，属手册术语混用——0x10 是
+     * MID_RESET，MID_FACERESET(0x23) 才是 FACE RESET。 */
     fm225_send_cmd(FM225_CMD_RESET, NULL, 0);
     s_state        = FM225_IDLE;
     s_pending_len  = 0;
+    s_silent_cmd   = 0;
     return SAFE_OK;
+}
+
+/* 会话型命令（VERIFY / ENROLL）到点仍无应答：放弃本轮，**不重发**（理由见 fm225_tick）。
+ *
+ * 「被抢占方静默无应答」是真模组的实测行为（2026-09-15），所以这条路径不是异常，
+ * 而是必须能兜住的正常分支 —— 兜不住的话界面就一直停在「录入中」，只能等
+ * face_service 的 30s 外层兜底（ENROLL_TIMEOUT_MS）才动，且拿不到任何现场信息。
+ * 兜底出口：ENROLL 走 FACE_EV_ENROLL_DONE(SAFE_ERR_TIMEOUT)（顺带把 s_enroll_pending
+ * 清掉，UI 立即退出等待态）；VERIFY 走 FACE_EV_ERROR。 */
+static void fm225_session_giveup(void)
+{
+    const uint8_t cmd = s_pending_cmd;
+    s_pending_len = 0;
+    s_state       = FM225_IDLE;
+
+    /* 模组大概率还卡在被抢占 / 没起来的会话里：0x10 MID_RESET 把它拉回 STANDBY
+     * （手册 §3）。清场命令自己不应答也无所谓，故走静默下发。 */
+    fm225_send_silent(FM225_CMD_RESET);
+
+    if(cmd == FM225_CMD_ENROLL) {
+        printf("[fm225] ENROLL 会话超时：%ums 无应答，放弃本轮（不重发）——"
+               "疑似 ENROLL 被抢占或命令未落地；会话期间模组上报人脸状态 %u 条"
+               "（末次 state=%d）\n",
+               (unsigned)FM225_SESSION_TIMEOUT_MS,
+               (unsigned)s_enroll_note_count, (int)s_enroll_last_state);
+        face_enroll_result_t r;
+        memset(&r, 0, sizeof(r));
+        r.face_id = -1;
+        r.err     = SAFE_ERR_TIMEOUT;
+        face_service_emit(FACE_EV_ENROLL_DONE, &r);
+    }
+    else {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "fm225 命令 0x%02X 无应答（会话型命令不重发）",
+                 (unsigned)cmd);
+        printf("[fm225] %s\n", msg);
+        face_service_emit(FACE_EV_ERROR, msg);
+    }
 }
 
 static void fm225_tick(uint32_t now_ms)
 {
+    s_now_ms = now_ms;   /* 留一份给 face 线程的应答回调算耗时用（见 s_now_ms 注释） */
+
     /* 协议状态机半帧超时推进（feed 在 face 线程，tick 在主线程，见 §5.20 线程模型） */
     fm225_proto_tick(&s_proto, now_ms);
 
@@ -633,19 +952,52 @@ static void fm225_tick(uint32_t now_ms)
     /* 前台暂停：不对账 / 不重发 / 不重开识别会话 */
     if(!face_service_foreground()) return;
 
+    /* 静默命令（0x10 清场 / 0x24 清单查询 / 0x23 清录入状态）的在途窗口：到点即视为
+     * 结束，解除「在途」标记。它们不进 pending、没有超时重发，必须有个兜底出口——
+     * 否则模组永不应答 0x24 时 s_silent_cmd 会一直占着，ENROLL 永远排不上队。 */
+    if(s_silent_cmd != 0 &&
+       (int32_t)(now_ms - s_silent_at_ms) >= (int32_t)FM225_SETTLE_MS) {
+        s_silent_cmd = 0;
+    }
+
+    /* 录入请求下发：排在 recon 之前——录入优先，且下发成功后 recon 会被会话独占拦住 */
+    fm225_enroll_issue(now_ms);
+
     /* 启动对账：空闲时取一次模组用户清单（FR-21 防线 3） */
     fm225_recon_poll(now_ms);
 
-    /* 命令应答超时重发。now_ms 与 s_pending_at_ms 同为 hal_time_ms() 同源单调毫秒，
+    /* 录入中的人脸状态可观测提示（FR-19）：会话跑过 FM225_ENROLL_HINT_MS 模组还没出过
+     * 一条 NOTE 人脸状态，说明模组大概率**根本没进录入**（ENROLL 被抢占 / 没落地），
+     * 而不是「人没站到镜头前」。这两种情况的处置完全不同，日志必须能当场区分。 */
+    if(s_state == FM225_WAIT_ENROLL && !s_enroll_hint_done &&
+       (int32_t)(now_ms - s_enroll_sent_at_ms) >= (int32_t)FM225_ENROLL_HINT_MS) {
+        s_enroll_hint_done = true;
+        if(s_enroll_note_count == 0) {
+            printf("[fm225] 录入已进行 %ums：模组尚未上报任何人脸状态（NOTE）——"
+                   "模组可能未进入录入（ENROLL 被抢占 / 命令未落地），"
+                   "而非「没站到镜头前」\n", (unsigned)FM225_ENROLL_HINT_MS);
+        }
+    }
+
+    /* 命令应答超时处理。now_ms 与 s_pending_at_ms 同为 hal_time_ms() 同源单调毫秒，
      * 差值才是真实等待时长（D1 前：20ms 自增计数 vs 绝对 ms 跨基 → 回绕后恒真）。
      * 超时值按命令分型（D17）：VERIFY/ENROLL 是会话命令用 SESSION 超时，
-     * 其余（RESET/GETSTATUS/DELETE）立即应答用 800ms。 */
-    uint32_t pending_timeout_ms = FM225_REPLY_TIMEOUT_MS;
-    if(s_pending_cmd == FM225_CMD_VERIFY || s_pending_cmd == FM225_CMD_ENROLL)
-        pending_timeout_ms = FM225_SESSION_TIMEOUT_MS;
+     * 其余（RESET/GETSTATUS/DELETE）立即应答用 800ms。
+     * ★ D18：会话型命令**不重发**。真模组实测「新命令会抢占进行中的会话，被抢占方
+     *   静默无应答」——重发 ENROLL 只会把模组里正在跑的那一轮重新抢占、10s 计时从头
+     *   再来（3 次重发 = 界面空转 36s），且到底哪一轮成功彻底不可判定。改为到点直接
+     *   放弃并上报（ENROLL → FACE_EV_ENROLL_DONE(TIMEOUT)；VERIFY → FACE_EV_ERROR），
+     *   由用户/上层重新发起，比「看起来在重试其实在互相踩」诚实。 */
+    const bool     session_cmd = (s_pending_cmd == FM225_CMD_VERIFY ||
+                                  s_pending_cmd == FM225_CMD_ENROLL);
+    const uint32_t pending_timeout_ms = session_cmd ? FM225_SESSION_TIMEOUT_MS
+                                                    : FM225_REPLY_TIMEOUT_MS;
     if(s_pending_len > 0 && s_started &&
        (now_ms - s_pending_at_ms) > pending_timeout_ms) {
-        if(s_retry >= FM225_MAX_RETRY) {
+        if(session_cmd) {
+            fm225_session_giveup();
+        }
+        else if(s_retry >= FM225_MAX_RETRY) {
             s_pending_len = 0;
             s_state = FM225_IDLE;
             char msg[64];
@@ -672,39 +1024,52 @@ static void fm225_tick(uint32_t now_ms)
 
 static safe_err_t fm225_enroll(const char * user_name)
 {
-    if(s_state == FM225_WAIT_ENROLL) return SAFE_ERR_BUSY;
+    if(!s_started) return SAFE_ERR_STATE;
+    /* 已有录入在途（排队中 or 已下发）→ 忙，不再叠一轮 */
+    if(s_enroll_req || s_state == FM225_ENROLL_ARMING || s_state == FM225_WAIT_ENROLL)
+        return SAFE_ERR_BUSY;
 
-    /* ENROLL 载荷（手册 §六 H>>M，共 35B）：
-     *   p[0]     admin     = 0   角色由业务层记录，模组 admin 标记不用（实测 admin=0 被接受）
-     *   p[1..32] user_name 本地用户名 —— v1.4（FR-21 防线 1）：把名字写进模组侧模板，
-     *                      VERIFY 成功应答会原样带回，供业务层核对凭据归属
-     *   p[33]    face_dir  = 0x00（UNDEFINE，走默认正向交互录入。实测 2026-09-15：
-     *                      0x00 与 0x01(FACE_DIRECTION_MIDDLE) 行为完全一致，都进入录入流程
-     *                      并在 timeout 后回 MR_FAILED4_TIMEOUT，故维持 0x00）
-     *                      ★ 当前拍板（用户 2026-09-15）：**单帧模式**（一次采集即成模板，
-     *                      最简单可靠）；多角度方向录入为后续升级项，勿在本函数顺手加）
-     *   p[34]    timeout   = FM225_ENROLL_TIMEOUT_S
-     *
-     * ★ 会话互斥实测（2026-09-15 真模组，勿据直觉改）：VERIFY 会话进行中下发 ENROLL，
-     *   模组**接受**新命令并抢占会话 —— ENROLL 自己走满 10s 超时后正常回 REPLY；
-     *   而被抢占的 VERIFY **静默终止、不回 REPLY（也没有 ABORTED）**。
-     *   所以「每个 VERIFY 必有应答」是错的假设；当前实现自洽靠的是 fm225_send_cmd 会把
-     *   s_pending_* 覆盖成新命令（VERIFY 的应答本就不会来）。若将来改成多 pending 并行，
-     *   必须同时处理「被抢占的会话永不应答」这件事。 */
-    uint8_t p[35];
-    memset(p, 0, sizeof(p));
-    copy_name_utf8((char *)(p + 1), 32, user_name);
-    p[33] = 0x00;
-    p[34] = FM225_ENROLL_TIMEOUT_S;
-    safe_err_t e = fm225_send_cmd(FM225_CMD_ENROLL, p, sizeof(p));
-    s_state = (e == SAFE_OK) ? FM225_WAIT_ENROLL : FM225_IDLE;
-    return e;
+    /* 清场：模组可能还有在途会话（VERIFY 在飞 / 上一条静默命令还没消化完）。
+     * 用 0x10 MID_RESET —— 手册 §3：「模组将取消之前正在执行的命令（例如录入、
+     * 解锁等），返回 STANDBY 状态」。它是两个候选里唯一同时覆盖「录入」和「解锁」
+     * 的：0x23 FACE RESET（手册 §录入流程）只清录入状态，取消不掉在飞的 VERIFY。
+     * 清场后仍要等 FM225_SETTLE_MS 静默窗口才真正下发 ENROLL（见 fm225_enroll_issue）。
+     * 被清掉的那条命令按实测行为静默无应答，故直接作废 pending，不等它的 REPLY。 */
+    if(fm225_module_busy()) {
+        const unsigned pend = (unsigned)s_pending_len;
+        const int      st   = (int)s_state;
+        const unsigned sil  = (unsigned)s_silent_cmd;
+        fm225_send_silent(FM225_CMD_RESET);
+        s_pending_len = 0;
+        s_state       = FM225_IDLE;
+        printf("[fm225] 录入受理：模组忙（pending=%u state=%d silent=0x%02X）"
+               "→ 0x10 MID_RESET 清场\n", pend, st, sil);
+    }
+
+    /* ★ 受理与下发分离（本轮核心修复）：
+     * 真模组实测（2026-09-15）——**新命令会抢占进行中的会话，且被抢占方静默无应答**。
+     * 旧实现在这里直接 fm225_send_cmd(ENROLL)：若此时刚好有 VERIFY 在飞、或 0x24
+     * 清单查询刚发出，ENROLL 会把它们挤掉；若反过来（ENROLL 先发、清场命令后到），
+     * ENROLL 自己被挤掉、界面就一直停在「录入中」直到 30s 外层兜底超时。
+     * 现在：受理立刻返回 SAFE_OK（UI 进「录入中」），真正下发交给 tick，条件是
+     * 「模组完全空闲（无 pending / 无其它会话 / 无在途静默命令）+ 静默窗口已过」。
+     * 代价：最坏多等 300ms。收益：录入会话独占，不再与任何命令互相抢占。 */
+    copy_name_utf8(s_enroll_name, sizeof(s_enroll_name), user_name);
+    s_enroll_req       = true;
+    s_enroll_arm_at_ms = hal_time_ms();
+    s_state            = FM225_ENROLL_ARMING;
+    printf("[fm225] 录入受理：name=\"%s\"（等模组空闲 + %ums 静默窗口后下发 ENROLL）\n",
+           s_enroll_name, (unsigned)FM225_SETTLE_MS);
+    return SAFE_OK;
 }
 
 static safe_err_t fm225_delete_tpl(int32_t face_id)
 {
     if(face_id < 0) return SAFE_ERR_PARAM;
-    if(s_state == FM225_WAIT_DELETE) return SAFE_ERR_BUSY;
+    /* 会话独占（与 ENROLL 同理：删除也是会话型命令，同样会抢占进行中的会话）。
+     * 旧实现只挡「正在删除」这一态，于是录入/验证在途时下发的 DELETE 会把 ENROLL
+     * 或 VERIFY 静默挤掉 —— 挤掉的那一方永不应答，界面只能等外层兜底超时。 */
+    if(s_state != FM225_IDLE || s_pending_len > 0) return SAFE_ERR_BUSY;
     uint8_t p[2] = {
         (uint8_t)((uint16_t)face_id >> 8),   /* user_id_heb */
         (uint8_t)(face_id & 0xFF),           /* user_id_leb */
