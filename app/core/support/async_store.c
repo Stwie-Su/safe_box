@@ -107,41 +107,10 @@ void astore_append_log(const char * evt, const char * user, int res, const char 
     worker_post(al_worker, a, NULL);   /* done=NULL：后台完成后框架释放 arg */
 }
 
-/* ---------------- verify pin (unlock) ---------------- */
-typedef struct {
-    astore_verify_cb_t cb;
-    char pin[16];
-    int  result;
-    char user[32];
-} vp_job_t;
-
-static void vp_worker(void * p)
-{
-    vp_job_t * a = (vp_job_t *)p;
-    a->user[0] = '\0';
-    a->result = (int)backend_verify_pin(a->pin, a->user, sizeof(a->user));
-}
-
-static void vp_done(void * p)
-{
-    vp_job_t * a = (vp_job_t *)p;
-    if (a->cb) a->cb(a->result, a->user);
-    free(a);
-}
-
-void astore_verify_pin(const char * pin, astore_verify_cb_t cb)
-{
-    vp_job_t * a = (vp_job_t *)calloc(1, sizeof(*a));
-    if (!a) return;
-    a->cb = cb;
-    strncpy(a->pin, pin ? pin : "", sizeof(a->pin) - 1);
-    worker_post(vp_worker, a, vp_done);
-}
-
 /* ---------------- verify admin pin ---------------- */
 typedef struct {
     astore_int_cb_t cb;
-    char pin[16];
+    char pin[SAFE_VIRTUAL_PIN_MAX_INPUT + 1];
     int  result;
 } va_job_t;
 
@@ -149,9 +118,12 @@ static void va_worker(void * p)
 {
     va_job_t * a = (va_job_t *)p;
     /* 二级确认要求「任一启用管理员」的 PIN，而非写死名为 "admin" 的用户——
-     * 管理员改名 / 多管理员时原来会误判 PIN 错误（用户报：删人脸输入正确 PIN 却报错）。 */
+     * 管理员改名 / 多管理员时原来会误判 PIN 错误（用户报：删人脸输入正确 PIN 却报错）。
+     * ★ 必须走 backend_verify_admin_pin（精确匹配）：这里曾复用 backend_verify_pin，
+     *   而后者会跟随虚位开关做「连续子串」匹配 —— 一旦 FR-18 落地，管理员二次确认
+     *   就等于接受了虚位，直接违反规约 §5.5「管理员二次确认：不支持虚位」。 */
     char name[32] = {0};
-    unlock_result_t r = backend_verify_pin(a->pin, name, sizeof(name));
+    unlock_result_t r = backend_verify_admin_pin(a->pin, name, sizeof(name));
     if (r != UNLOCK_OK) { a->result = (r == UNLOCK_LOCKED) ? 2 : 1; return; }
     safe_user_t u;
     if (user_find_by_name(name, &u) == 0 && strcmp(u.role, "admin") == 0)

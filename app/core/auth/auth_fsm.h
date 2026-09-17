@@ -32,6 +32,7 @@ typedef enum {
     FSM_WAIT_OTP,     /* 等待动态码（弹动态密码页，60s 超时） */
     FSM_DENY,         /* 拒绝（展示 2s） */
     FSM_LOCKOUT,      /* 设备级锁定（倒计时 30s） */
+    FSM_VERIFYING,    /* PIN 后台校验中（v1.9 异步化：界面显示「校验中」，不阻塞主线程） */
 } fsm_state_t;
 
 /* UI 通知回调：状态机进入某状态时调用（UI 据此切页/弹窗/提示） */
@@ -66,7 +67,18 @@ void auth_fsm_submit_face(int32_t face_id, face_reason_t reason);  /* 注入一�
  * 非空且与本地用户名不符 → 判凭据失效：拒绝开锁 + 防伪告警 + 本地人脸凭据标记失效
  * （PIN / 动态码通道不受影响）。 */
 void auth_fsm_submit_face_ex(int32_t face_id, face_reason_t reason, const char * mod_name);
-void auth_fsm_submit_pin(const char * pin);            /* PIN 通道入口（主页键盘） */
+/* PIN 通道入口（主页键盘）。
+ * v1.9 起**异步**：提交后立即进入 FSM_VERIFYING，PBKDF2 判定在 worker 线程执行，
+ * 完成回调经 worker_poll() 回到主线程后才迁移到 UNLOCKED / DENY / LOCKOUT。
+ * 校验期间再次提交会被忽略（单飞）；判定口径不变（走 backend_verify_pin
+ * ——「连续子串」虚位匹配，受 virtual_pin_enable 开关控制）。 */
+void auth_fsm_submit_pin(const char * pin);
+
+/* 调 PIN 后台校验的「安全网」超时（秒，默认 120）：仅在后台迟迟不回调时兜底，正常路径不触发。
+ * **非生产路径**：生产端从不调用此函数（保持默认 120s，远大于最坏 PBKDF2 耗时）；
+ * 仅供单测构造确定性超时场景。0 = 下一次 auth_fsm_tick() 即判超时。 */
+void auth_fsm_set_verify_timeout(uint32_t seconds);
+
 void auth_fsm_submit_otp(const char * code);           /* 动态码页提交 */
 void auth_fsm_cancel_otp(void);
 

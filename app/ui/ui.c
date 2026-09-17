@@ -188,7 +188,8 @@ void ui_init(void)
 }
 
 /* FSM 状态变化 → UI 切换
- * UNLOCKED/LOCKOUT 回到主页；WAIT_OTP 弹动态码页；DENY/IDLE 不强制切页。 */
+ * UNLOCKED/LOCKOUT 回到主页；WAIT_OTP 弹动态码页；DENY/IDLE 不强制切页。
+ * v1.9：另行把结果回填给键盘页（校验中 / PIN 错误），仅当键盘页当前可见时。 */
 static void fsm_ui_hook(fsm_state_t st, const char *user, const char *detail)
 {
     (void)user; (void)detail;
@@ -198,6 +199,10 @@ static void fsm_ui_hook(fsm_state_t st, const char *user, const char *detail)
         case FSM_LOCKOUT:  ui_switch_page(PAGE_HOME); break;
         default: break;
     }
+    /* PIN 异步校验反馈：进入 VERIFYING 或失败（DENY）时若键盘页仍是当前页，
+     * 由键盘页就地更新提示文案。成功/锁定已切回主页，此处不再回填（s_vis_page 已变）。 */
+    if (s_vis_page == (int)PAGE_KEYPAD)
+        page_keypad_on_fsm(st, detail);
 }
 
 /**

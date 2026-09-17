@@ -25,11 +25,13 @@
 #include "core/store/store.h"
 #include "core/auth/totp.h"
 #include "core/auth/unlock_backend.h"
+#include "core/support/worker.h"        /* worker_post：PIN 后台校验（v1.9 异步化 + 世代号） */
 #include "hal/hal_time.h"
 #include "hal/hal_face.h"
 #include "hal/hal_actuator.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>   /* calloc/free：PIN 作业对象 */
 #include <time.h>
 
 /* ---------------- 内部状态 ---------------- */
@@ -65,6 +67,10 @@ static bool cred_name_ok(const safe_user_t * u, const char * mod_name);
 #define TO_OTP       60
 #define TO_UNLOCKED  30
 #define TO_DENY      2
+/* TO_VERIFY：PIN 后台校验的安全网超时（秒）。仅用于「worker 异常未回调」的兜底，
+ * 正常路径不会命中（回调到达即离开 FSM_VERIFYING）。取 120s，远大于最慢 PBKDF2
+ * （12 位虚位 × 全部用户在单核 A7 上的耗时）。 */
+#define TO_VERIFY    120
 /* LOCKOUT 用策略 lock_seconds（阶段 1 默认 30） */
 
 static void set_state(fsm_state_t st, const char *user, const char *detail)
@@ -348,19 +354,73 @@ void auth_fsm_submit_face_ex(int32_t face_id, face_reason_t reason, const char *
     resolve(face_id, reason, pu, mod_name);
 }
 
+/* ---------------- 开锁 PIN 异步校验（v1.9） ----------------
+ * 判定下沉 worker 线程；作业对象自带「世代号」，回调据此丢弃陈旧结果。
+ * L2（QA）：仅凭 state==FSM_VERIFYING 无法区分「超时作废的旧作业」与「新会话的作业」——
+ * 若旧作业被前序任务堵塞超过安全网超时、期间又发生新提交，旧回调到达时状态恰为 VERIFYING，
+ * 会把旧结果当成新会话的。世代号消除这一缺口。
+ * 注：不依赖 async_store 的 PIN 包装（其回调签名无上下文槽、无法携带世代号），
+ * 直接以 worker_post 自建带 gen 的作业（同时去掉 core/auth→core/support 的依赖）。 */
+typedef struct {
+    uint32_t gen;                             /* 世代号：每次提交自增 */
+    char     pin[SAFE_VIRTUAL_PIN_MAX_INPUT + 1];
+    int      result;                          /* unlock_result_t */
+    char     user[32];
+} pin_job_t;
+
+static uint32_t s_pin_gen    = 0;             /* 提交计数（世代号发生器） */
+static uint32_t s_pin_active = 0;             /* 当前在途作业的世代号；0 = 无 */
+static uint32_t s_verify_timeout = TO_VERIFY; /* 安全网超时（秒），可调，默认 120 */
+
+/* 后台线程：跑 PBKDF2（含虚位滑窗）。绝不触碰 UI / LVGL。 */
+static void pin_worker(void * p)
+{
+    pin_job_t * a = (pin_job_t *)p;
+    a->user[0] = '\0';
+    a->result = (int)backend_verify_pin(a->pin, a->user, sizeof(a->user));
+}
+
+/* 主线程（worker_poll 派发）：仅当「世代号 == 当前在途作业」且状态仍为 VERIFYING 时才受理。
+ * 世代号挡住「超时作废后迟到的旧作业」，状态挡住在其它通道已推进后到达的旧结果；
+ * 任一不符即丢弃，绝不误开锁 / 误计失败。 */
+static void pin_done(void * p)
+{
+    pin_job_t * a = (pin_job_t *)p;
+    if (a->gen == s_pin_active && s_fsm.state == FSM_VERIFYING) {
+        if (a->result == UNLOCK_OK) {
+            s_fsm.last_reason = FACE_RES_ERROR;   /* 本次开锁与人脸无关 */
+            do_unlock(a->user, "pin");
+        } else if (a->result == UNLOCK_LOCKED) {
+            note_fail(NULL, "设备已锁定");
+        } else {
+            note_fail(a->user[0] ? a->user : NULL, "PIN 错误");
+        }
+    }
+    free(a);   /* 作业对象由本回调释放（worker_poll 只释放节点本身） */
+}
+
+/* 调安全网超时（秒）。0 = 下一次 tick 即超时；供调优 / 测试。 */
+void auth_fsm_set_verify_timeout(uint32_t seconds) { s_verify_timeout = seconds; }
+
+/* PIN 通道入口（v1.9 异步化）：把「多用户 × 候选子串」的 PBKDF2 判定下沉到 worker 线程，
+ * 主线程只做「提交 → 进入校验中 → 收结果」，消除长虚位输入导致的界面冻结。
+ * 判定口径不变：走 backend_verify_pin（连续子串匹配，受 virtual_pin_enable 控制）。
+ * 校验期间拒绝新的 PIN 提交（单飞），避免并发覆盖状态。 */
 void auth_fsm_submit_pin(const char *pin)
 {
     if (s_fsm.state == FSM_LOCKOUT) return;
-    char user[32] = {0};
-    int r = backend_verify_pin(pin, user, sizeof(user));
-    if (r == UNLOCK_OK) {
-        s_fsm.last_reason = FACE_RES_ERROR;   /* 本次开锁与人脸无关 */
-        do_unlock(user, "pin");
-    } else if (r == UNLOCK_LOCKED) {
-        note_fail(NULL, "设备已锁定");
-    } else {
-        note_fail(user[0] ? user : NULL, "PIN 错误");
-    }
+    if (s_fsm.state == FSM_VERIFYING) return;   /* 上一次仍未返回：忽略重复提交 */
+    if (!pin || !*pin) return;
+
+    pin_job_t * a = (pin_job_t *)calloc(1, sizeof(*a));
+    if (!a) { note_fail(NULL, "校验任务分配失败"); return; }
+    a->gen = ++s_pin_gen;
+    strncpy(a->pin, pin, sizeof(a->pin) - 1);
+    a->pin[sizeof(a->pin) - 1] = '\0';
+    s_pin_active = a->gen;
+
+    set_state(FSM_VERIFYING, NULL, "正在校验 PIN");
+    worker_post(pin_worker, a, pin_done);
 }
 
 void auth_fsm_submit_otp(const char *code)
@@ -450,6 +510,16 @@ void auth_fsm_tick(void)
                 set_state(FSM_IDLE, NULL, "");
             }
             break;
+        case FSM_VERIFYING:
+            /* 安全网（异常路径，非正常流程）：正常情况下 pin_done 必定回调并离开本状态。
+             * 若后台因故迟迟不返回，超时后放弃等待、回 IDLE，并作废在途世代号
+             * （s_pin_active=0）——随后迟到的旧作业按世代号被丢弃，不会误开锁/误计失败。
+             * 阈值（默认 120s）远大于最坏 PBKDF2 耗时，正常永不触发。 */
+            if (elapsed >= s_verify_timeout) {
+                s_pin_active = 0;
+                set_state(FSM_IDLE, NULL, "");
+            }
+            break;
         default:
             break;
     }
@@ -466,6 +536,7 @@ const char * auth_fsm_state_name(fsm_state_t s)
         case FSM_WAIT_OTP:  return "WAIT_OTP";
         case FSM_DENY:      return "DENY";
         case FSM_LOCKOUT:   return "LOCKOUT";
+        case FSM_VERIFYING: return "VERIFYING";
         default:            return "?";
     }
 }

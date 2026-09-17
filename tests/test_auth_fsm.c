@@ -14,7 +14,9 @@
 #include "core/auth/auth_fsm.h"
 #include "core/auth/totp.h"
 #include "core/store/store.h"
+#include "core/support/worker.h"
 #include "hal/hal_time.h"
+#include <unistd.h>          /* usleep：驱动 worker 轮询 */
 
 #define TEST_DATA_DIR "/tmp/safe_test_auth"
 
@@ -77,6 +79,24 @@ static void fsm_reset(void)
     auth_fsm_init();
 }
 
+/* v1.9：PIN 校验改为异步 worker，测试需手工驱动。提交后主线程反复 worker_poll()，
+ * 直到状态机离开 FSM_VERIFYING（后台已完成并派发 done 回调）。
+ * 上限 ~5s，足够 Debug 构建下的少量用户；超时由后续 CHECK 暴露为失败。 */
+static void pump_pin(void)
+{
+    for (int i = 0; i < 1000; i++) {
+        worker_poll();
+        if (auth_fsm_state() != FSM_VERIFYING) return;
+        usleep(5000);   /* 5ms */
+    }
+}
+
+/* 状态已不在校验中、但仍需派发「迟到回调」时使用：固定时长内反复 worker_poll。 */
+static void drain_worker_ms(int ms)
+{
+    for (int t = 0; t < ms; t += 5) { worker_poll(); usleep(5000); }
+}
+
 static void add_expired_temp_user(void)
 {
     /* carol：临时用户，有效期已过（valid_until = now - 10） */
@@ -116,6 +136,7 @@ static void add_fr21_user(void)
 
 int main(void)
 {
+    worker_init();   /* v1.9：PIN 异步校验依赖后台 worker，测试需先起线程 */
     setup_store();
     fsm_reset();
 
@@ -239,13 +260,20 @@ int main(void)
     CHECK(user_find_by_name("carol", &bob) != 0);   /* 过期：用户已删除 */
     CHECK(auth_fsm_state() == FSM_IDLE);            /* 授权失效不计设备级失败 */
 
-    /* ---- 1.9 PIN 通道不受影响 ---- */
+    /* ---- 1.9 PIN 通道不受影响（v1.9：改为异步 worker 校验） ----
+     * auth_fsm_submit_pin 现为异步：提交后立即进入 FSM_VERIFYING（界面显示「校验中」），
+     * PBKDF2 在后台线程执行，完成回调经 worker_poll() 回主线程后才迁移终态。
+     * 因此断言改为「提交 → 处于校验中 → 泵到结果 → 断言终态」。 */
     fsm_reset();
     auth_fsm_submit_pin("1234");
+    CHECK(auth_fsm_state() == FSM_VERIFYING);   /* 异步：提交后不阻塞，立即进入校验中 */
+    pump_pin();
     CHECK(auth_fsm_state() == FSM_UNLOCKED);
 
     fsm_reset();
     auth_fsm_submit_pin("0000");
+    CHECK(auth_fsm_state() == FSM_VERIFYING);
+    pump_pin();
     CHECK(auth_fsm_state() == FSM_DENY);
 
     /* ---- 1.10 auth_fsm_fail_streak() 只读连败计数（UI 现代化 ui1 / 规约 §5.2） ----
@@ -301,6 +329,49 @@ int main(void)
     fsm_reset();
     auth_fsm_submit_face_ex(7, FACE_RES_OK, "");
     CHECK(auth_fsm_state() == FSM_UNLOCKED);
+
+    /* ---- 1.12 单飞：VERIFYING 期间重复提交被忽略 ----
+     * 先提交正确 PIN "1234"，随即提交错误 PIN "0000"；第二次必须被忽略，只跑第一次的作业
+     * → 终态 UNLOCKED（若第二次生效会变 DENY，据此判定）。 */
+    fsm_reset();
+    auth_fsm_submit_pin("1234");
+    CHECK(auth_fsm_state() == FSM_VERIFYING);
+    auth_fsm_submit_pin("0000");                 /* 应被忽略：不得新增作业 */
+    CHECK(auth_fsm_state() == FSM_VERIFYING);
+    pump_pin();
+    CHECK(auth_fsm_state() == FSM_UNLOCKED);
+
+    /* ---- 1.13 超时后陈旧结果：按世代号丢弃，不改变终态（L2） ----
+     * 构造「旧作业未返回时跨过一次超时、又发起新提交」的最坏情形：
+     *   submit A("0000") → tick 强判超时（回 IDLE、世代作废）→ submit B("1234") → 再派发 A 的迟到回调。
+     * 只按 state==VERIFYING 判新旧会把 A 的旧结果误当成 B 的；有了世代号，A 被丢弃，
+     * 终态由 B 决定 → UNLOCKED（若世代号缺失，A 会先把状态打到 DENY）。 */
+    fsm_reset();
+    auth_fsm_set_verify_timeout(0);              /* 下一次 tick 立即超时（构造超时场景） */
+    auth_fsm_submit_pin("0000");                 /* A：若被误当作 B 会判 DENY */
+    CHECK(auth_fsm_state() == FSM_VERIFYING);
+    auth_fsm_tick();                             /* 安全网：VERIFYING → IDLE，A 世代作废 */
+    CHECK(auth_fsm_state() == FSM_IDLE);
+    auth_fsm_set_verify_timeout(120);            /* 复位，避免影响 B */
+    auth_fsm_submit_pin("1234");                 /* B：新世代 */
+    CHECK(auth_fsm_state() == FSM_VERIFYING);
+    pump_pin();                                  /* 先派发 A（FIFO，被丢弃），再派发 B → UNLOCKED */
+    CHECK(auth_fsm_state() == FSM_UNLOCKED);
+
+    /* ---- 1.14 后台未回调的兜底：安全网超时回 IDLE，不误判（L2/安全网） ----
+     * 模拟 worker 迟迟不回调：提交正确 PIN 后不泵，强制超时 → 回 IDLE 且不计失败；
+     * 随后迟到的回调（即便 PIN 正确）也必须被丢弃 → 不误开锁。 */
+    fsm_reset();
+    auth_fsm_set_verify_timeout(0);
+    auth_fsm_submit_pin("1234");                 /* 正确 PIN，但后台尚未回调 */
+    CHECK(auth_fsm_state() == FSM_VERIFYING);
+    auth_fsm_tick();                             /* 安全网：放弃等待 */
+    CHECK(auth_fsm_state() == FSM_IDLE);
+    CHECK(auth_fsm_fail_streak() == 0);          /* 超时不计入失败（不误判） */
+    auth_fsm_set_verify_timeout(120);            /* 复位 */
+    drain_worker_ms(300);                        /* 派发迟到回调：状态已非 VERIFYING → 丢弃 */
+    CHECK(auth_fsm_state() == FSM_IDLE);         /* 不误开锁 */
+    CHECK(auth_fsm_fail_streak() == 0);
 
     TEST_RESULT();
 }

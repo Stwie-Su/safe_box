@@ -16,7 +16,6 @@ extern "C" {
 
 typedef void (*astore_users_cb_t)(safe_user_t * list, int count);              /* list 回调后由框架释放 */
 typedef void (*astore_logs_cb_t)(log_entry_t * list, int count);               /* list 回调后由框架释放 */
-typedef void (*astore_verify_cb_t)(int result, const char * user);             /* result = unlock_result_t */
 typedef void (*astore_int_cb_t)(int result);                                   /* 0=成功，或 user_verify_pin 返回值 */
 typedef void (*astore_str_cb_t)(int result, const char * str);                 /* net_get_psk 结果 */
 
@@ -28,9 +27,6 @@ void astore_query_log(const char * evt_filter, int res_filter, astore_logs_cb_t 
 
 /* 日志追加：fire-and-forget，无需结果。 */
 void astore_append_log(const char * evt, const char * user, int res, const char * detail);
-
-/* 开锁验证：后台对每个启用用户做 PBKDF2 校验（含失败计数落盘）。 */
-void astore_verify_pin(const char * pin, astore_verify_cb_t cb);
 
 /* 设置门禁：校验 admin PIN（0=通过 1=错误 2=锁定 -1=无此用户）。 */
 void astore_verify_admin(const char * pin, astore_int_cb_t cb);
