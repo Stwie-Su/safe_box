@@ -32,8 +32,19 @@ typedef enum {
     UNLOCK_LOCKED       /* 所有启用用户均处于锁定 */
 } unlock_result_t;
 
-/* PIN 主页开锁：匹配任一【启用且未锁定】用户。成功时 out_user 填用户名。 */
+/* PIN 主页开锁（**开锁通道专用**）：匹配任一【启用且未锁定】用户，成功时 out_user 填用户名。
+ * 是否接受虚位密码（FR-18）由策略开关 virtual_pin_enable 决定。
+ * ⚠ 敏感操作的管理员二次确认**不要**用本接口（它会跟着开关走虚位），用 backend_verify_admin_pin。 */
 unlock_result_t backend_verify_pin(const char *pin, char *out_user, size_t user_cap);
+
+/* 同上，但由调用方显式指定是否允许虚位（供远程开锁等需要覆盖策略的通道使用）。 */
+unlock_result_t backend_verify_pin_ex(const char *pin, char *out_user, size_t user_cap,
+                                      bool allow_virtual);
+
+/* 管理员二次确认 PIN（FR-14 / 规约 §5.5）：**恒为精确匹配**，不看虚位开关。
+ * 依据：规约 §5.5「管理员二次确认：不支持虚位，必须精确匹配——敏感操作不允许以降低
+ * 精度换取便利」。实现上等价于 backend_verify_pin_ex(..., false)。 */
+unlock_result_t backend_verify_admin_pin(const char *pin, char *out_user, size_t user_cap);
 
 /* 动态码开锁：校验某用户的 TOTP（含 ±1 窗口容忍 + 防重放 + 失败计数 + 通道开关）。 */
 auth_result_t backend_verify_totp(const char *user, const char *code);

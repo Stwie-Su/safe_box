@@ -15,6 +15,18 @@
 extern "C" {
 #endif
 
+/* 虚位密码（FR-18，需求规约 §5.2）：开启时，单次 PIN 输入的**最大受理长度**。
+ * 出处：规约 §5.2「最大输入长度 12 位」（v1.9 由 20 收紧为 12），并（v1.8 澄清）
+ * 超过该长度的输入不受理（不参与比对，直接判失败）。
+ * 未开启虚位时，输入上限回落到策略 pin_max_len。
+ * 键盘层（page_keypad）与本层共用这一个上限，避免两处各写一个数。
+ *
+ * v1.9 收紧理由（性能）：虚位匹配是「一次输入尝试多个候选子串」，候选数随长度增长。
+ * 单用户候选数 = Σ_{L=pin_min..pin_max}(len-L+1)：12 位时 = 9+8+7+6+5 = 35，
+ * 20 位时为 75，故最坏耗时约减半；代价是可叠加的干扰位变少（前后合计最多 4 位）。
+ * 详见规约 §5.2 与版本变更记录。 */
+#define SAFE_VIRTUAL_PIN_MAX_INPUT 12
+
 /* ---------------- 安全策略（users.json 顶层 policy） ---------------- */
 typedef struct {
     int  pin_min_len;        /* PIN 最短长度 */
@@ -79,6 +91,11 @@ int pin_check(const char *pin, const char *salt_hex, const char *hash_hex); /* 0
 const safe_policy_t * user_policy(void);                 /* 返回当前策略指针（内部静态） */
 void user_policy_set(int max_failed, int lock_seconds);   /* 修改安全策略并落盘 */
 void user_policy_set_face(int otp_after, int timeout_s);  /* 修改人脸策略（FR-2/FR-7）并落盘 */
+/* 虚位密码开关（FR-18）并落盘。实现里顺序为「先 load 同步、再改内存、最后 save」：
+ * load_users() 会用文件里的 policy 回写内部策略，若先改内存再 load 会被冲掉。 */
+void user_policy_set_virtual_pin(bool enable);
+/* 角色合法性（FR-1 / FR-9）：仅 "admin" / "user" / "temp" 为合法角色。 */
+bool user_role_valid(const char * role);
 int  user_next_id(void);                                  /* 分配下一个用户 id */
 void user_list_free(safe_user_t *list);
 

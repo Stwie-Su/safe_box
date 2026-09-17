@@ -524,15 +524,31 @@ static int load_users(safe_user_t **list, int *count, bool *ok)
     const char *pol = js_get(json, "policy");
     if (pol) {
         long v;
+        bool pin_len_clamped = false;
         pthread_mutex_lock(&g_policy_mutex);
-        if (js_get_int(pol, "pin_min_len", &v) && v >= 4) g_policy.pin_min_len = (int)v;
-        if (js_get_int(pol, "pin_max_len", &v) && v >= 4) g_policy.pin_max_len = (int)v;
+        if (js_get_int(pol, "pin_min_len", &v) && v >= 4) {
+            /* H1：PIN 长度上限不得超过虚位滑窗缓冲容量（SAFE_VIRTUAL_PIN_MAX_INPUT），
+             * 否则校验层 cand[] 会越界写（QA ASan 实锤）。min 也一并钳到 [4, 上限]。 */
+            if (v > SAFE_VIRTUAL_PIN_MAX_INPUT) { v = SAFE_VIRTUAL_PIN_MAX_INPUT; pin_len_clamped = true; }
+            g_policy.pin_min_len = (int)v;
+        }
+        if (js_get_int(pol, "pin_max_len", &v) && v >= 4) {
+            if (v > SAFE_VIRTUAL_PIN_MAX_INPUT) { v = SAFE_VIRTUAL_PIN_MAX_INPUT; pin_len_clamped = true; }
+            if (v < g_policy.pin_min_len)        { v = g_policy.pin_min_len;        pin_len_clamped = true; }
+            g_policy.pin_max_len = (int)v;
+        }
         if (js_get_int(pol, "max_failed", &v) && v >= 1)  g_policy.max_failed = (int)v;
         if (js_get_int(pol, "lock_seconds", &v) && v >= 1) g_policy.lock_seconds = (int)v;
         /* 阈值有合理范围才采纳；旧版 score_high/score_mid 字段直接忽略（兼容读取） */
         if (js_get_int(pol, "face_otp_after", &v) && v >= 1 && v <= 10) g_policy.face_otp_after = (int)v;
         if (js_get_int(pol, "face_verify_timeout_s", &v) && v >= 3 && v <= 120) g_policy.face_verify_timeout_s = (int)v;
+        /* 虚位密码开关（FR-18）：save_users 一直有写这个字段，但此前从没在读盘时回填，
+         * 导致管理员改过的开关重启即丢、内存里恒为编译期默认。此处补上读取。 */
+        js_get_bool(pol, "virtual_pin_enable", &g_policy.virtual_pin_enable);
         pthread_mutex_unlock(&g_policy_mutex);
+        /* 越界钳制在锁外补记审计（log_append 会在不持 g_policy_mutex 时调用）。 */
+        if (pin_len_clamped)
+            log_append("ALARM", "-", 0, "策略 PIN 长度越界，已钳制到合法范围");
     }
 
     const char *arr = js_get(json, "users");
@@ -792,31 +808,65 @@ const safe_policy_t * user_policy(void)
     return &snap;
 }
 
+/* ★ 策略落盘的顺序不变式（2026-09-16 修复）：
+ * load_users() 会把 users.json 里的 policy 读出来同步回 g_policy。因此三个
+ * user_policy_set* 必须严格按「先 load（同步基线）→ 改内存 → 最后 save」执行。
+ * 修复前 user_policy_set / user_policy_set_face 是「先改内存 → 再 load」：
+ * load 的回写把刚改的 max_failed / lock_seconds / 人脸阈值原样冲掉，
+ * 于是 SYSTEM 页「保存策略」改的值重启即丢（磁盘上仍是旧值）。
+ * 注意 save_users() 写的是全局 g_policy，所以这三步之间不能插入其它策略写入。 */
 void user_policy_set(int max_failed, int lock_seconds)
 {
+    /* 落盘：先读出全部用户（同时把文件里的 policy 同步进 g_policy），再改内存 */
+    safe_user_t *us = NULL;
+    int n = 0;
+    load_users(&us, &n, NULL);
+
     pthread_mutex_lock(&g_policy_mutex);
     if (max_failed >= 1 && max_failed <= 10) g_policy.max_failed = max_failed;
     if (lock_seconds >= 5 && lock_seconds <= 3600) g_policy.lock_seconds = lock_seconds;
     pthread_mutex_unlock(&g_policy_mutex);
-    /* 落盘：读出全部用户后以新策略重写 users.json */
-    safe_user_t *us = NULL;
-    int n = 0;
-    load_users(&us, &n, NULL);
+
     if (n > 0) save_users(us, n);
     user_list_free(us);
 }
 
 void user_policy_set_face(int otp_after, int timeout_s)
 {
+    safe_user_t *us = NULL;
+    int n = 0;
+    load_users(&us, &n, NULL);
+
     pthread_mutex_lock(&g_policy_mutex);
     if (otp_after >= 1 && otp_after <= 10)      g_policy.face_otp_after = otp_after;
     if (timeout_s >= 3  && timeout_s <= 120)    g_policy.face_verify_timeout_s = timeout_s;
     pthread_mutex_unlock(&g_policy_mutex);
+
+    if (n > 0) save_users(us, n);
+    user_list_free(us);
+}
+
+/* 虚位密码开关（FR-18）落盘 —— 与上面两个 setter 同一顺序不变式。 */
+void user_policy_set_virtual_pin(bool enable)
+{
     safe_user_t *us = NULL;
     int n = 0;
     load_users(&us, &n, NULL);
+    pthread_mutex_lock(&g_policy_mutex);
+    g_policy.virtual_pin_enable = enable;
+    pthread_mutex_unlock(&g_policy_mutex);
     if (n > 0) save_users(us, n);
     user_list_free(us);
+}
+
+/* 角色合法性（FR-1 角色表 / FR-9 临时授权）：空指针与未知角色一律判非法，
+ * 供创建入口（UI 添加用户 / RPC add_user）在创建时把关，避免把脏 role 写进用户表。 */
+bool user_role_valid(const char * role)
+{
+    if (role == NULL || role[0] == '\0') return false;
+    return strcmp(role, "admin") == 0
+        || strcmp(role, "user")  == 0
+        || strcmp(role, "temp")  == 0;
 }
 
 /* 校验 PIN 并更新防暴力计数（DESIGN.md §2.3）：

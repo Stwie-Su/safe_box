@@ -211,5 +211,75 @@ int main(void)
     CHECK(strcmp(psk, "secret123") == 0);
     CHECK(strstr(psk, "secret") == NULL || 1);   /* 落盘的是密文，这里只验可逆 */
 
+    /* ---- 安全策略落盘的顺序不变式（2026-09-16 修复的既有缺陷）----
+     * load_users() 会把 users.json 里的 policy 同步回 g_policy，因此三个
+     * user_policy_set* 必须是「先 load → 改内存 → 最后 save」。修复前
+     * user_policy_set / user_policy_set_face 是「先改内存 → 再 load」，load 的
+     * 回写会把刚改的值冲掉 —— 表现为 SYSTEM 页「保存策略」改的失败阈值 / 锁定时长
+     * 重启即丢。本段直接断言**磁盘上的 users.json**，因为内存视图在两种顺序下
+     * 都可能看似正确，只有落盘结果能区分。 */
+    {
+        char ppath[256];
+        snprintf(ppath, sizeof(ppath), "%s/users.json", store_dir());
+
+        char pbuf[8192];
+        FILE * pf = NULL;
+        size_t pn = 0;
+
+        #define RELOAD_POLICY_JSON()                                                  \
+            do {                                                                      \
+                pbuf[0] = '\0';                                                       \
+                pf = fopen(ppath, "rb");                                              \
+                if (pf != NULL) {                                                     \
+                    pn = fread(pbuf, 1, sizeof(pbuf) - 1, pf);                        \
+                    fclose(pf);                                                       \
+                    pbuf[pn] = '\0';                                                  \
+                }                                                                     \
+                CHECK(pf != NULL);                                                    \
+            } while(0)
+
+        /* 1) user_policy_set：两个值都必须落盘，且内存快照一致 */
+        user_policy_set(3, 120);
+        RELOAD_POLICY_JSON();
+        CHECK(strstr(pbuf, "\"max_failed\": 3") != NULL);
+        CHECK(strstr(pbuf, "\"lock_seconds\": 120") != NULL);
+        {
+            const safe_policy_t * pol = user_policy();
+            CHECK(pol->max_failed == 3);
+            CHECK(pol->lock_seconds == 120);
+        }
+
+        /* 2) user_policy_set_face：人脸阈值同样落盘，且不冲掉上一步 */
+        user_policy_set_face(7, 45);
+        RELOAD_POLICY_JSON();
+        CHECK(strstr(pbuf, "\"face_otp_after\": 7") != NULL);
+        CHECK(strstr(pbuf, "\"face_verify_timeout_s\": 45") != NULL);
+        CHECK(strstr(pbuf, "\"max_failed\": 3") != NULL);
+
+        /* 3) 虚位密码开关（FR-18）：三项策略互不冲掉 */
+        user_policy_set_virtual_pin(true);
+        RELOAD_POLICY_JSON();
+        CHECK(strstr(pbuf, "\"virtual_pin_enable\": true") != NULL);
+        CHECK(strstr(pbuf, "\"max_failed\": 3") != NULL);
+        CHECK(strstr(pbuf, "\"face_otp_after\": 7") != NULL);
+        CHECK(user_policy()->virtual_pin_enable == true);
+
+        /* 关闭开关同样要落盘（否则「一开就再也关不掉」） */
+        user_policy_set_virtual_pin(false);
+        RELOAD_POLICY_JSON();
+        CHECK(strstr(pbuf, "\"virtual_pin_enable\": false") != NULL);
+
+        /* 4) 策略写入是整表重写，绝不能把用户数据写丢 */
+        {
+            safe_user_t * ul = NULL;
+            int un = 0;
+            CHECK(user_load_all(&ul, &un) == 0);
+            CHECK(un >= 1);
+            user_list_free(ul);
+        }
+
+        #undef RELOAD_POLICY_JSON
+    }
+
     TEST_RESULT();
 }

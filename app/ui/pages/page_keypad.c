@@ -8,10 +8,13 @@
 #include "ui/theme.h"
 #include "ui/ui_scale.h"
 #include "core/auth/auth_fsm.h"
+#include "core/store/store.h"          /* user_policy()：输入上限与提示文案取真实策略 */
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
-#define PIN_BUF 16
+/* FR-18 虚位密码：开启时最长可输入 12 位（v1.9 由 20 收紧；正确 PIN 前后可加干扰位）。 */
+#define PIN_BUF (SAFE_VIRTUAL_PIN_MAX_INPUT + 1)
 
 static lv_obj_t * s_display;     /* 输入显示 */
 static lv_obj_t * s_msg;         /* 提示 */
@@ -22,6 +25,8 @@ static void back_click_cb(lv_event_t * e);
 static void confirm_cb(lv_event_t * e);
 static void update_display(void);
 static void set_msg(const char *text, bool warn);
+static int  keypad_max_input(void);
+static void refresh_hint(void);
 /* 注：已删除 finish_ok(lv_timer_t *) 的未定义声明——全仓无定义、无调用
  * （PIN 校验走 worker 异步回调，不走定时器），属半截功能残留（D11）。 */
 
@@ -129,12 +134,48 @@ lv_obj_t * page_keypad_create(lv_obj_t * parent)
     /* 复位输入 */
     s_pin[0] = '\0';
     update_display();
-    set_msg("PIN 4-8 位，输错 5 次锁定 60 秒", false);
+    refresh_hint();     /* 提示文案取自真实策略（含虚位是否开启），不再写死 4-8 位 */
     return root;
+}
+
+/* 输入上限：虚位开启 → 12 位（规约 §5.2，v1.9）；否则 → 策略 pin_max_len。
+ * 上限本身也受 PIN 合法长度约束：若管理员把 pin_max_len 调得比 12 还大，
+ * 以 pin_max_len 为准（此时「虚位」已无意义，但不应反而收窄输入）。
+ * 最终再夹到缓冲容量内（PIN_BUF-1）：pin_max_len 无上层设置入口、仅 users.json 可改，
+ * 但无论如何都不能让 s_pin[len+1] 越界写。 */
+static int keypad_max_input(void)
+{
+    const safe_policy_t *pol = user_policy();
+    int mx = (pol->pin_max_len > 0) ? pol->pin_max_len : 8;
+    if (pol->virtual_pin_enable && mx < SAFE_VIRTUAL_PIN_MAX_INPUT)
+        mx = SAFE_VIRTUAL_PIN_MAX_INPUT;
+    if (mx > PIN_BUF - 1) mx = PIN_BUF - 1;
+    return mx;
+}
+
+/* 提示文案：长度范围、是否支持虚位、失败锁定阈值，全部读 user_policy()，
+ * 避免策略改了界面还在说旧数字（原来这里写死「4-8 位 / 5 次 / 60 秒」）。 */
+static void refresh_hint(void)
+{
+    const safe_policy_t *pol = user_policy();
+    char buf[192];
+    if (pol->virtual_pin_enable) {
+        snprintf(buf, sizeof(buf),
+                 "PIN %d-%d 位（可前后加干扰位，最长 %d 位），输错 %d 次锁定 %d 秒",
+                 pol->pin_min_len, pol->pin_max_len, SAFE_VIRTUAL_PIN_MAX_INPUT,
+                 pol->max_failed, pol->lock_seconds);
+    } else {
+        snprintf(buf, sizeof(buf), "PIN %d-%d 位，输错 %d 次锁定 %d 秒",
+                 pol->pin_min_len, pol->pin_max_len, pol->max_failed, pol->lock_seconds);
+    }
+    set_msg(buf, false);
 }
 
 static void key_click_cb(lv_event_t * e)
 {
+    /* 后台校验期间冻结输入：避免在「校验中」时改动缓冲，造成结果与显示错位。 */
+    if (auth_fsm_state() == FSM_VERIFYING) return;
+
     int col = (int)(uintptr_t)lv_event_get_user_data(e);
     int row = (int)(uintptr_t)lv_obj_get_user_data(lv_event_get_target(e));
     const char * key = NULL;
@@ -150,7 +191,9 @@ static void key_click_cb(lv_event_t * e)
         if (len > 0) s_pin[len - 1] = '\0';
     } else {
         size_t len = strlen(s_pin);
-        if (len < 8) { s_pin[len] = key[0]; s_pin[len + 1] = '\0'; }
+        /* FR-18：上限不再是写死的 8 位 —— 虚位开启时可输入到 12 位（v1.9）。
+         * 超过 12 位的输入按规约 §5.2「超过 12 位不受理」直接丢弃，不发往校验层。 */
+        if (len < (size_t)keypad_max_input()) { s_pin[len] = key[0]; s_pin[len + 1] = '\0'; }
     }
     update_display();
 }
@@ -158,7 +201,7 @@ static void key_click_cb(lv_event_t * e)
 static void update_display(void)
 {
     size_t len = strlen(s_pin);
-    char masked[32];
+    char masked[PIN_BUF];
     for (size_t i = 0; i < len; i++) masked[i] = '*';
     masked[len] = '\0';
     lv_label_set_text(s_display, len ? masked : "——");
@@ -180,25 +223,40 @@ static void back_click_cb(lv_event_t * e)
 }
 
 /* 阶段 1：PIN 校验统一走 auth_fsm（FSM 负责判定 + 执行器脉冲 + 审计日志 + MQTT 事件，
- * 避免 PIN / 人脸 / 动态码三套逻辑重复）。主线程直接提交（FSM 同步判定，无冻结）。 */
+ * 避免 PIN / 人脸 / 动态码三套逻辑重复）。
+ * v1.9：判定已异步化——本函数只负责「长度预检 + 提交 + 显示校验中」，
+ * 结果由 core 经 ui.c 的 fsm_ui_hook 回填（page_keypad_on_fsm），主线程不再阻塞。 */
 static void confirm_cb(lv_event_t * e)
 {
     (void)e;
     size_t len = strlen(s_pin);
-    if (len < 4) {
-        set_msg("PIN 至少 4 位", true);
+    const safe_policy_t *pol = user_policy();
+    if (len < (size_t)pol->pin_min_len) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "PIN 至少 %d 位", pol->pin_min_len);
+        set_msg(buf, true);
         return;
     }
+    if (auth_fsm_state() == FSM_VERIFYING) return;   /* 已在校验：忽略重复确认 */
+
+    /* 提交即进入校验中（异步）：立即清空缓冲并给出「校验中」提示；
+     * 成功由 fsm_ui_hook 切回主页，失败/锁定由 page_keypad_on_fsm 就地回填。 */
+    set_msg("正在校验，请稍候", false);
     auth_fsm_submit_pin(s_pin);
     s_pin[0] = '\0';
     update_display();
+}
 
-    /* 同步反馈：成功由 FSM UI hook 切回主页；失败留在本页提示以便重试。 */
-    fsm_state_t st = auth_fsm_state();
-    if (st == FSM_DENY) {
-        set_msg("PIN 错误，请重试", true);
-    } else if (st == FSM_LOCKOUT) {
-        set_msg("设备已锁定，请稍后再试", true);
+/* PIN 异步校验结果 → 键盘页提示（v1.9）：由 ui.c 的 fsm_ui_hook 在主线程调用，
+ * 仅在键盘页当前可见时触发。成功（UNLOCKED）路径已切页，无需在此处理。 */
+void page_keypad_on_fsm(fsm_state_t st, const char *detail)
+{
+    (void)detail;
+    switch (st) {
+        case FSM_VERIFYING: set_msg("正在校验，请稍候", false);     break;
+        case FSM_DENY:      set_msg("PIN 错误，请重试", true);        break;
+        case FSM_LOCKOUT:   set_msg("设备已锁定，请稍后再试", true);  break;
+        default:            break;
     }
 }
 
