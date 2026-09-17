@@ -32,6 +32,21 @@ bool mqtt_is_connected(void)
     return false;
 }
 
+void mqtt_set_credentials(const char * username, const char * password)
+{
+    (void)username; (void)password;
+}
+
+bool mqtt_credentials_configured(void)
+{
+    return false;   /* 无 MQTT 特性 → 不存在鉴权通道 */
+}
+
+bool mqtt_is_authenticated(void)
+{
+    return false;
+}
+
 int mqtt_take(char * topic, size_t tcap, char * payload, size_t pcap)
 {
     (void)topic; (void)tcap; (void)payload; (void)pcap;

@@ -29,6 +29,8 @@ static app_config_t s_cfg = {
     .mqtt_host       = DEFAULT_MQTT_HOST,
     .mqtt_port       = DEFAULT_MQTT_PORT,
     .mqtt_enabled    = false,
+    .mqtt_user       = "",
+    .mqtt_pass       = "",
     .face_backend    = SAFE_FACE_BACKEND,
     .data_dir        = SAFE_DATA_DIR,
 };
@@ -64,6 +66,10 @@ safe_err_t app_config_init(void)
     s_cfg.log_max_entries = env_int("SAFE_LOG_MAX", s_cfg.log_max_entries);
     s_cfg.mqtt_port       = env_int("SAFE_MQTT_PORT", s_cfg.mqtt_port);
     env_str("SAFE_MQTT_HOST", s_cfg.mqtt_host, sizeof(s_cfg.mqtt_host), DEFAULT_MQTT_HOST);
+    /* 连接凭据（FR-24）：缺省为空 = 匿名连接，保持既有 PC 验证路径不变。
+     * 配置后 rpc.c 只放行「鉴权连接」执行敏感指令（见 rpc.c::channel_authorized）。 */
+    env_str("SAFE_MQTT_USER", s_cfg.mqtt_user, sizeof(s_cfg.mqtt_user), "");
+    env_str("SAFE_MQTT_PASS", s_cfg.mqtt_pass, sizeof(s_cfg.mqtt_pass), "");
 
     const char * off = getenv("SAFE_MQTT_OFF");
     s_cfg.mqtt_enabled = (off == NULL || *off == '\0' || strcmp(off, "0") == 0);

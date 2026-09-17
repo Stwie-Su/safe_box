@@ -1,6 +1,8 @@
 /**
  * @file mqtt_client.c
  * MQTT 客户端实现（Paho MQTTAsync，libpaho-mqtt3a，无 TLS，局域网够用）。
+ * 支持 username/password 连接凭据（来自 SAFE_MQTT_USER/PASS，缺省为空 = 匿名，
+ * 保持既有 PC 验证路径）；TLS 本期**不实现**（拍板：只写不做）。
  *
  * 重连策略：onFailure / connlost 中退避重连（0.5s 起步，翻倍封顶 8s）。
  * 入库队列（g_q）为「主线程消费」缓冲，容量 16，满则丢最旧避免阻塞 MQTT 线程。
@@ -23,6 +25,12 @@ static MQTTAsync g_cli = NULL;
 static volatile int g_conn = 0;
 static mqtt_msg_cb_t g_cb = NULL;
 static char g_address[ADDRESS_MAX];
+
+/* 连接凭据（默认空 = 匿名连接）。由 mqtt_set_credentials() 在 mqtt_start 前写入。
+ * 来源：SAFE_MQTT_USER / SAFE_MQTT_PASS（经 app_config → rpc_init 注入）。 */
+#define CRED_MAX 64
+static char g_user[CRED_MAX];
+static char g_pass[CRED_MAX];
 
 /* 入队（供主线程 rpc_poll 消费） */
 static char g_q_topic[QCAP][TOPIC_MAX];
@@ -56,6 +64,39 @@ void mqtt_stop(void)
 
 bool mqtt_is_connected(void) { return g_conn != 0; }
 
+void mqtt_set_credentials(const char *username, const char *password)
+{
+    snprintf(g_user, sizeof(g_user), "%s", (username && *username) ? username : "");
+    snprintf(g_pass, sizeof(g_pass), "%s", (password && *password) ? password : "");
+    /* 配置不完整提示（仅启动时打一行）：只设了其一也按「已配置凭据」处理，
+     * 但明确提示，避免「只想设密码」的人困惑于为何走鉴权模式。 */
+    if ((g_user[0] != '\0') != (g_pass[0] != '\0')) {
+        printf("[MQTT] 连接凭据不完整（仅设置了%s），将按「已配置凭据」处理\n",
+               (g_user[0] != '\0') ? "用户名" : "密码");
+    }
+}
+
+bool mqtt_credentials_configured(void)
+{
+    /* username 或 password 任一非空即视为「已配置凭据」（不再只认用户名）。 */
+    return (g_user[0] != '\0') || (g_pass[0] != '\0');
+}
+
+bool mqtt_is_authenticated(void)
+{
+    /* 已配置凭据且已连上 broker 即视为鉴权连接。
+     * （无 TLS 时客户端无法反向验证 broker 是否真的校验了凭据，此为尽最大努力门控。） */
+    return g_conn != 0 && mqtt_credentials_configured();
+}
+
+/* 把凭据填进 connectOptions：空凭据置 NULL，走匿名；否则带 username/password，
+ * 供 broker 侧 password_file + allow_anonymous false 校验（配置样例见交付报告）。 */
+static void fill_auth(MQTTAsync_connectOptions *co)
+{
+    co->username = (g_user[0] != '\0') ? g_user : NULL;
+    co->password = (g_pass[0] != '\0') ? g_pass : NULL;
+}
+
 /* 订阅 safe/cmd（QoS 1） */
 static void do_subscribe(void)
 {
@@ -85,6 +126,7 @@ static void on_connect_failure(void *context, MQTTAsync_failureData *data)
     co.cleansession = 1;
     co.onSuccess = on_connect;
     co.onFailure = on_connect_failure;
+    fill_auth(&co);
     MQTTAsync_connect(g_cli, &co);
     return;
 }
@@ -100,6 +142,7 @@ static void on_connection_lost(void *context, char *cause)
     co.cleansession = 1;
     co.onSuccess = on_connect;
     co.onFailure = on_connect_failure;
+    fill_auth(&co);
     MQTTAsync_connect(g_cli, &co);
     return;
 }
@@ -137,6 +180,7 @@ int mqtt_start(const char *host, int port, const char *client_id, mqtt_msg_cb_t 
     co.onSuccess = on_connect;
     co.onFailure = on_connect_failure;
     co.automaticReconnect = 0;   /* 自行控制重连，便于退避 */
+    fill_auth(&co);              /* 凭据（空则匿名）：供 broker 侧 password_file/ACL 校验 */
 
     rc = MQTTAsync_connect(g_cli, &co);
     if (rc != MQTTASYNC_SUCCESS) {

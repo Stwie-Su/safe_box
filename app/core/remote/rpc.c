@@ -6,7 +6,9 @@
  * rpc_poll() 在主线程（LVGL 主循环 20ms 泵）调用 mqtt_take() 取走并处理。
  */
 #include "core/remote/rpc.h"
+#include "core/remote/rpc_guard.h"  /* req_id 去重 / 时效 / 命令分级（纯逻辑，可单测） */
 #include "core/remote/mqtt_client.h"
+#include "core/config.h"            /* app_config()：MQTT 连接凭据 */
 #include "core/store/store.h"
 #include "core/auth/totp.h"
 #include "hal/hal_time.h"
@@ -25,10 +27,25 @@ static char   g_local_otp_req[32];
 static bool   g_local_otp_pending = false;
 static rpc_event_hook_t g_evt_hook = NULL;
 
+/* 近期 req_id 去重表（防重放）。仅在 rpc_poll() 所在的主线程访问
+ * （见文件头线程模型：MQTT 线程只入队，主线程出队处理），故无需加锁。 */
+static rpc_req_cache_t g_req_cache;
+
 void rpc_set_event_hook(rpc_event_hook_t hook) { g_evt_hook = hook; }
 
 void rpc_init(const char *host, int port)
 {
+    /* 去重表清零（进程内单实例，一次即可）。 */
+    rpc_req_cache_init(&g_req_cache);
+
+    /* 注入 MQTT 连接凭据：来源 SAFE_MQTT_USER / SAFE_MQTT_PASS（缺省为空 →
+     * 匿名连接，保持既有 PC 验证路径不变）。必须在 mqtt_start 之前设置。 */
+    {
+        const app_config_t *cfg = app_config();
+        mqtt_set_credentials(cfg ? cfg->mqtt_user : NULL,
+                             cfg ? cfg->mqtt_pass : NULL);
+    }
+
     char cid[48];
     snprintf(cid, sizeof(cid), "safe-%d", (int)getpid());
     mqtt_start(host, port, cid, NULL);
@@ -96,6 +113,18 @@ void rpc_publish_event(const char *evt, const char *user, const char *detail, in
     if (g_evt_hook) g_evt_hook(evt, user, detail, res);
 }
 
+/* 16 字节盐 → 32 字符 hex（与 users.json 的 pin_salt 字段对齐）。
+ * store 内部的 to_hex 未导出，这里放一份同语义的本地实现，避免为它开新接口。 */
+static void rpc_salt_to_hex(const uint8_t * salt, char out[33])
+{
+    static const char HEX[] = "0123456789abcdef";
+    for (int i = 0; i < 16; i++) {
+        out[2 * i]     = HEX[(salt[i] >> 4) & 0x0F];
+        out[2 * i + 1] = HEX[salt[i] & 0x0F];
+    }
+    out[32] = '\0';
+}
+
 /* 原因码字符串 → 枚举；非法返回 -1 */
 static int parse_face_reason(const char *s)
 {
@@ -124,6 +153,28 @@ static bool check_otp_required(cJSON *root, bool sensitive, char *req_id)
     return true;
 }
 
+/* 通道是否被授权执行敏感指令。
+ *  - 未配置凭据（SAFE_MQTT_USER/PASS 均空）→ 走旧的「匿名 + OTP」路径（向后兼容，
+ *    不改变既有 PC 验证行为）；
+ *  - 已配置凭据 → 仅当本端以鉴权身份连上 broker 时才放行敏感指令，匿名连接
+ *    只允许只读/非敏感指令。
+ * 安全边界：无 TLS 时无法在 payload 层确证「发布者」身份，本判据只能基于本端
+ * 连接的鉴权状态做尽最大努力的门控（详见交付报告）。 */
+static bool channel_authorized(void)
+{
+    if (!mqtt_credentials_configured()) return true;
+    return mqtt_is_authenticated();
+}
+
+/* 调试钩子开关（env SAFE_ALLOW_INJECT）：**白名单式**——仅明确肯定值
+ * （"1"/"true"/"yes"/"on"，大小写不敏感）开启；其余（空/"0"/"false"/"no"/"off"/乱写）
+ * 一律关闭。默认关死——inject_face 能合成 FACE_RES_OK 走 do_unlock（伪造开锁结果）。
+ * 解析下沉 rpc_guard::rpc_env_flag_on（纯逻辑、可单测），避免 "false" 被误当开启。 */
+static bool inject_hook_enabled(void)
+{
+    return rpc_env_flag_on(getenv("SAFE_ALLOW_INJECT"));
+}
+
 static void dispatch(const char *payload)
 {
     cJSON *root = cJSON_Parse(payload);
@@ -143,6 +194,60 @@ static void dispatch(const char *payload)
         return;
     }
     const char *c = cmd->valuestring;
+
+    /* ================= 轻量访问控制（务必在**任何副作用之前**） =================
+     * 顺序：鉴权 → 时效+去重。任一未过立即回执并 return，绝不进入指令分支——
+     * 保证「越权 / 过期 / 重复」的请求不会先改状态再被判定（如先删了用户再判重）。
+     * 分级语义（定论）：**去重仅敏感档；时效对所有档（带 ts 时）**。 */
+    const int64_t now_sec = (int64_t)hal_time();
+
+    /* (a) 权限分级：敏感指令要求鉴权通道（未配置凭据时保持旧行为，见 channel_authorized）。 */
+    if (rpc_cmd_is_sensitive(c) && !channel_authorized()) {
+        ack(req_id, RPC_CODE_UNAUTHORIZED,
+            "未鉴权通道：敏感指令被拒绝（需配置 MQTT 凭据并以鉴权连接接入）");
+        cJSON_Delete(root);
+        return;
+    }
+
+    /* (a2) 调试钩子（inject_face：能伪造开锁结果）——默认关死，需 env 显式开启；
+     *      开启后仍要求**鉴权连接**。放在去重之前，避免给被拒请求占用去重槽。 */
+    if (rpc_cmd_is_debug_hook(c)) {
+        int dg = rpc_guard_debug_hook_gate(
+            inject_hook_enabled(),
+            mqtt_credentials_configured() && mqtt_is_authenticated());
+        if (dg != RPC_CODE_OK) {
+            ack(req_id, dg,
+                (dg == RPC_CODE_DEBUG_DISABLED)
+                    ? "调试指令已禁用（需 SAFE_ALLOW_INJECT=1 且鉴权连接）"
+                    : "未鉴权通道：调试指令被拒绝");
+            cJSON_Delete(root);
+            return;
+        }
+    }
+
+    /* (b) 时效（所有档，带 params.ts 时）+ 去重（仅敏感档）：策略集中在 rpc_guard_admit。
+     *     只读档豁免去重——重放 query_status 无实际危害，避免固定 req_id 轮询吃 1004。 */
+    int64_t req_ts = 0;
+    {
+        cJSON *tsj = params ? cJSON_GetObjectItem(params, "ts") : NULL;
+        if (cJSON_IsNumber(tsj)) req_ts = (int64_t)tsj->valuedouble;
+    }
+    int gate = rpc_guard_admit(&g_req_cache, c, req_id, req_ts, now_sec, RPC_TS_WINDOW_SEC);
+    if (gate == RPC_CODE_MISSING_REQ_ID) {
+        ack(req_id, RPC_CODE_MISSING_REQ_ID, "敏感指令缺少 req_id（去重/防重放需要）");
+        cJSON_Delete(root);
+        return;
+    }
+    if (gate == RPC_CODE_STALE_TS) {
+        ack(req_id, RPC_CODE_STALE_TS, "请求时间戳超出允许窗口（±120s）");
+        cJSON_Delete(root);
+        return;
+    }
+    if (gate == RPC_CODE_DUPLICATE) {
+        ack(req_id, RPC_CODE_DUPLICATE, "重复请求（req_id 已处理）");
+        cJSON_Delete(root);
+        return;
+    }
 
     /* ---- query_status：立即回状态（验收用例 1） ---- */
     if (strcmp(c, "query_status") == 0) {
@@ -179,18 +284,74 @@ static void dispatch(const char *payload)
         return;
     }
 
-    /* ---- add_user（敏感） ---- */
+    /* ---- add_user（敏感） ----
+     * FR-9 创建入口（v1.8）：本指令现在支持 role（admin/user/temp，含临时角色）、
+     * pin（必填，只存哈希）、valid_until 与 use_limit（临时授权，缺省 0 = 不限）。
+     * 修前行为：role 写死 "user"、完全不设 PIN —— 而 user_add 要求 pin_hash 非空，
+     * 因此这条指令**从来就没有成功过**（恒回 1003），临时用户在远程通道也无法创建。 */
     if (strcmp(c, "add_user") == 0) {
         if (!check_otp_required(root, true, req_id)) { cJSON_Delete(root); return; }
         int uid = params ? (cJSON_GetObjectItem(params, "uid") ? cJSON_GetObjectItem(params, "uid")->valueint : 0) : 0;
         cJSON *nm = params ? cJSON_GetObjectItem(params, "name") : NULL;
+        cJSON *rl = params ? cJSON_GetObjectItem(params, "role") : NULL;
+        cJSON *pn = params ? cJSON_GetObjectItem(params, "pin")  : NULL;
+        cJSON *vu = params ? cJSON_GetObjectItem(params, "valid_until") : NULL;
+        cJSON *ul = params ? cJSON_GetObjectItem(params, "use_limit")   : NULL;
+
+        if (!(cJSON_IsString(nm) && nm->valuestring && *nm->valuestring)) {
+            ack(req_id, 1001, "缺少 name"); cJSON_Delete(root); return;
+        }
+        if (!(cJSON_IsString(pn) && pn->valuestring && *pn->valuestring)) {
+            ack(req_id, 1001, "缺少 pin（PIN 只存哈希，不能为空）"); cJSON_Delete(root); return;
+        }
+        const char *role = (cJSON_IsString(rl) && rl->valuestring && *rl->valuestring)
+                               ? rl->valuestring : "user";
+        if (!user_role_valid(role)) {
+            ack(req_id, 1001, "role 非法（合法：admin/user/temp）"); cJSON_Delete(root); return;
+        }
+        const safe_policy_t *pol = user_policy();
+        const size_t plen = strlen(pn->valuestring);
+        if (plen < (size_t)pol->pin_min_len || plen > (size_t)pol->pin_max_len) {
+            ack(req_id, 1001, "pin 长度不在策略允许范围内"); cJSON_Delete(root); return;
+        }
+        /* 临时授权字段：缺省 0 表示不限（与 store 的语义一致）。
+         * valid_until 用 valuedouble 取，避免 int 取值范围把 2038 年后的时间戳截断。 */
+        int64_t valid_until = 0;
+        int     use_limit   = 0;
+        if (cJSON_IsNumber(vu)) valid_until = (int64_t)vu->valuedouble;
+        if (cJSON_IsNumber(ul)) use_limit   = (int)ul->valuedouble;
+        if (valid_until < 0 || use_limit < 0) {
+            ack(req_id, 1001, "valid_until / use_limit 不能为负"); cJSON_Delete(root); return;
+        }
+        if (valid_until > 0 && valid_until <= (int64_t)hal_time()) {
+            ack(req_id, 1001, "valid_until 必须晚于当前时间"); cJSON_Delete(root); return;
+        }
+
         safe_user_t u; memset(&u, 0, sizeof(u));
         u.id = uid > 0 ? uid : user_next_id();
-        if (cJSON_IsString(nm) && nm->valuestring) strncpy(u.name, nm->valuestring, sizeof(u.name) - 1);
-        u.role[0] = '\0'; strncpy(u.role, "user", sizeof(u.role) - 1);
-        u.enabled = true; u.face_id = -1;
+        strncpy(u.name, nm->valuestring, sizeof(u.name) - 1);
+        strncpy(u.role, role, sizeof(u.role) - 1);
+        strncpy(u.auth_method, "pin", sizeof(u.auth_method) - 1);
+        u.enabled = true;
+        u.face_id = -1;                 /* 新建用户默认未绑定人脸模板 */
+        u.valid_until = valid_until;
+        u.use_limit   = use_limit;
+        u.used_count  = 0;
+        {
+            time_t tn = (time_t)hal_time();
+            struct tm tmv;
+            localtime_r(&tn, &tmv);
+            strftime(u.created_at, sizeof(u.created_at), "%Y-%m-%dT%H:%M:%S", &tmv);
+        }
+        uint8_t salt[16];
+        if (pin_hash(pn->valuestring, salt, u.pin_hash) != 0) {
+            ack(req_id, 1003, "pin 哈希失败"); cJSON_Delete(root); return;
+        }
+        rpc_salt_to_hex(salt, u.pin_salt);
         int r = user_add(&u);
-        ack(req_id, r == 0 ? 0 : 1003, r == 0 ? "ok" : "add failed");
+        ack(req_id, r == 0 ? 0 : 1003,
+            r == 0 ? "ok" : (r == -2 ? "用户名已存在" : "add failed"));
+        if (r == 0) log_append("user_add", "remote", 1, u.name);
         cJSON_Delete(root);
         return;
     }
@@ -271,7 +432,9 @@ static void dispatch(const char *payload)
         return;
     }
 
-    /* ---- inject_face（调试用，无需 otp，取代旧 inject_score） ---- */
+    /* ---- inject_face（调试钩子，取代旧 inject_score）----
+     * 门控见上方 (a2)：默认关死（1007），开启后仍需鉴权连接（1006）；已并入敏感档，
+     * 故同样吃 req_id 去重与时效。 */
     if (strcmp(c, "inject_face") == 0) {
         cJSON *rs = params ? cJSON_GetObjectItem(params, "reason") : NULL;
         int fid = params && cJSON_GetObjectItem(params, "face_id") ? cJSON_GetObjectItem(params, "face_id")->valueint : -1;
@@ -283,6 +446,14 @@ static void dispatch(const char *payload)
             ack(req_id, 1001, "invalid reason（合法：ok/no_match/liveness_fail/timeout/error）");
         } else {
             face_service_inject(fid, (face_reason_t)reason_i);
+            /* 审计：调试钩子每次注入都要留痕（谁/何时/几号模板/什么结果）。
+             * log_append 内部带时间戳；操作者记为 "remote"（无 TLS 时无法更强归属）。 */
+            {
+                char detail[96];
+                snprintf(detail, sizeof(detail), "face_id=%d reason=%.32s",
+                         fid, cJSON_IsString(rs) && rs->valuestring ? rs->valuestring : "?");
+                log_append("inject_face", "remote", 1, detail);
+            }
             ack(req_id, 0, "injected");
         }
         cJSON_Delete(root);

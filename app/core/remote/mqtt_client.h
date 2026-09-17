@@ -31,6 +31,17 @@ int  mqtt_publish(const char *topic, const char *payload, int qos, int retained)
 /* 当前是否已连接（供顶栏指示灯 / 状态查询） */
 bool mqtt_is_connected(void);
 
+/* 设置 MQTT 连接凭据（username/password）。二者留空 = 匿名连接（默认，保持兼容）。
+ * 需在 mqtt_start 之前调用；重复调用以最后一次为准。 */
+void mqtt_set_credentials(const char *username, const char *password);
+
+/* 是否已配置连接凭据（username 或 password **任一非空**）。配置后视为「要求鉴权」
+ * 模式：仅鉴权连接可执行敏感远程指令（判据落在 rpc.c 的 channel_authorized）。 */
+bool mqtt_credentials_configured(void);
+
+/* 当前连接是否以鉴权身份建立（已配置凭据且已连上 broker）。 */
+bool mqtt_is_authenticated(void);
+
 /* 主线程取走一条入队消息（rpc_poll 调用）。返回 1 表示取到。 */
 int  mqtt_take(char *topic, size_t tcap, char *payload, size_t pcap);
 

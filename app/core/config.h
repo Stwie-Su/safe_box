@@ -17,6 +17,8 @@ extern "C" {
 #endif
 
 #define APP_CFG_MQTT_HOST_MAX   64
+#define APP_CFG_MQTT_USER_MAX   64
+#define APP_CFG_MQTT_PASS_MAX   64
 #define APP_CFG_DATA_DIR_MAX    256
 
 /* 日志滚动保留条数的唯一默认值。
@@ -42,6 +44,11 @@ typedef struct {
     char mqtt_host[APP_CFG_MQTT_HOST_MAX];
     int  mqtt_port;
     bool mqtt_enabled;      /* 构建期或运行期关闭时为 false */
+    /* MQTT 连接凭据（FR-24 轻量访问控制）：来源 SAFE_MQTT_USER / SAFE_MQTT_PASS，
+     * 缺省为空 = 匿名连接（保持既有 PC 验证路径）。二者均非空即视为「要求鉴权」，
+     * 此时只有鉴权连接可执行敏感远程指令（判据在 rpc.c）。 */
+    char mqtt_user[APP_CFG_MQTT_USER_MAX];
+    char mqtt_pass[APP_CFG_MQTT_PASS_MAX];
 
     /* 人脸（FR-1 通道之一） */
     const char * face_backend;
