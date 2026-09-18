@@ -102,12 +102,19 @@ int main(void)
         CHECK(rpc_cmd_is_sensitive("set_face_enable") == true);
         CHECK(rpc_cmd_is_sensitive("set_face_policy") == true);
         CHECK(rpc_cmd_is_sensitive("inject_face")     == true);   /* M2：并入敏感档 */
-        /* 非敏感档 */
+        /* 只读档：当前仅 query_status（白名单豁免去重） */
         CHECK(rpc_cmd_is_sensitive("query_status") == false);
-        CHECK(rpc_cmd_is_sensitive("sync_time")    == false);
-        CHECK(rpc_cmd_is_sensitive("submit_otp")   == false);
-        CHECK(rpc_cmd_is_sensitive("nonsense_cmd") == false);
-        CHECK(rpc_cmd_is_sensitive(NULL)           == false);
+        CHECK(rpc_cmd_is_readonly("query_status")  == true);
+        CHECK(rpc_cmd_is_readonly("del_user")      == false);
+        /* ★ 白名单分级（安全方向）：除只读外**一律敏感**。
+         * 这把原先被黑名单漏掉的 sync_time / submit_otp 收进敏感档
+         * （sync_time 匿名可改设备时钟，而时钟是锁定与 TOTP 的信任根），
+         * 未知指令与 NULL 同样按最严处理 —— 漏登记的后果从「重投被二次执行」
+         * 变成「回 1004 让对端重试」，失败方向落在安全的一侧。 */
+        CHECK(rpc_cmd_is_sensitive("sync_time")    == true);
+        CHECK(rpc_cmd_is_sensitive("submit_otp")   == true);
+        CHECK(rpc_cmd_is_sensitive("nonsense_cmd") == true);
+        CHECK(rpc_cmd_is_sensitive(NULL)           == true);
         /* 调试钩子识别：仅 inject_face */
         CHECK(rpc_cmd_is_debug_hook("inject_face")  == true);
         CHECK(rpc_cmd_is_debug_hook("query_status") == false);

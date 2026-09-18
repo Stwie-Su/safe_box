@@ -54,6 +54,8 @@ enum rpc_code {
 /* req_id 字段最大长度（含结尾 '\0'）。与 rpc.c 中 char req_id[32] 对齐。 */
 #define RPC_REQ_ID_CAP 32
 
+/* 去重表槽位。
+ * req_id[0] == '\0' 表示该槽位为空/已作废（TTL 到期后被清空，可复用）。 */
 /* 去重表槽位 */
 typedef struct {
     char    req_id[RPC_REQ_ID_CAP];
@@ -84,8 +86,16 @@ bool rpc_ts_fresh(int64_t ts, int64_t now_sec, int window_sec);
 /* 命令分级：是否为「敏感」指令（增删用户 / 通道开关 / 改策略 / 远程开锁 / 注入人脸）。
  * 敏感档 = 有副作用、或能伪造安全结果的那批；其余（含未知指令）返回 false。
  * 敏感档 ⇒ 参与 req_id 去重 + 时效，且（配置凭据时）要求鉴权通道。
- * 说明：sync_time / submit_otp 不列入（对时/调试；安全取舍见交付报告）。 */
+ *
+ * ★ 改为**白名单式**（默认安全方向）：除明确只读的指令（当前仅 query_status）
+ *   外，**一律视为敏感**。原实现是黑名单枚举 —— 于是 submit_otp / sync_time
+ *   以及将来新增的任何指令都默认落在「不敏感」档：既不要求鉴权、也不参与去重，
+ *   重投会二次执行。改成白名单后，漏登记的后果从「二次执行」变成
+ *   「回 1004 让对端重试」，失败方向落在安全的那一侧。 */
 bool rpc_cmd_is_sensitive(const char *cmd);
+
+/* 是否为「只读」指令（重放无副作用，故豁免去重）。当前仅 query_status。 */
+bool rpc_cmd_is_readonly(const char *cmd);
 
 /* 是否为「能伪造结果的调试钩子」命令（目前仅 inject_face）。
  * 这类命令默认必须关死（门控见 rpc_guard_debug_hook_gate）。 */
