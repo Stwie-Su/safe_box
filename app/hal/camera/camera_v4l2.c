@@ -420,6 +420,11 @@ static safe_err_t v4l2_frame(const uint8_t ** rgb565, hal_camera_frame_info_t * 
         if (xioctl(s_fd, VIDIOC_DQBUF, &b) < 0) {
             if (errno == EAGAIN) break;               /* 队列已取空 */
             printf("[CAMERA] DQBUF 失败: %s\n", strerror(errno));
+            /* QA-07：退出前必须把**已持有的 latest 归还驱动**。
+             * 否则每遇到一次 DQBUF 硬错误就永久少一个驱动缓冲，几次之后队列
+             * 被掏空 → 再也取不到帧，且**不可自愈**（下面的 QBUF 在循环内，
+             * 直接 return 会跳过它）。 */
+            if (got) xioctl(s_fd, VIDIOC_QBUF, &latest);
             return SAFE_ERR_FAIL;
         }
         if (got) xioctl(s_fd, VIDIOC_QBUF, &latest);  /* 旧帧直接还回，不转换 */
