@@ -24,6 +24,9 @@
 #include <time.h>
 
 /* 列表容器 */
+/* S1：『添加用户』按钮句柄 —— 数据读取失败时禁用它，避免用户在文件损坏的
+ * 情况下点下去，把损坏的数据文件覆盖掉（不可逆）。 */
+static lv_obj_t * s_add_btn = NULL;
 static lv_obj_t * s_list = NULL;
 /* 顶部统计行（FR-28 分区后承载「总人数 / 各角色人数」，空分区隐藏时信息不丢） */
 static lv_obj_t * s_summary = NULL;
@@ -264,7 +267,7 @@ lv_obj_t * page_users_create(lv_obj_t * parent)
     lv_obj_set_style_border_width(spacer_h, 0, 0);
     lv_obj_set_scrollable(spacer_h, false);
 
-    lv_obj_t * add = ui_icon_text_button(head, LV_SYMBOL_PLUS, "添加用户",
+    lv_obj_t * add = s_add_btn = ui_icon_text_button(head, LV_SYMBOL_PLUS, "添加用户",
                                           SX(120), SY(38), &st_accent_btn,
                                           theme_color(TH_ACCENT_INK), add_btn_cb, NULL);
     lv_obj_add_style(add, &st_accent_btn_pr, LV_STATE_PRESSED);
@@ -654,9 +657,24 @@ static void users_list_loaded(safe_user_t * us, int n)
     /* 空态：store 保证至少有一个管理员，理论上到不了这里；真到了也要说清
      * 「下一步该做什么」，而不是留一片空白（信息架构里的空态提示）。 */
     if (n <= 0) {
-        if (s_summary) lv_label_set_text(s_summary, "共 0 位用户");
+        /* S1：区分「读取失败」与「真的没有用户」。
+         * 两者的回调都是 (NULL, 0)，必须查 async_store 记录的失败标志 ——
+         * 否则读取失败会被显示成空态，还诱导用户在数据损坏时点「添加用户」，
+         * 那会把损坏的文件覆盖掉。 */
+        const bool load_failed = astore_users_load_failed();
+        if (s_add_btn) {
+            if (load_failed) lv_obj_add_state(s_add_btn, LV_STATE_DISABLED);
+            else             lv_obj_remove_state(s_add_btn, LV_STATE_DISABLED);
+        }
+        if (s_summary) {
+            lv_label_set_text(s_summary, load_failed ? "用户数据读取失败"
+                                                      : "共 0 位用户");
+        }
         lv_obj_t * em = lv_label_create(s_list);
-        lv_label_set_text(em, "暂无用户 —— 点右上角「添加用户」创建");
+        lv_label_set_text(em, load_failed
+                               ? "读取失败：存储异常 —— 已暂时禁用「添加用户」，\n"
+                                 "以免覆盖损坏的数据"
+                               : "暂无用户 —— 点右上角「添加用户」创建");
         lv_obj_add_style(em, &st_text_mut, 0);
         lv_obj_set_style_text_font(em, app_font_scaled(14), 0);
         lv_obj_set_width(em, lv_pct(100));

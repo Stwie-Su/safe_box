@@ -10,6 +10,20 @@
 #include "core/auth/unlock_backend.h"
 #include "core/store/store.h"
 
+/* ---------------- 加载失败可观测（S1） ----------------
+ * 背景：加载**失败**时回调收到的是 (NULL, 0)，与「真的没有数据」完全一样 ——
+ * UI 无从区分，会把「读取失败」显示成「暂无用户 / 没有符合条件的记录」，
+ * 甚至照常提供「添加用户」入口：用户在文件损坏时点下去，就可能把损坏的
+ * 数据文件覆盖掉。
+ * 这里只记录「最近一次加载是否失败」，供 UI 查询区分两种情形。
+ * 并发：worker 线程写、UI 线程读，均为 bool 标量（单核下标量读写原子）。
+ * 注意：**成功时必须清位**，否则一次失败会永久污染后续判断。 */
+static volatile bool s_users_load_failed = false;
+static volatile bool s_logs_load_failed  = false;
+
+bool astore_users_load_failed(void) { return s_users_load_failed; }
+bool astore_logs_load_failed(void)  { return s_logs_load_failed; }
+
 /* ---------------- load users ---------------- */
 typedef struct {
     astore_users_cb_t cb;
@@ -22,7 +36,12 @@ static void lu_worker(void * p)
     lu_job_t * a = (lu_job_t *)p;
     a->list = NULL;
     a->count = 0;
-    if (user_load_all(&a->list, &a->count) != 0) a->list = NULL;
+    if (user_load_all(&a->list, &a->count) != 0) {
+        a->list = NULL;
+        s_users_load_failed = true;      /* 供 UI 区分「读取失败」与「真的没有」 */
+    } else {
+        s_users_load_failed = false;     /* 成功必须清位，避免一次失败永久污染 */
+    }
 }
 
 static void lu_done(void * p)
@@ -57,7 +76,12 @@ static void ql_worker(void * p)
     a->list = NULL;
     a->count = 0;
     const char * f = a->has_filter ? a->evt_filter : NULL;
-    if (log_query(f, a->res_filter, &a->list, &a->count) != 0) a->list = NULL;
+    if (log_query(f, a->res_filter, &a->list, &a->count) != 0) {
+        a->list = NULL;
+        s_logs_load_failed = true;
+    } else {
+        s_logs_load_failed = false;
+    }
 }
 
 static void ql_done(void * p)

@@ -493,8 +493,13 @@ static void logs_loaded(log_entry_t * all, int n)
     }
 
     if (ns == 0) {
+        /* S1：区分「读取失败」与「确实没有符合条件的记录」——
+         * 两者回调都是 (NULL, 0)，必须查 async_store 的失败标志。 */
+        const bool load_failed = astore_logs_load_failed();
         lv_obj_t * hint = lv_label_create(s_list);
-        lv_label_set_text(hint, "没有符合条件的记录");
+        lv_label_set_text(hint, load_failed
+                                 ? "读取失败：存储异常，日志暂时无法显示"
+                                 : "没有符合条件的记录");
         lv_obj_add_style(hint, &st_text_mut, 0);
         lv_obj_set_style_text_font(hint, app_font_scaled(14), 0);
         lv_obj_set_style_pad_top(hint, SY(12), 0);

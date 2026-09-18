@@ -22,6 +22,12 @@ typedef void (*astore_str_cb_t)(int result, const char * str);                 /
 /* 读全部用户（用于列表/详情/主页统计） */
 void astore_load_users(astore_users_cb_t cb);
 
+/* S1：最近一次加载是否**失败**（而非「真的没有数据」）。
+ * 加载失败时回调收到的同样是 (NULL, 0)，UI 必须靠它来区分，
+ * 否则会把「读取失败」显示成空态、并在数据损坏时诱导用户去覆盖。 */
+bool astore_users_load_failed(void);
+bool astore_logs_load_failed(void);
+
 /* 日志查询（审计页/主页统计）。evt_filter 为 NULL 不过滤，res_filter < 0 不过滤。 */
 void astore_query_log(const char * evt_filter, int res_filter, astore_logs_cb_t cb);
 
