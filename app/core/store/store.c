@@ -1177,7 +1177,11 @@ int log_query(const char *evt_filter, int res_filter, log_entry_t **out, int *co
     if (!arr) { free(data); return -1; }
 
     int n = 0;
-    char *line = strtok(data, "\n");
+    /* QA-12：用 strtok_r 而非 strtok —— 本函数会在 **worker 线程** 被调用
+     * （经 astore_query_log），而 strtok 跨调用持有静态状态，与其它线程的
+     * strtok 调用会互相破坏（非线程安全）。 */
+    char *saveptr = NULL;
+    char *line = strtok_r(data, "\n", &saveptr);
     while (line) {
         const char *obj = line;
         log_entry_t e;
@@ -1190,11 +1194,11 @@ int log_query(const char *evt_filter, int res_filter, log_entry_t **out, int *co
         e.res = (int)rv;
         js_get_str(obj, "detail", e.detail, sizeof(e.detail));
 
-        if (evt_filter && strcmp(e.evt, evt_filter) != 0) { line = strtok(NULL, "\n"); continue; }
-        if (res_filter >= 0 && e.res != res_filter) { line = strtok(NULL, "\n"); continue; }
+        if (evt_filter && strcmp(e.evt, evt_filter) != 0) { line = strtok_r(NULL, "\n", &saveptr); continue; }
+        if (res_filter >= 0 && e.res != res_filter) { line = strtok_r(NULL, "\n", &saveptr); continue; }
         if (n >= (int)cap) break;      /* QA-01：防御性守卫，绝不越界写 */
         arr[n++] = e;
-        line = strtok(NULL, "\n");
+        line = strtok_r(NULL, "\n", &saveptr);
     }
     free(data);
 
