@@ -1240,8 +1240,16 @@ bool store_init(void)
     boot.enabled = true;
     /* 阶段 1 演示预置：管理员绑定人脸 id=1、启用 TOTP（固定演示密钥便于验收）。
      * 仅 bootstrap（首次无 users.json）生效；已存在数据时按文件字段读取。 */
-    boot.face_id = 1;
-    boot.face_enable = true;
+    /* QA-26：出厂预置管理员**不得**预填 face_id 与 face_enable。
+     * 原实现写 face_id=1 / face_enable=true，但设备上根本没有 id=1 的模组模板
+     * （FM225 未接或从未录入）—— 于是界面显示一个并不存在的人脸绑定：
+     *   ① 违反不变式「face_enable == true ⟹ face_id >= 0 且模板真实存在」；
+     *   ② 用户刷脸必失败（user_find_by_face 命中不到真模板）；
+     *   ③ 启动对账会把它判成孤儿凭据，产生一条误导性的告警。
+     * 正确做法：预置时无绑定（face_id=-1 / face_enable=false），
+     * 由用户后续走正常录入流程绑定 —— 那时 face_id 才是模组真实分配的。 */
+    boot.face_id = -1;
+    boot.face_enable = false;
     boot.totp_enable = true;
     strncpy(boot.totp_secret, "JBSWY3DPEHPK3PXP", sizeof(boot.totp_secret) - 1);
     time_t now = (time_t)hal_time();
