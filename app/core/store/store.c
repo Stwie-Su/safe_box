@@ -588,7 +588,10 @@ static bool save_users(const safe_user_t *us, int n)
     char *buf = malloc(cap);
     if (!buf) return false;
     size_t o = 0;
-    const safe_policy_t *p = &g_policy;
+    /* QA-20：必须走 user_policy() 取**加锁快照**，不能直接取 &g_policy ——
+     * 本函数在 worker 线程写盘，而主线程可能同时在改策略，直接取地址会让
+     * 下面 7 次字段读取与写入并发（TSan 实锤的竞争点之一）。 */
+    const safe_policy_t *p = user_policy();
     o += (size_t)snprintf(buf + o, cap - o,
         "{\n  \"version\": 1,\n  \"policy\": {\"pin_min_len\": %d, \"pin_max_len\": %d, "
         "\"max_failed\": %d, \"lock_seconds\": %d, \"face_otp_after\": %d, "
@@ -843,8 +846,19 @@ int user_face_set(int user_id, int face_id)
 
 const safe_policy_t * user_policy(void)
 {
-    /* 返回静态快照，避免调用者持有 &g_policy 与后台写入竞争 */
-    static safe_policy_t snap;
+    /* ★ 线程安全（QA-20）：快照放**线程局部存储**。
+     *
+     * 原实现是函数内 `static safe_policy_t snap` —— 它只解决了「调用方
+     * 直接持有 &g_policy」，却引入了自己的竞争：
+     *   ① 两个线程同时调用会互相覆盖同一份 snap，先返回者拿到的内容已被改写；
+     *   ② 调用方在锁外读 snap 的字段时，另一线程可能正在锁内写 snap。
+     * 本函数有 14 处调用点（UI 层为主），而 g_policy 会被 worker 线程改
+     * （user_policy_set* / load_users 回写），所以这是真实可达的竞争。
+     *
+     * 用 __thread（GCC/Clang 在 ARM 与 x86 均支持）而非「改成传 buffer 的签名」，
+     * 是为了不动那 14 处调用点、把风险压到最小。每线程一份 32 字节，代价可忽略。
+     * 注：g_policy 自身的读写仍由 g_policy_mutex 保护（见 user_policy_set*）。 */
+    static __thread safe_policy_t snap;
     pthread_mutex_lock(&g_policy_mutex);
     snap = g_policy;
     pthread_mutex_unlock(&g_policy_mutex);
@@ -922,6 +936,10 @@ int user_verify_pin(const char *name, const char *pin)
     if (load_users(&us, &n, NULL) != 0 || n <= 0) { user_list_free(us); return -1; }
 
     long now = (long)hal_time();
+    /* QA-20：策略必须走 user_policy() 取**加锁快照**（其快照已改为 __thread）。
+     * 本函数在 **worker 线程**执行（PIN 校验已异步化），直接读 g_policy 会与
+     * 主线程的 user_policy_set* / load_users 回写并发 —— TSan 实锤的竞争点。 */
+    const safe_policy_t *pol = user_policy();
     int ret = -1;
     for (int i = 0; i < n; i++) {
         if (strcmp(us[i].name, name) != 0) continue;
@@ -934,8 +952,8 @@ int user_verify_pin(const char *name, const char *pin)
             ret = 0;
         } else {
             us[i].failed_attempts++;
-            if (us[i].failed_attempts >= g_policy.max_failed) {
-                us[i].lock_until = now + g_policy.lock_seconds;
+            if (us[i].failed_attempts >= pol->max_failed) {
+                us[i].lock_until = now + pol->lock_seconds;
                 us[i].failed_attempts = 0;
             }
             save_users(us, n);
