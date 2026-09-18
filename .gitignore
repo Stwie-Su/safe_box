@@ -31,3 +31,9 @@ build_board_test/
 .claude/
 __pycache__/
 docs/
+
+# 开源前补漏：构建产物/凭据/IDE
+build_asan/
+.env
+.env.*
+*.env
