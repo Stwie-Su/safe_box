@@ -8,8 +8,11 @@
  *   → 审计日志有记录；再跑一次无重复动作（幂等）。
  * 另测：清单返回 -1（无此概念）/ -2（尚未取得）时不对账；清单为空（0）时全部绑定凭据皆为孤儿。
  *
- * 说明：store_init() 的 bootstrap 会自动创建管理员 admin（face_id=1、face_enable=true），
- * 它即「本地绑定 face_id=1 的用户」，故不再另建 face_id=1 的用户（避免重复绑定）。
+ * 说明：store_init() 的 bootstrap 会创建管理员 admin，但**出厂不带人脸绑定**
+ * （QA-26：face_id=-1 / face_enable=false；曾经的 face_id=1 是假绑定 —— 模组里
+ * 根本没有那个模板，会被对账判成孤儿并让刷脸必失败）。
+ * 本用例需要「本地绑定 face_id=1 的用户」，因此**显式**给 admin 建立绑定，
+ * 不再依赖 bootstrap 预置（那正是 QA-26 修掉的行为）。
  */
 #include "test_util.h"
 
@@ -44,13 +47,19 @@ int main(void)
     snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s", TEST_DATA_DIR, TEST_DATA_DIR);
     if(system(cmd) != 0) {}
     store_set_dir(TEST_DATA_DIR);
-    store_init();     /* bootstrap 自动建 admin：face_id=1、face_enable=true */
+    store_init();     /* bootstrap 建 admin；QA-26 起出厂**不带**人脸绑定 */
 
-    /* 前提自检：admin 即「本地绑定 face_id=1」的用户 */
+    /* 前提自检①：出厂管理员无绑定（把 QA-26 的行为固定下来，防回退） */
     safe_user_t chk;
     CHECK(user_find_by_name("admin", &chk) == 0);
+    CHECK(chk.face_id == -1);
+    CHECK(chk.face_enable == false);
+
+    /* 前提自检②：显式建立「本地绑定 face_id=1 的用户」 —— 本用例需要它 */
+    CHECK(user_face_set(chk.id, 1) == 0);
+    CHECK(user_find_by_face(1, &chk) == 0);
     CHECK(chk.face_id == 1);
-    CHECK(chk.face_enable == true);
+    CHECK(chk.face_enable == true);   /* 绑定即自动启用通道（不变式） */
 
     add_user("bob",   2, true);    /* 本地绑定 face_id=2（模组清单里没有 → 孤儿） */
     add_user("carol", -1, true);   /* 故意传不一致态：face_id<0 且 enable=true，
