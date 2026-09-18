@@ -130,8 +130,8 @@ unlock_result_t backend_verify_pin_ex(const char *pin, char *out_user, size_t us
     }
 
     const long now = (long)hal_time();
-    const int max_failed = pol.max_failed;
-    const int lock_secs  = pol.lock_seconds;
+    /* 注：max_failed / lock_secs 已随「全体记失败」循环一并移除（QA-05）；
+     * 设备级锁定参数由 auth_fsm 的 bump_fail_streak 从策略里自行取用。 */
     int active = 0;      /* 未锁定启用用户数 */
 
     /* 第一遍：尝试匹配 */
@@ -164,16 +164,23 @@ unlock_result_t backend_verify_pin_ex(const char *pin, char *out_user, size_t us
         return UNLOCK_LOCKED;
     }
 
-    /* 全部失败：未锁定用户各记一次失败 */
-    for (int i = 0; i < n; i++) {
-        if (!us[i].enabled || us[i].lock_until > now) continue;
-        us[i].failed_attempts++;
-        if (us[i].failed_attempts >= max_failed) {
-            us[i].lock_until = now + lock_secs;
-            us[i].failed_attempts = 0;
-        }
-        user_update(&us[i]);
-    }
+    /* 全部失败：**不**给任何用户记失败（QA-05）。
+     *
+     * 原实现给所有「启用且未锁定」的用户各记一次 failed_attempts —— 结果是
+     * 5 次错误 PIN 就能把**全员**锁 30 秒：一个匿名输入即可拒绝服务。
+     *
+     * 为什么不该在这里记：PIN 是**全局输入**，一次错误尝试**无法归属到任何
+     * 特定用户**（同一串错码对全体用户都只是「不匹配」）。给无法归属的对象
+     * 记账本身就是设计错误，而且它与 auth_fsm 的计数重复 —— PIN 失败路径
+     * 已经会调 note_fail()（见 auth_fsm.c 的 pin_done）。
+     *
+     * 防暴力由谁负责：auth_fsm 的「设备级连续失败计数」
+     * （bump_fail_streak / s_fsm.fail_streak）—— 它不依赖归属，正是为这类
+     * 场景设计的（规约 §5.2 双轨之一：设备级防陌生人轮流试，用户级锁特定账号）。
+     * 用户级计数保留给**能确定归属**的通道：人脸（face_id → user 唯一），
+     * 以及 bump_fail_streak() 中带 user 参数的路径。
+     *
+     * 注意：PIN 命中成功时的计数清零（上文分支）保持不变。 */
     user_list_free(us);
     return UNLOCK_FAIL;
 }
