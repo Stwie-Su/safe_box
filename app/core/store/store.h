@@ -80,6 +80,14 @@ bool store_init(void);                    /* 确保目录存在；无 users.json
 int user_load_all(safe_user_t **list, int *count);       /* 0=成功；*list 用 user_list_free 释放 */
 int user_add(const safe_user_t *u);                      /* 0=成功；失败计数/锁定状态忽略 */
 int user_del(int id);                                    /* 0=成功 */
+
+/* 级联删除：删除本地用户，并回填其人脸模板号供上层删除模组模板。
+ * out_face_id 可为 NULL（等价 user_del，只删本地）。
+ * ★ 防误删（FR-21 防线）：仅当「该 face_id 确实绑定在目标用户身上」时才回填；
+ *   若本地映射已变（模板号已属于别人），回填保持 -1 并记审计。
+ *   宁可在模组里留一个孤儿模板（由启动对账标失效、不占可用凭据），
+ *   也绝不能把别人的模板号交出去删掉。 */
+int user_del_cascade(int id, int32_t *out_face_id);       /* 0=成功 */
 int user_update(const safe_user_t *u);                   /* 按 id 整体覆盖；0=成功 */
 int user_face_set(int user_id, int face_id);             /* 便捷写：绑定模板(>=0 同时启用 face 通道)/清除(-1)；0=成功 */
 int user_find_by_name(const char *name, safe_user_t *out);/* 0=找到 */

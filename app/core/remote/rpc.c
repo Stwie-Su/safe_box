@@ -360,7 +360,11 @@ static void dispatch(const char *payload)
     if (strcmp(c, "del_user") == 0) {
         if (!check_otp_required(root, true, req_id)) { cJSON_Delete(root); return; }
         int uid = params ? (cJSON_GetObjectItem(params, "uid") ? cJSON_GetObjectItem(params, "uid")->valueint : 0) : 0;
-        int r = user_del(uid);
+        int32_t fid_rm = -1;
+        int r = user_del_cascade(uid, &fid_rm);
+        /* 本地删成功且归属核验通过 -> 异步删模组模板。若模组忙（SAFE_ERR_BUSY）
+         * 会留孤儿模板，由 cred_reconcile 启动对账标失效，不影响本地凭据。 */
+        if (r == 0 && fid_rm >= 0) face_service_delete_async(fid_rm);
         ack(req_id, r == 0 ? 0 : 2003, r == 0 ? "ok" : "user not found");
         cJSON_Delete(root);
         return;

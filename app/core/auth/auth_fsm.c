@@ -212,7 +212,11 @@ static void do_unlock(const char *user, const char *via)
     if (strcmp(u.role, "temp") == 0 && u.use_limit > 0) {
         u.used_count++;
         if (u.used_count >= u.use_limit) {
-            user_del(u.id);
+            {   /* 级联删除模组模板（含 uid 归属核验，见 user_del_cascade） */
+                int32_t fid_rm = -1;
+                user_del_cascade(u.id, &fid_rm);
+                if (fid_rm >= 0) face_service_delete_async(fid_rm);
+            }
             log_append("ALARM", user, 1, "临时授权次数已用尽，用户已删除");
             emit_event("ALARM", user, "temp used up, deleted", 1);
         } else {
@@ -314,7 +318,11 @@ static void resolve(int32_t face_id, face_reason_t reason, safe_user_t *user,
             char why[64];
             snprintf(why, sizeof(why), "临时授权%s，用户已删除",
                      expired ? "已过期" : "次数已用尽");
-            user_del(user->id);
+            {   /* 级联删除模组模板（含 uid 归属核验，见 user_del_cascade） */
+                int32_t fid_rm = -1;
+                user_del_cascade(user->id, &fid_rm);
+                if (fid_rm >= 0) face_service_delete_async(fid_rm);
+            }
             log_append("ALARM", user->name, 1, why);
             emit_event("ALARM", user->name, why, 1);
             return;   /* 授权失效不是暴力尝试，不计设备级失败 */

@@ -692,8 +692,9 @@ int user_add(const safe_user_t *u)
     return ok ? 0 : -1;
 }
 
-int user_del(int id)
+int user_del_cascade(int id, int32_t *out_face_id)
 {
+    if (out_face_id) *out_face_id = -1;
     safe_user_t *us = NULL;
     int n = 0;
     if (load_users(&us, &n, NULL) != 0 || n <= 0) { user_list_free(us); return -1; }
@@ -725,13 +726,41 @@ int user_del(int id)
         }
     }
 
+    /* ★ uid 归属核验（防误删）：只有当本地表里「该 face_id 确实绑定在目标用户」
+     * 时才把模板号交出去删模组。
+     * 背景：模组侧 uid 与应用侧 user_id 是两套编号，靠 users.json 的 face_id 映射。
+     * 若映射错乱（手工编辑、对账滞后、模组回收复用 uid 等），贸然下发 DELETE
+     * 会删掉模组里**另一个用户**的脸 —— 这是不可逆且难以察觉的事故。
+     * 取舍：映射异常时本地用户照删（业务意图要执行），但绝不删模组模板，
+     *       宁可留孤儿（由 cred_reconcile 启动对账标失效）。 */
+    int32_t fid_del = -1;
+    if (us[target_idx].face_id >= 0) {
+        safe_user_t owner;
+        memset(&owner, 0, sizeof(owner));
+        if (user_find_by_face(us[target_idx].face_id, &owner) == 0 &&
+            owner.id == id) {
+            fid_del = us[target_idx].face_id;      /* 归属确认 -> 允许删模组 */
+        } else {
+            /* 映射异常：记录告警（在 free 之前取名字，避免 UAF） */
+            log_append("ALARM", us[target_idx].name, 0,
+                       "人脸模板映射异常，未删除模组模板（防误删）");
+        }
+    }
+
     int keep = 0;
     for (int i = 0; i < n; i++) {
         if (us[i].id != id) us[keep++] = us[i];
     }
     bool ok = save_users(us, keep);
     user_list_free(us);
+    /* 仅当本地确实删成功、且归属核验通过时，才把模板号交出去 */
+    if (ok && out_face_id && fid_del >= 0) *out_face_id = fid_del;
     return ok ? 0 : -1;
+}
+
+int user_del(int id)
+{
+    return user_del_cascade(id, NULL);
 }
 
 int user_update(const safe_user_t *u)

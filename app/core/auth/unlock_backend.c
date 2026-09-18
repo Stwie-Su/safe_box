@@ -12,6 +12,7 @@
 #include "core/store/store.h"
 #include "core/auth/totp.h"
 #include "hal/hal_time.h"
+#include "hal/hal_face.h"
 #include <string.h>
 #include <time.h>
 #include <stdio.h>
@@ -35,7 +36,11 @@ static void temp_revoke(const safe_user_t *u, uint32_t now)
     const bool expired = (u->valid_until > 0 && (int64_t)now >= u->valid_until);
     char why[96];
     snprintf(why, sizeof(why), "临时授权%s，用户已删除", expired ? "已过期" : "次数已用尽");
-    user_del(u->id);
+    {   /* 级联删除模组模板（含 uid 归属核验，见 user_del_cascade） */
+        int32_t fid_rm = -1;
+        user_del_cascade(u->id, &fid_rm);
+        if (fid_rm >= 0) face_service_delete_async(fid_rm);
+    }
     log_append("ALARM", u->name, 1, why);
 }
 
