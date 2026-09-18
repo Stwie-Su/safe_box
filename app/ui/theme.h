@@ -75,7 +75,9 @@ void theme_switch(int idx);
 /* 注册主题切换回调（用于刷新那些用 lv_obj_set_style_*_color() 设本地颜色覆盖的控件）。
  * 同一个回调重复注册会被忽略；切换主题时按注册顺序调用，最多 4 个。 */
 typedef void (*theme_change_cb_t)(int idx);
-void theme_register_change_cb(theme_change_cb_t cb);
+/* 注册主题切换回调。**返回 false = 槽位已满、本次注册未生效**（调用方应据此
+ * 发现自己的刷新不会被触发，而不是以为注册成功了）。 */
+bool theme_register_change_cb(theme_change_cb_t cb);
 
 /* 当前主题索引 / 名称 */
 int theme_idx(void);

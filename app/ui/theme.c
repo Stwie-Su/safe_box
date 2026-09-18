@@ -11,6 +11,7 @@
  *     页面代码零改动（theme_press_install，见文件尾）。
  *   - 页签高亮切换：st_tab_hl 只带 150ms 颜色过渡，由 ui.c 挂到 tab 图标/文字/指示条。
  */
+#include <stdio.h>   /* printf：主题回调槽位耗尽告警 */
 #include "theme.h"
 #include "ui/ui_anim.h"
 #include <string.h>
@@ -238,17 +239,26 @@ void theme_init(void)
     theme_press_install();   /* 全局按压手感钩子（样式就绪后再挂） */
 }
 
-/* ---- 主题切换回调（最多 4 个） ---- */
-#define THEME_CB_MAX 4
+/* ---- 主题切换回调 ----
+ * 槽位上限 8：原先 4 个槽位早已被 topbar / rail / page_face / page_monitor /
+ * page_system / ui_feedback 用满，**第 5 个注册者会被静默丢弃** —— page_logs
+ * 就因此退化成了轮询（见其文件头注释）。
+ * 注册函数返回 bool：把「注册失败」变成调用方可见的事实，而不是无声的。 */
+#define THEME_CB_MAX 8
 static theme_change_cb_t s_cbs[THEME_CB_MAX];
 static int s_cb_cnt = 0;
 
-void theme_register_change_cb(theme_change_cb_t cb)
+bool theme_register_change_cb(theme_change_cb_t cb)
 {
-    if (!cb) return;
-    for (int i = 0; i < s_cb_cnt; i++) if (s_cbs[i] == cb) return;  /* 去重 */
-    if (s_cb_cnt >= THEME_CB_MAX) return;
+    if (!cb) return false;
+    for (int i = 0; i < s_cb_cnt; i++) if (s_cbs[i] == cb) return true;  /* 已注册 */
+    if (s_cb_cnt >= THEME_CB_MAX) {
+        printf("[theme] 警告：主题回调槽位已满（%d），本次注册被丢弃 ——\n"
+               "        该控件的颜色不会随主题切换刷新\n", THEME_CB_MAX);
+        return false;
+    }
     s_cbs[s_cb_cnt++] = cb;
+    return true;
 }
 
 void theme_switch(int idx)
