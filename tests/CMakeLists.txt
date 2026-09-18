@@ -36,6 +36,7 @@ safe_add_test(test_unlock_backend)
 # 崩溃一致性自测（R1）：循环写盘期间 kill -9，校验 users.json 可解析且非旧即新。
 # 默认 20 轮，长跑用 tools/crash_consistency_test.sh <更大轮次>。
 safe_add_test(test_store_crash)
+safe_add_test(test_store_p0)
 # 远程指令轻量访问控制：req_id 去重（防重放）、请求时效窗口（±120s）、命令分级。
 # 纯逻辑（rpc_guard），不启 broker / 不依赖 paho。
 safe_add_test(test_rpc)

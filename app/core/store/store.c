@@ -714,8 +714,13 @@ int user_del(int id)
             }
         }
         if (admins_left == 0) {
+            /* QA-02：先拷名字再释放 —— 原实现 free 之后仍读 us[target_idx].name
+             * （use-after-free，ASan 实锤，删除唯一启用管理员时必现）。 */
+            char del_name[32];
+            strncpy(del_name, us[target_idx].name, sizeof(del_name) - 1);
+            del_name[sizeof(del_name) - 1] = '\0';
             user_list_free(us);
-            log_append("user_del", us[target_idx].name, 0, "拒绝：需保留至少一个启用管理员");
+            log_append("user_del", del_name, 0, "拒绝：需保留至少一个启用管理员");
             return -1;
         }
     }
@@ -1090,11 +1095,26 @@ int log_query(const char *evt_filter, int res_filter, log_entry_t **out, int *co
     char *data = read_file_alloc(path);
     if (!data) return 0;
 
+    /* QA-01（语义面）：先丢弃末尾「无换行结尾」的残缺半行。
+     * 掉电 / kill -9 时 log_append 可能只写下半条记录，它不是一条有效日志；
+     * 若放任它参与解析，日志页会凭空多出一条四个字段全空的条目。
+     * 注意：仅截断末尾那一段，其前的完整行必须保留。 */
+    size_t dlen = strlen(data);
+    if (dlen > 0 && data[dlen - 1] != '\n') {
+        char *last_nl = strrchr(data, '\n');
+        if (last_nl) *last_nl = '\0';   /* 截掉半行，保留其前的完整行 */
+        else         data[0]  = '\0';   /* 整份文件仅一行且不完整 -> 视为空 */
+    }
+
     /* 统计行数 */
     int total = 0;
     for (char *p = data; *p; p++) if (*p == '\n') total++;
 
-    log_entry_t *arr = calloc((size_t)(total > 0 ? total : 1), sizeof(log_entry_t));
+    /* QA-01：strtok 切出的「段数」= 完整行数 + 末尾半行（无 '\n' 结尾的残缺记录）。
+     * 掉电 / kill -9 时 log_append 可能只写下半行，段数比 '\n' 个数多 1，
+     * 按 total 分配会越界写 sizeof(log_entry_t) 字节。故容量取 total + 1。 */
+    size_t cap = (size_t)total + 1;
+    log_entry_t *arr = calloc(cap, sizeof(log_entry_t));
     if (!arr) { free(data); return -1; }
 
     int n = 0;
@@ -1113,6 +1133,7 @@ int log_query(const char *evt_filter, int res_filter, log_entry_t **out, int *co
 
         if (evt_filter && strcmp(e.evt, evt_filter) != 0) { line = strtok(NULL, "\n"); continue; }
         if (res_filter >= 0 && e.res != res_filter) { line = strtok(NULL, "\n"); continue; }
+        if (n >= (int)cap) break;      /* QA-01：防御性守卫，绝不越界写 */
         arr[n++] = e;
         line = strtok(NULL, "\n");
     }
