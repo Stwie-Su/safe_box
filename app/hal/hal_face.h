@@ -138,6 +138,15 @@ safe_err_t face_service_verify_once(void);
  * 后端在 face 线程持续更新，此处只读快照；无模组概念的后端恒返回 -1。 */
 int32_t face_service_face_state(void);
 
+/* 人脸姿态快照（五向录入引导用）：yaw/pitch/roll，任一可为 NULL。
+ * 返回 0 = 取到；< 0 = 后端无姿态概念或未上报。
+ * 与 face_service_face_state() 属于**同一帧的两个侧面**，调用方应成对读取。 */
+int32_t face_service_face_pose(int16_t * yaw, int16_t * pitch, int16_t * roll);
+
+/* 当前录入模式是否为五向（face_direction=0x1F）。false = 单帧。
+ * 由后端 env SAFE_FACE_ENROLL_5WAY 决定，供录入页切换引导文案。 */
+bool face_service_enroll_five_way(void);
+
 /* 是否有录入会话在途（录入实时引导小字的显隐依据）。 */
 bool face_service_enrolling(void);
 

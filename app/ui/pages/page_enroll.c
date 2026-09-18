@@ -75,7 +75,7 @@ static void rotate_frame(const uint16_t * src, uint16_t * dst,
 static void compute_video_rect(int32_t cw, int32_t ch);
 static void rebuild_maps(void);
 static void rebuild_canvas(void);
-static const char * guide_text(int32_t fs);
+static const char * guide_text(int32_t fs, bool five_way);
 static void refresh_foot_btn(void);
 
 /* ===== env 开关（与 page_face 共用同一组 env；板上不设即走默认） ===== */
@@ -218,11 +218,15 @@ static void rebuild_canvas(void)
  * 之间 state 恒为 -1。原先 -1 落进 default，被当成「未检测到人脸」——模组还没
  * 开口界面就先报「没检测到人脸」，用户据此反复怀疑「为什么总是识别不到」。
  * 这里给中性文案，与「已开口但没看到脸」（fs=1 等）区分开。 */
-static const char * guide_text(int32_t fs)
+static const char * guide_text(int32_t fs, bool five_way)
 {
     if (fs < 0) return "正在等待模组响应，请正对模组…";
     switch (fs) {
-        case 0:  return "已检测到人脸，请保持不动";
+        /* 五向模式下，模组要依次采集正/左/右/上/下（手册 V1.7：face_direction
+         * 低 5 位）。此时若沿用单帧的「请保持不动」，用户会一直不动，
+         * 五向永远采不完 —— 必须改提示为「缓慢转动头部」。 */
+        case 0:  return five_way ? "已检测到人脸，请缓慢转动头部（左/右/上/下）"
+                                 : "已检测到人脸，请保持不动";
         case 2:  return "人脸太靠上，请下移一点";
         case 3:  return "人脸太靠下，请上移一点";
         case 4:  return "人脸太靠左，请右移一点";
@@ -281,20 +285,25 @@ static void status_timer_cb(lv_timer_t * t)
     uint32_t now = hal_time_ms();
     bool live = s_got_frame && ((now - s_last_frame_ms) < FACE_FRAME_STALE_MS);
     bool enrolling = face_service_enrolling();
+    /* 录入模式（单帧 / 五向）决定引导文案；后端无此概念时为 false（单帧）。
+     * 姿态 yaw/pitch/roll 已由 face_service_face_pose() 提供，暂未参与文案
+     * —— 转头/抬头的判定阈值需要真机标定，标定前只用 state 更稳妥。 */
+    bool five_way = face_service_enroll_five_way();
 
     /* 引导小字：仅录入会话期间显示在视频上（FR-19）。
      * fs < 0（模组尚未上报）不是「没检测到人脸」，由 guide_text 统一给中性文案。 */
     if (enrolling) {
         int32_t fs = face_service_face_state();
-        lv_label_set_text(s_guide_lb, guide_text(fs));
+        lv_label_set_text(s_guide_lb, guide_text(fs, five_way));
         lv_obj_set_hidden(s_guide_lb, false);
     } else {
         lv_obj_set_hidden(s_guide_lb, true);
     }
 
     /* 头部副文案（冗余一份引导，低视觉权重） */
-    lv_label_set_text(s_sub, enrolling ? guide_text(face_service_face_state())
-                                       : "未在录入会话");
+    lv_label_set_text(s_sub, enrolling ? guide_text(face_service_face_state(), five_way)
+                                       : (five_way ? "未在录入会话 · 五向模式"
+                                                   : "未在录入会话"));
 
     /* 底部状态文案：明确、不空。
      * 结果态（录入成功/失败文案）由 page_enroll_show_result 写入并独占 s_status，

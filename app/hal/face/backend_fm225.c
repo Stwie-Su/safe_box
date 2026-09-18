@@ -444,6 +444,20 @@ static safe_err_t fm225_verify_once(void)
     return e;
 }
 
+/* 姿态快照读取（与 s_face_state 同源、同一次 NOTE 更新） */
+static int32_t fm225_face_pose(int16_t * yaw, int16_t * pitch, int16_t * roll)
+{
+    if (yaw)   *yaw   = s_pose_yaw;
+    if (pitch) *pitch = s_pose_pitch;
+    if (roll)  *roll  = s_pose_roll;
+    return 0;
+}
+
+static bool fm225_enroll_five_way(void)
+{
+    return s_enroll_5way;
+}
+
 static int32_t fm225_face_state(void)
 {
     return s_face_state;
@@ -1171,6 +1185,8 @@ static const face_backend_t backend = {
     .module_users  = fm225_module_users,
     .module_health = fm225_module_health,
     .face_state   = fm225_face_state,
+    .face_pose    = fm225_face_pose,
+    .enroll_five_way = fm225_enroll_five_way,
     .inject        = fm225_inject,
 };
 

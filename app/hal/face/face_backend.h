@@ -53,6 +53,12 @@ typedef struct face_backend {
      * 语义见 hal_face.h 的 face_service_face_state()。
      * 可为 NULL（视为 -1 未知，如 fake / none）。 */
     int32_t (*face_state)(void);
+    /* 姿态快照（五向录入引导的数据源）：yaw/pitch/roll，任一输出参数可为 NULL。
+     * 返回 0 = 取到；< 0 = 该后端无姿态概念。**可选接口**，可为 NULL。
+     * 语义：NOTE NID_FACE_STATE 的 8 个 int16 中的第 6/7/8 个（小端，实测）。 */
+    int32_t (*face_pose)(int16_t * yaw, int16_t * pitch, int16_t * roll);
+    /* 当前录入模式是否为五向。**可选接口**，NULL 视为单帧。 */
+    bool (*enroll_five_way)(void);
 
     /* 注入模拟结果，仅 FACE_CAP_INJECT 后端需要实现 */
     safe_err_t (*inject)(int32_t face_id, face_reason_t reason);

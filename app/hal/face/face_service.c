@@ -234,6 +234,18 @@ int32_t face_service_face_state(void)
     return s_backend->face_state();
 }
 
+int32_t face_service_face_pose(int16_t * yaw, int16_t * pitch, int16_t * roll)
+{
+    if (s_backend == NULL || s_backend->face_pose == NULL) return -1;
+    return s_backend->face_pose(yaw, pitch, roll);
+}
+
+bool face_service_enroll_five_way(void)
+{
+    if (s_backend == NULL || s_backend->enroll_five_way == NULL) return false;
+    return s_backend->enroll_five_way();
+}
+
 bool face_service_enrolling(void)
 {
     return s_enroll_pending;
