@@ -110,7 +110,7 @@ void face_service_tick(uint32_t now_ms)
         }
         else if((now_ms - s_enroll_start_ms) > ENROLL_TIMEOUT_MS) {
             s_enroll_pending = false;
-            face_enroll_result_t r = { -1, SAFE_ERR_TIMEOUT };
+            face_enroll_result_t r = { -1, SAFE_ERR_TIMEOUT, 0 };
             face_service_emit(FACE_EV_ENROLL_DONE, &r);
         }
     }

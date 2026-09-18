@@ -47,6 +47,7 @@
 
 #define FM225_VERIFY_TIMEOUT_S   10     /* verify 超时（手册默认 10s，最大 255） */
 #define FM225_ENROLL_TIMEOUT_S   10     /* enroll 超时（手册默认 10s） */
+#define FM225_ENROLL_TIMEOUT_5WAY 30  /* 五向录入超时：五个朝向依次采集，给足冗余 */
 #define FM225_REPLY_TIMEOUT_MS   800    /* 即时命令（RESET/GETSTATUS/DELETE）应答超时 */
 /* 会话型命令（VERIFY/ENROLL）的应答超时：模组要等人脸/录入完成才回最终 REPLY，
  * 过程中只回 NOTE（手册 §MID_VERIFY「解锁过程中，模组返回 NOTE 和 REPLY 两种
@@ -119,6 +120,23 @@ static uint32_t s_enroll_sent_at_ms;                   /* ENROLL 实际下发时
 static uint32_t s_enroll_note_count;                   /* 本次录入会话收到的 NOTE 人脸状态条数 */
 static int32_t  s_enroll_last_state;                   /* 会话期间末次人脸状态（-1 = 从未上报） */
 static bool     s_enroll_hint_done;                    /* 「模组没上报过状态」提示是否已打过 */
+
+/* 录入模式（可切换，默认单帧）。
+ *   单帧：face_direction = FACE_DIRECTION_UNDEFINE(0x00)，一次采集即成模板
+ *         （用户 2026-09-15 拍板，最简单可靠）。
+ *   五向：face_direction = 0x1F（上|下|左|右|正），一次 ENROLL 命令内由模组
+ *         依次采集五个朝向 —— **不是**串联发 5 次命令（手册 V1.7 1062-1071、1083）。
+ * 切换方式：env SAFE_FACE_ENROLL_5WAY=1（白名单式，与既有 env 开关同一纪律）。
+ * 之所以做成可切换：五向的真机表现尚未验证（此前录入一直超时，face_direction
+ * 的多向语义一次都没跑通过），保留单帧做对照，出问题可一键回退。 */
+static bool     s_enroll_5way;
+
+/* NOTE 姿态快照（yaw/pitch/roll），与 s_face_state 同一跨线程纪律。
+ * 五向引导需要它来判断用户有没有真的转头/抬头。
+ * ★ 整组更新：必须与 state 同时刷新，否则 UI 会读到「新 state + 旧姿态」的组合态。 */
+static volatile int16_t s_pose_yaw;
+static volatile int16_t s_pose_pitch;
+static volatile int16_t s_pose_roll;
 
 /* ---------- NOTE 明细诊断（env SAFE_FM225_NOTE_DEBUG，默认关） ----------
  * 用途：定位「模组进了录入会话却看不到脸」这类问题——需要看模组**到底上报了什么**：
@@ -378,8 +396,11 @@ static bool fm225_enroll_issue(uint32_t now_ms)
     uint8_t p[35];
     memset(p, 0, sizeof(p));
     copy_name_utf8((char *)(p + 1), 32, s_enroll_name);
-    p[33] = 0x00;
-    p[34] = FM225_ENROLL_TIMEOUT_S;
+    /* 可切换录入模式：单帧 0x00 / 五向 0x1F（见 s_enroll_5way 注释） */
+    p[33] = s_enroll_5way ? 0x1F : 0x00;
+    /* 超时：五向要依次采集五个朝向，10s 未必够（手册说 timeout 最大 255s），
+     * 这里给五向单独一个更宽的值，单帧保持原值不变。 */
+    p[34] = s_enroll_5way ? FM225_ENROLL_TIMEOUT_5WAY : FM225_ENROLL_TIMEOUT_S;
 
     safe_err_t e = fm225_send_cmd(FM225_CMD_ENROLL, p, sizeof(p));
     s_enroll_req = false;
@@ -644,6 +665,19 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
                 s_enroll_note_count++;
                 s_enroll_last_state = st;
             }
+            /* 姿态快照：整组刷新（state 已在上文写入 s_face_state）。
+             * 与诊断分支同源的小端 int16（实测 2026-09-15），越界字段补 0。 */
+            {
+                int16_t y = 0, pi = 0, ro = 0;
+                if(f->data_len >= 15) {
+                    y  = (int16_t)((uint16_t)f->data[11] | ((uint16_t)f->data[12] << 8));
+                    pi = (int16_t)((uint16_t)f->data[13] | ((uint16_t)f->data[14] << 8));
+                }
+                if(f->data_len >= 17) {
+                    ro = (int16_t)((uint16_t)f->data[15] | ((uint16_t)f->data[16] << 8));
+                }
+                s_pose_yaw = y; s_pose_pitch = pi; s_pose_roll = ro;
+            }
             if(s_note_dbg) {
                 /* 完整解析 LE int16 × 8：v[0]=state, v[1..4]=left/top/right/bottom,
                  * v[5..7]=yaw/pitch/roll。越过 data_len 的字段补 0（不读越界）。
@@ -743,6 +777,9 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
         } else {
             r.face_id = -1;
         }
+        /* 手册 V1.7 1076-1084：REPLY 的 enroll 数据 = user_id_heb + user_id_leb
+         * + face_direction。第三个字节就是已完成方向掩码，供 UI 显示进度。 */
+        r.face_dir_mask = (f->data_len >= 3) ? f->data[2] : 0;
         /* 同时打原始 MR 码：错误码是给 UI 的语义，MR 码是给排错用的现场。
          * 注意：本文件在 hal 层，不得调 core 的 safe_err_str（hal→core 是反向依赖，
          * 链接期会直接 undefined reference）——只打数值，语义由 UI 层翻译。
@@ -826,6 +863,17 @@ static safe_err_t fm225_init(void)
     s_enroll_note_count = 0;
     s_enroll_last_state = -1;
     s_enroll_hint_done  = false;
+
+    /* 录入模式：env SAFE_FACE_ENROLL_5WAY 切五向。
+     * 白名单式（只认 1/true/yes/on，其余一律关）—— 与 SAFE_FM225_NOTE_DEBUG 等
+     * 既有开关同一纪律，防止写成 =false 反而开启的脚枪。 */
+    {
+        const char * e = getenv("SAFE_FACE_ENROLL_5WAY");
+        s_enroll_5way = (e != NULL &&
+                         (strcmp(e, "1") == 0 || strcmp(e, "true") == 0 ||
+                          strcmp(e, "yes") == 0  || strcmp(e, "on") == 0));
+    }
+    s_pose_yaw = 0; s_pose_pitch = 0; s_pose_roll = 0;
     s_silent_cmd        = 0;
     s_silent_at_ms      = 0;
 

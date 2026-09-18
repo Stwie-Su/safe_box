@@ -65,7 +65,7 @@ static void fake_tick(uint32_t now_ms)
         if(s_enroll_done_ms == 0) s_enroll_done_ms = now_ms + ENROLL_COST_MS;
         else if(now_ms >= s_enroll_done_ms) {
             s_enroll_job = false;
-            face_enroll_result_t r = { s_next_face_id++, SAFE_OK };
+            face_enroll_result_t r = { s_next_face_id++, SAFE_OK, 0 };  /* face_dir_mask：fake 不模拟方向进度 */
             face_service_emit(FACE_EV_ENROLL_DONE, &r);
         }
     }

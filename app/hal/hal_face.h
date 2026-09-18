@@ -54,6 +54,11 @@ const char * face_reason_name(face_reason_t r);
 typedef struct {
     int32_t    face_id;    /* 成功 >= 0，失败 -1 */
     safe_err_t err;
+    /* 已完成的方向掩码（手册 V1.7 §MID_ENROLL REPLY 的 s_msg_reply_enroll_data）：
+     * 低 5 位从高到低 = 上(0x10) / 下(0x08) / 左(0x04) / 右(0x02) / 正(0x01)，
+     * 位为 1 表示该朝向已录入。0x1F = 五向全部完成。
+     * 单帧模式或未取到时填 0；调用方据此显示进度芯片。 */
+    uint8_t    face_dir_mask;
 } face_enroll_result_t;
 
 typedef struct {
