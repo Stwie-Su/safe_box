@@ -27,11 +27,15 @@ static void get_random(uint8_t *buf, size_t len)
         memcpy(buf + i, &r, n);
     }
 #else
+    /* QA-23：同上 —— 忽略 fread 返回值会让 IV/随机数取自未初始化内存，
+     * 使 CBC 的语义安全性归零。校验读满，读不满一律走 rand() 兜底。 */
     FILE *f = fopen("/dev/urandom", "rb");
+    bool rnd_ok = false;
     if (f) {
-        (void)fread(buf, 1, len, f);
+        rnd_ok = (fread(buf, 1, len, f) == len);
         fclose(f);
-    } else {
+    }
+    if (!rnd_ok) {
         for (size_t i = 0; i < len; i++) buf[i] = (uint8_t)rand();
     }
 #endif

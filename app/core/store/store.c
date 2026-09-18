@@ -425,12 +425,21 @@ static int from_hex(const char *hex, uint8_t *out, size_t cap)
 int pin_hash(const char *pin, uint8_t *salt_out, char *hash_hex_out)
 {
     if (!pin || !*pin) return -1;
+    /* QA-23：随机盐绝不能取自未初始化的栈内存 —— 那会让 PBKDF2 的防彩虹表
+     * 作用直接归零（盐可预测/重复 = 彩虹表可用）。
+     * 原实现忽略 fread 返回值：/dev/urandom **打开成功但读取不足**时，
+     * salt 里装的是上一次栈帧的残留数据（gcc 已报 -Wunused-result）。
+     * 修法：①栈上先清零；②校验 fread 是否读满；③读不满与打不开一律走
+     * rand() 兜底 —— 弱，但至少是「随机数」而不是「未知内存」。 */
     uint8_t salt[16];
+    memset(salt, 0, sizeof(salt));
     FILE *f = fopen("/dev/urandom", "rb");
+    bool salt_ok = false;
     if (f) {
-        (void)fread(salt, 1, sizeof(salt), f);
+        salt_ok = (fread(salt, 1, sizeof(salt), f) == sizeof(salt));
         fclose(f);
-    } else {
+    }
+    if (!salt_ok) {
         srand((unsigned)hal_time());
         for (size_t i = 0; i < sizeof(salt); i++) salt[i] = (uint8_t)rand();
     }
@@ -1075,6 +1084,11 @@ int log_append(const char *evt, const char *user, int res, const char *detail)
     if (!f) return -1;
     fprintf(f, "{\"ts\":\"%s\",\"evt\":%s,\"user\":%s,\"res\":%d,\"detail\":%s}\n",
             ts, eq, uq, res ? 1 : 0, dq);
+    /* QA-11：追加后必须 fsync。否则掉电时最后一条可能只写了一半 ——
+     * 留下的「无换行结尾的残缺行」正是 QA-01（log_query 越界写）的触发源，
+     * 这里 fsync 是从源头减少半行。 */
+    fflush(f);
+    fsync(fileno(f));
     fclose(f);
 
     /* 滚动截断：超过上限时保留最后 N 条（临时文件 + rename，避免就地读写冲突） */
@@ -1094,6 +1108,12 @@ int log_append(const char *evt, const char *user, int res, const char *detail)
             snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
             FILE *nf = fopen(path, "rb");
             FILE *tf = fopen(tmp_path, "wb");
+            /* QA-22（严重）：原实现在 **nf 打开失败而 tf 成功** 时仍会 rename ——
+             * 用**空的临时文件**覆盖整份 safe.log，等于把全部审计日志抹掉。
+             * 修法：只有「源与临时文件都打开成功」且「写入无错」时才 rename；
+             *       其余一律删除临时文件、保留原文件 —— 宁可日志超上限，
+             *       也绝不能把审计链整条弄丢。 */
+            bool rotate_ok = false;
             if (nf && tf) {
                 int cur = 0, wc;
                 bool ins = false;
@@ -1106,10 +1126,20 @@ int log_append(const char *evt, const char *user, int res, const char *detail)
                         fputc(wc, tf);                   /* 第 skip+1 行起才写内容 */
                     }
                 }
+                rotate_ok = !ferror(tf);
+                if (rotate_ok) {
+                    fflush(tf);
+                    fsync(fileno(tf));      /* QA-11：临时文件先落盘再 rename */
+                }
             }
             if (nf) fclose(nf);
-            if (tf) { fclose(tf); rename(tmp_path, path); }
-            else remove(tmp_path);
+            if (tf) fclose(tf);
+            if (rotate_ok) {
+                if (rename(tmp_path, path) == 0) fsync_parent_dir(path);
+                else remove(tmp_path);
+            } else {
+                remove(tmp_path);
+            }
         }
     }
     return 0;
