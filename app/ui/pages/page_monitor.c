@@ -669,6 +669,10 @@ static void stats_done(void * p)
 {
     monitor_stats_t * a = (monitor_stats_t *)p;
     s_stats_busy = false;
+    /* QA-25：worker 写到独立 job 缓冲，done 在主线程里一次性拷回静态 s_stats；
+       此后 s_stats 只被主线程读写（refresh_theme / unlock_cb 也只读），
+       彻底消除「worker 写 job 缓冲 / UI 线程读 s_stats」的跨线程竞态。 */
+    s_stats = *a;
 
     char buf[32];
 
@@ -709,6 +713,7 @@ static void stats_done(void * p)
             if (r) lv_obj_set_hidden(r, true);
         }
     }
+    free(a);   /* QA-25：释放本次统计的独立 job 缓冲 */
 }
 
 static void monitor_timer_cb(lv_timer_t * t)
@@ -718,7 +723,11 @@ static void monitor_timer_cb(lv_timer_t * t)
 
     if (s_stats_busy) return;   /* 上一次统计还没回来，跳过本轮 */
     s_stats_busy = true;
-    worker_post(stats_worker, &s_stats, stats_done);
+    /* QA-25：每次统计自建独立 job 缓冲（堆上），worker 写它、done（主线程）拷回 s_stats。
+       不再把静态 s_stats 直接交给 worker，避免 worker 写 / UI 读 s_stats 的跨线程竞态。 */
+    monitor_stats_t * job = calloc(1, sizeof(*job));
+    if (!job) { s_stats_busy = false; return; }
+    worker_post(stats_worker, job, stats_done);
 }
 
 /* 主题切换回调：重刷所有「按角色取色」的本地覆盖 */
