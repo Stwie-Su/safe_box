@@ -119,6 +119,25 @@ void worker_shutdown(void)
     pthread_mutex_unlock(&g_lock);
 
     pthread_join(g_thread, NULL);   /* 等 worker 清空在途作业并退出 */
+
+    /* QA-10：worker 退出后，已完成的作业仍在 g_done 队列里未被派发
+     * （worker_poll 不会再被调用）——若不处理会泄漏 job 节点且回调丢失。
+     * join 返回后 worker 线程已死，g_done 不再被并发修改，在主线程（调用方）
+     * 安全派发 done 回调（与 worker_poll 同一线程语义，可安全操作 LVGL 等）。 */
+    job_t *j = NULL;
+    pthread_mutex_lock(&g_lock);
+    j = g_done_head;
+    g_done_head = NULL;
+    g_done_tail = NULL;
+    pthread_mutex_unlock(&g_lock);
+    while (j) {
+        job_t *next = j->next;
+        if (j->done) j->done(j->arg);   /* 主线程执行 done 回调 */
+        else         free(j->arg);      /* Fire-and-Forget：释放 arg */
+        free(j);
+        j = next;
+    }
+
     g_inited = false;
     g_stop   = false;
 }
