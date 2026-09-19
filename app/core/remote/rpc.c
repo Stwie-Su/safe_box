@@ -10,6 +10,7 @@
 #include "core/remote/mqtt_client.h"
 #include "core/config.h"            /* app_config()：MQTT 连接凭据 */
 #include "core/store/store.h"
+#include "core/support/worker.h"   /* worker_post：把 store 写操作下沉 worker 线程（QA-20） */
 #include "core/auth/totp.h"
 #include "hal/hal_time.h"
 #include "hal/hal_face.h"
@@ -135,21 +136,154 @@ static int parse_face_reason(const char *s)
     return -1;
 }
 
-/* 校验管理操作是否需要 otp。返回 true 表示已校验通过（或不需要）。 */
-static bool check_otp_required(cJSON *root, bool sensitive, char *req_id)
+/* 校验敏感指令是否「已提供 otp」（字符串非空）。
+ * 实际校验（backend_admin_verify_totp，会写盘）下沉到 worker 段执行，
+ * 不在主线程做文件 IO——否则与 worker 的落盘并发，破坏
+ * 「文件读写由 worker 单线程持有」的不变式（QA-20）。
+ * 返回 true 表示 otp 已提供（可进入 worker 校验）；false 表示缺失。 */
+static bool rpc_otp_present(cJSON *root, char otp_out[32])
 {
-    if (!sensitive) return true;
-    cJSON *p = cJSON_GetObjectItem(root, "params");
-    cJSON *otp = p ? cJSON_GetObjectItem(p, "otp") : NULL;
-    if (!cJSON_IsString(otp) || !otp->valuestring || !*otp->valuestring) {
-        ack(req_id, 2001, "需要动态码");
-        return false;
+    cJSON *params = cJSON_GetObjectItem(root, "params");
+    cJSON *otp = params ? cJSON_GetObjectItem(params, "otp") : NULL;
+    if (cJSON_IsString(otp) && otp->valuestring && *otp->valuestring) {
+        strncpy(otp_out, otp->valuestring, 31);
+        otp_out[31] = '\0';
+        return true;
     }
-    if (backend_admin_verify_totp(otp->valuestring) != AUTH_OK) {
-        ack(req_id, 2002, "动态码错误或已使用");
-        return false;
+    return false;
+}
+
+/* ================= 异步作业：把 store 写操作挪到 worker 线程 =================
+ * 不变式（store.c）：users.json / safe.log 的读写由 worker 单线程持有。
+ * 原 dispatch 在主线程直接调 user_add / user_del / user_update /
+ * user_policy_set_face / log_append / backend_admin_verify_totp（写盘），
+ * 与 worker 的落盘并发 -> 「读-改-写」跨两次 IO 的丢失更新（新建用户消失、
+ * 失败计数/锁定被回滚，防暴力锁定失效，QA-20）。
+ *
+ * 三段划分（不新增线程，复用既有 worker_post）：
+ *   ① 解析与准入：cJSON 解析 + 鉴权/时效/去重 + 参数校验，全在主线程且不碰
+ *      store 文件；命令参数**按值**拷进 job（绝不带 cJSON 指针，主线程随后
+ *      会 cJSON_Delete，指针必悬垂）。
+ *   ② 副作用：worker_post 的 fn 在 worker 线程跑——只做 store 写操作及会写盘
+ *      的 TOTP 校验，把结果 code/msg 写回 job。
+ *   ③ 回执与 UI：done 在主线程跑——发 ack、做 FSM 状态迁移 / 人脸模板删除 /
+ *      人脸注入等只能在主线程做的事。 */
+typedef enum {
+    JOB_ADD_USER,
+    JOB_DEL_USER,
+    JOB_SET_FACE_ENABLE,
+    JOB_SET_FACE_POLICY,
+    JOB_REMOTE_UNLOCK,
+    JOB_INJECT_FACE_LOG
+} rpc_job_kind_t;
+
+typedef struct {
+    rpc_job_kind_t kind;
+    char  req_id[32];
+    int   code;          /* ② 写，③ 读 */
+    char  msg[80];       /* ② 写，③ 读 */
+    bool  has_otp;
+    char  otp[32];       /* 主线程按值拷入，② 在 worker 校验 */
+
+    safe_user_t   u;     /* JOB_ADD_USER / JOB_SET_FACE_ENABLE */
+    int     del_uid;
+    int32_t del_fid;     /* ② 写（JOB_DEL_USER 回填），③ 读 */
+    int     face_otp_after;
+    int     face_timeout_s;
+    bool    fe_enable;   /* JOB_SET_FACE_ENABLE：启用标志（按值，避免被 user_find 覆盖） */
+    bool    unlock_ok;   /* ② 写（JOB_REMOTE_UNLOCK），③ 读 */
+    char    inj_detail[96];  /* JOB_INJECT_FACE_LOG */
+} rpc_job_t;
+
+/* ② worker 线程：仅做 store 写操作 + 会写盘的 TOTP 校验，结果写回 job。 */
+static void rpc_job_fn(void *arg)
+{
+    rpc_job_t *j = (rpc_job_t *)arg;
+    if (j->has_otp) {
+        if (backend_admin_verify_totp(j->otp) != AUTH_OK) {
+            j->code = RPC_CODE_BAD_OTP;
+            snprintf(j->msg, sizeof(j->msg), "动态码错误或已使用");
+            return;  /* 校验失败：不再执行后续 store 副作用 */
+        }
     }
-    return true;
+    switch (j->kind) {
+    case JOB_ADD_USER: {
+        if (j->u.id <= 0) j->u.id = user_next_id();   /* 分配 id 在 worker（读盘）做 */
+        int r = user_add(&j->u);
+        if (r == 0) log_append("user_add", "remote", 1, j->u.name);
+        j->code = r == 0 ? 0 : 1003;
+        snprintf(j->msg, sizeof(j->msg),
+                 r == 0 ? "ok" : (r == -2 ? "用户名已存在" : "add failed"));
+        break;
+    }
+    case JOB_DEL_USER: {
+        int r = user_del_cascade(j->del_uid, &j->del_fid);
+        j->code = r == 0 ? 0 : 2003;
+        snprintf(j->msg, sizeof(j->msg), r == 0 ? "ok" : "user not found");
+        break;
+    }
+    case JOB_SET_FACE_ENABLE: {
+        if (user_find_by_id(j->u.id, &j->u) != 0) {
+            j->code = 2003; snprintf(j->msg, sizeof(j->msg), "user not found");
+            break;
+        }
+        /* 不变式：face_enable == true => face_id >= 0（启用前必须已绑定人脸）。 */
+        j->u.face_enable = j->fe_enable;
+        if (j->u.face_enable && j->u.face_id < 0) {
+            j->code = 1001;
+            snprintf(j->msg, sizeof(j->msg), "该用户未绑定人脸，无法启用人脸通道");
+            break;
+        }
+        user_update(&j->u);
+        j->code = 0; snprintf(j->msg, sizeof(j->msg), "ok");
+        break;
+    }
+    case JOB_SET_FACE_POLICY: {
+        if (j->face_otp_after >= 1 || j->face_timeout_s >= 3) {
+            user_policy_set_face(j->face_otp_after, j->face_timeout_s);
+            j->code = 0; snprintf(j->msg, sizeof(j->msg), "ok");
+        } else {
+            j->code = 1001; snprintf(j->msg, sizeof(j->msg), "缺少有效参数");
+        }
+        break;
+    }
+    case JOB_REMOTE_UNLOCK: {
+        /* TOTP 已在上面校验通过（has_otp 恒 true），此处只记录结果供 ③ 做 FSM。 */
+        j->unlock_ok = true;
+        j->code = 0; snprintf(j->msg, sizeof(j->msg), "ok");
+        break;
+    }
+    case JOB_INJECT_FACE_LOG: {
+        log_append("inject_face", "remote", 1, j->inj_detail);
+        break;
+    }
+    }
+}
+
+/* ③ 主线程：发回执 + 只能在主线程做的 UI/FSM/人脸副作用。 */
+static void rpc_job_done(void *arg)
+{
+    rpc_job_t *j = (rpc_job_t *)arg;
+    switch (j->kind) {
+    case JOB_ADD_USER:
+    case JOB_SET_FACE_ENABLE:
+    case JOB_SET_FACE_POLICY:
+        ack(j->req_id, j->code, j->msg);
+        break;
+    case JOB_DEL_USER:
+        /* 本地删成功且归属核验通过 -> 异步删模组模板（face 线程，主线程调用安全）。 */
+        if (j->code == 0 && j->del_fid >= 0) face_service_delete_async(j->del_fid);
+        ack(j->req_id, j->code, j->msg);
+        break;
+    case JOB_REMOTE_UNLOCK:
+        /* FR-4 / 验收 8.3：仅在 TOTP 校验通过后触发开锁与状态迁移（UI 弹窗在 main）。 */
+        if (j->unlock_ok) auth_fsm_note_unlock("admin");
+        ack(j->req_id, j->code, j->msg);
+        break;
+    case JOB_INJECT_FACE_LOG:
+        break;  /* 仅写盘，无主线程副作用 */
+    }
+    free(j);
 }
 
 /* 通道是否被授权执行敏感指令。
@@ -195,12 +329,9 @@ static void dispatch(const char *payload)
     const char *c = cmd->valuestring;
 
     /* ================= 轻量访问控制（务必在**任何副作用之前**） =================
-     * 顺序：鉴权 → 时效+去重。任一未过立即回执并 return，绝不进入指令分支——
-     * 保证「越权 / 过期 / 重复」的请求不会先改状态再被判定（如先删了用户再判重）。
-     * 分级语义（定论）：**去重仅敏感档；时效对所有档（带 ts 时）**。 */
+     * 顺序：鉴权 -> 时效+去重。任一未过立即回执并 return，绝不进入指令分支。 */
     const int64_t now_sec = (int64_t)hal_time();
 
-    /* (a) 权限分级：敏感指令要求鉴权通道（未配置凭据时保持旧行为，见 channel_authorized）。 */
     if (rpc_cmd_is_sensitive(c) && !channel_authorized()) {
         ack(req_id, RPC_CODE_UNAUTHORIZED,
             "未鉴权通道：敏感指令被拒绝（需配置 MQTT 凭据并以鉴权连接接入）");
@@ -208,8 +339,6 @@ static void dispatch(const char *payload)
         return;
     }
 
-    /* (a2) 调试钩子（inject_face：能伪造开锁结果）——默认关死，需 env 显式开启；
-     *      开启后仍要求**鉴权连接**。放在去重之前，避免给被拒请求占用去重槽。 */
     if (rpc_cmd_is_debug_hook(c)) {
         int dg = rpc_guard_debug_hook_gate(
             inject_hook_enabled(),
@@ -224,8 +353,6 @@ static void dispatch(const char *payload)
         }
     }
 
-    /* (b) 时效（所有档，带 params.ts 时）+ 去重（仅敏感档）：策略集中在 rpc_guard_admit。
-     *     只读档豁免去重——重放 query_status 无实际危害，避免固定 req_id 轮询吃 1004。 */
     int64_t req_ts = 0;
     {
         cJSON *tsj = params ? cJSON_GetObjectItem(params, "ts") : NULL;
@@ -248,7 +375,7 @@ static void dispatch(const char *payload)
         return;
     }
 
-    /* ---- query_status：立即回状态（验收用例 1） ---- */
+    /* ---- query_status：立即回状态（只读，主线程） ---- */
     if (strcmp(c, "query_status") == 0) {
         char *s = build_status(0, NULL, req_id);
         if (s) { mqtt_publish("safe/log", s, 1, 0); free(s); }
@@ -258,8 +385,7 @@ static void dispatch(const char *payload)
 
     /* ---- remote_unlock ---- */
     if (strcmp(c, "remote_unlock") == 0) {
-        /* FR-4 / 验收 8.3：锁定期间一律拒绝，包括管理员远程指令（返回 3001）。
-         * 先拦截再校验 otp，避免"锁定期间仅凭动态码即可远程开锁"的越权路径。 */
+        /* FR-4 / 验收 8.3：锁定期间一律拒绝。 */
         if (auth_fsm_state() == FSM_LOCKOUT) {
             ack(req_id, 3001, "系统处于锁定状态");
             cJSON_Delete(root);
@@ -267,14 +393,16 @@ static void dispatch(const char *payload)
         }
         cJSON *otp = params ? cJSON_GetObjectItem(params, "otp") : NULL;
         if (cJSON_IsString(otp) && otp->valuestring && *otp->valuestring) {
-            if (backend_admin_verify_totp(otp->valuestring) == AUTH_OK) {
-                auth_fsm_note_unlock("admin");
-                ack(req_id, 0, "ok");
-            } else {
-                ack(req_id, 2002, "动态码错误或已使用");
-            }
+            /* 带 otp：TOTP 校验（写盘）下沉 worker，FSM 迁移在 ③ 主线程做。 */
+            rpc_job_t *j = calloc(1, sizeof(*j));
+            if (!j) { ack(req_id, 1003, "internal"); cJSON_Delete(root); return; }
+            j->kind = JOB_REMOTE_UNLOCK;
+            strncpy(j->req_id, req_id, sizeof(j->req_id) - 1);
+            j->has_otp = true;
+            strncpy(j->otp, otp->valuestring, sizeof(j->otp) - 1);
+            worker_post(rpc_job_fn, j, rpc_job_done);
         } else {
-            /* ADR-4：无 otp → 触发板子本地弹出动态码页，回 2001 */
+            /* ADR-4：无 otp -> 触发板子本地弹出动态码页，回 2001（无 store 写，主线程）。 */
             strncpy(g_local_otp_req, req_id, sizeof(g_local_otp_req) - 1);
             g_local_otp_pending = true;
             ack(req_id, 2001, "请在设备输入动态码");
@@ -283,13 +411,12 @@ static void dispatch(const char *payload)
         return;
     }
 
-    /* ---- add_user（敏感） ----
-     * FR-9 创建入口（v1.8）：本指令现在支持 role（admin/user/temp，含临时角色）、
-     * pin（必填，只存哈希）、valid_until 与 use_limit（临时授权，缺省 0 = 不限）。
-     * 修前行为：role 写死 "user"、完全不设 PIN —— 而 user_add 要求 pin_hash 非空，
-     * 因此这条指令**从来就没有成功过**（恒回 1003），临时用户在远程通道也无法创建。 */
+    /* ---- add_user（敏感，worker 落盘） ---- */
     if (strcmp(c, "add_user") == 0) {
-        if (!check_otp_required(root, true, req_id)) { cJSON_Delete(root); return; }
+        char otpbuf[32];
+        if (!rpc_otp_present(root, otpbuf)) {
+            ack(req_id, 2001, "需要动态码"); cJSON_Delete(root); return;
+        }
         int uid = params ? (cJSON_GetObjectItem(params, "uid") ? cJSON_GetObjectItem(params, "uid")->valueint : 0) : 0;
         cJSON *nm = params ? cJSON_GetObjectItem(params, "name") : NULL;
         cJSON *rl = params ? cJSON_GetObjectItem(params, "role") : NULL;
@@ -313,8 +440,6 @@ static void dispatch(const char *payload)
         if (plen < (size_t)pol->pin_min_len || plen > (size_t)pol->pin_max_len) {
             ack(req_id, 1001, "pin 长度不在策略允许范围内"); cJSON_Delete(root); return;
         }
-        /* 临时授权字段：缺省 0 表示不限（与 store 的语义一致）。
-         * valid_until 用 valuedouble 取，避免 int 取值范围把 2038 年后的时间戳截断。 */
         int64_t valid_until = 0;
         int     use_limit   = 0;
         if (cJSON_IsNumber(vu)) valid_until = (int64_t)vu->valuedouble;
@@ -326,90 +451,104 @@ static void dispatch(const char *payload)
             ack(req_id, 1001, "valid_until 必须晚于当前时间"); cJSON_Delete(root); return;
         }
 
-        safe_user_t u; memset(&u, 0, sizeof(u));
-        u.id = uid > 0 ? uid : user_next_id();
-        strncpy(u.name, nm->valuestring, sizeof(u.name) - 1);
-        strncpy(u.role, role, sizeof(u.role) - 1);
-        strncpy(u.auth_method, "pin", sizeof(u.auth_method) - 1);
-        u.enabled = true;
-        u.face_id = -1;                 /* 新建用户默认未绑定人脸模板 */
-        u.valid_until = valid_until;
-        u.use_limit   = use_limit;
-        u.used_count  = 0;
+        rpc_job_t *j = calloc(1, sizeof(*j));
+        if (!j) { ack(req_id, 1003, "internal"); cJSON_Delete(root); return; }
+        j->kind = JOB_ADD_USER;
+        strncpy(j->req_id, req_id, sizeof(j->req_id) - 1);
+        j->has_otp = true;
+        strncpy(j->otp, otpbuf, sizeof(j->otp) - 1);
+        /* 主线程：按值构建（PBKDF2 在主线程算，纯 CPU 不算磁盘 IO）。id 在 ② 分配。 */
+        memset(&j->u, 0, sizeof(j->u));
+        j->u.id = uid;
+        strncpy(j->u.name, nm->valuestring, sizeof(j->u.name) - 1);
+        strncpy(j->u.role, role, sizeof(j->u.role) - 1);
+        strncpy(j->u.auth_method, "pin", sizeof(j->u.auth_method) - 1);
+        j->u.enabled = true;
+        j->u.face_id = -1;
+        j->u.valid_until = valid_until;
+        j->u.use_limit   = use_limit;
         {
             time_t tn = (time_t)hal_time();
             struct tm tmv;
             localtime_r(&tn, &tmv);
-            strftime(u.created_at, sizeof(u.created_at), "%Y-%m-%dT%H:%M:%S", &tmv);
+            strftime(j->u.created_at, sizeof(j->u.created_at), "%Y-%m-%dT%H:%M:%S", &tmv);
         }
         uint8_t salt[16];
-        if (pin_hash(pn->valuestring, salt, u.pin_hash) != 0) {
-            ack(req_id, 1003, "pin 哈希失败"); cJSON_Delete(root); return;
+        if (pin_hash(pn->valuestring, salt, j->u.pin_hash) != 0) {
+            ack(req_id, 1003, "pin 哈希失败"); free(j); cJSON_Delete(root); return;
         }
-        rpc_salt_to_hex(salt, u.pin_salt);
-        int r = user_add(&u);
-        ack(req_id, r == 0 ? 0 : 1003,
-            r == 0 ? "ok" : (r == -2 ? "用户名已存在" : "add failed"));
-        if (r == 0) log_append("user_add", "remote", 1, u.name);
+        rpc_salt_to_hex(salt, j->u.pin_salt);
+        worker_post(rpc_job_fn, j, rpc_job_done);
         cJSON_Delete(root);
         return;
     }
 
-    /* ---- del_user（敏感） ---- */
+    /* ---- del_user（敏感，worker 落盘） ---- */
     if (strcmp(c, "del_user") == 0) {
-        if (!check_otp_required(root, true, req_id)) { cJSON_Delete(root); return; }
+        char otpbuf[32];
+        if (!rpc_otp_present(root, otpbuf)) {
+            ack(req_id, 2001, "需要动态码"); cJSON_Delete(root); return;
+        }
         int uid = params ? (cJSON_GetObjectItem(params, "uid") ? cJSON_GetObjectItem(params, "uid")->valueint : 0) : 0;
-        int32_t fid_rm = -1;
-        int r = user_del_cascade(uid, &fid_rm);
-        /* 本地删成功且归属核验通过 -> 异步删模组模板。若模组忙（SAFE_ERR_BUSY）
-         * 会留孤儿模板，由 cred_reconcile 启动对账标失效，不影响本地凭据。 */
-        if (r == 0 && fid_rm >= 0) face_service_delete_async(fid_rm);
-        ack(req_id, r == 0 ? 0 : 2003, r == 0 ? "ok" : "user not found");
+        rpc_job_t *j = calloc(1, sizeof(*j));
+        if (!j) { ack(req_id, 1003, "internal"); cJSON_Delete(root); return; }
+        j->kind = JOB_DEL_USER;
+        strncpy(j->req_id, req_id, sizeof(j->req_id) - 1);
+        j->has_otp = true;
+        strncpy(j->otp, otpbuf, sizeof(j->otp) - 1);
+        j->del_uid = uid;
+        worker_post(rpc_job_fn, j, rpc_job_done);
         cJSON_Delete(root);
         return;
     }
 
-    /* ---- set_face_enable（敏感） ---- */
+    /* ---- set_face_enable（敏感，worker 落盘） ---- */
     if (strcmp(c, "set_face_enable") == 0) {
-        if (!check_otp_required(root, true, req_id)) { cJSON_Delete(root); return; }
+        char otpbuf[32];
+        if (!rpc_otp_present(root, otpbuf)) {
+            ack(req_id, 2001, "需要动态码"); cJSON_Delete(root); return;
+        }
         int uid = params ? (cJSON_GetObjectItem(params, "uid") ? cJSON_GetObjectItem(params, "uid")->valueint : 0) : 0;
         int en = params && cJSON_GetObjectItem(params, "enable") ? cJSON_GetObjectItem(params, "enable")->valueint : 0;
-        safe_user_t u; memset(&u, 0, sizeof(u));
-        if (user_find_by_id(uid, &u) != 0) { ack(req_id, 2003, "user not found"); cJSON_Delete(root); return; }
-        /* 不变式：face_enable == true ⟹ face_id >= 0。未绑定人脸（face_id < 0）时拒绝
-         * 「启用」——放行就等于主动制造 face_enable=true 而 face_id=-1 的不一致态
-         * （该用户刷脸永不命中、被判「未注册人脸」记失败，界面也误显示已启用）。
-         * 关闭（en=false）任何情况都允许，用于停用「有绑定但暂不用」的通道。 */
-        if (en && u.face_id < 0) {
-            ack(req_id, 1001, "该用户未绑定人脸，无法启用人脸通道");
-            cJSON_Delete(root);
-            return;
-        }
-        u.face_enable = en ? true : false;
-        user_update(&u);
-        ack(req_id, 0, "ok");
+        rpc_job_t *j = calloc(1, sizeof(*j));
+        if (!j) { ack(req_id, 1003, "internal"); cJSON_Delete(root); return; }
+        j->kind = JOB_SET_FACE_ENABLE;
+        strncpy(j->req_id, req_id, sizeof(j->req_id) - 1);
+        j->has_otp = true;
+        strncpy(j->otp, otpbuf, sizeof(j->otp) - 1);
+        /* 读取+校验（face_id<0 拒绝启用）下沉 ② worker；此处只传初值。 */
+        memset(&j->u, 0, sizeof(j->u));
+        j->u.id = uid;
+        j->fe_enable = en ? true : false;
+        worker_post(rpc_job_fn, j, rpc_job_done);
         cJSON_Delete(root);
         return;
     }
 
-    /* ---- set_face_policy（敏感，取代旧 set_threshold） ---- */
+    /* ---- set_face_policy（敏感，worker 落盘） ---- */
     if (strcmp(c, "set_face_policy") == 0) {
-        if (!check_otp_required(root, true, req_id)) { cJSON_Delete(root); return; }
+        char otpbuf[32];
+        if (!rpc_otp_present(root, otpbuf)) {
+            ack(req_id, 2001, "需要动态码"); cJSON_Delete(root); return;
+        }
         int otp_after = params && cJSON_GetObjectItem(params, "face_otp_after")
                         ? cJSON_GetObjectItem(params, "face_otp_after")->valueint : 0;
         int timeout   = params && cJSON_GetObjectItem(params, "face_verify_timeout_s")
                         ? cJSON_GetObjectItem(params, "face_verify_timeout_s")->valueint : 0;
-        if (otp_after >= 1 || timeout >= 3) {
-            user_policy_set_face(otp_after, timeout);
-            ack(req_id, 0, "ok");
-        } else {
-            ack(req_id, 1001, "缺少有效参数");
-        }
+        rpc_job_t *j = calloc(1, sizeof(*j));
+        if (!j) { ack(req_id, 1003, "internal"); cJSON_Delete(root); return; }
+        j->kind = JOB_SET_FACE_POLICY;
+        strncpy(j->req_id, req_id, sizeof(j->req_id) - 1);
+        j->has_otp = true;
+        strncpy(j->otp, otpbuf, sizeof(j->otp) - 1);
+        j->face_otp_after = otp_after;
+        j->face_timeout_s = timeout;
+        worker_post(rpc_job_fn, j, rpc_job_done);
         cJSON_Delete(root);
         return;
     }
 
-    /* ---- sync_time ---- */
+    /* ---- sync_time（敏感，已收编：强制鉴权 + req_id 去重；ts 时效豁免保留） ---- */
     if (strcmp(c, "sync_time") == 0) {
         int ts = params && cJSON_GetObjectItem(params, "ts") ? cJSON_GetObjectItem(params, "ts")->valueint : 0;
         if (ts > 0) { hal_time_set((uint32_t)ts); ack(req_id, 0, "ok"); }
@@ -418,10 +557,7 @@ static void dispatch(const char *payload)
         return;
     }
 
-    /* ---- submit_otp（调试用，受 WAIT_OTP 门控） ----
-     * 验收 FR-3 用户动态码二次确认路径：仅在状态机处于 WAIT_OTP 时生效，
-     * 校验「待确认用户自身」的 TOTP（backend_verify_totp 内部 ±1 窗口 + 一码一用防重放）。
-     * 非 WAIT_OTP 态调用会被 FSM 直接忽略（不触发迁移），属于安全可控的调试指令。 */
+    /* ---- submit_otp（调试用，受 WAIT_OTP 门控；FSM 状态迁移必须在主线程） ---- */
     if (strcmp(c, "submit_otp") == 0) {
         cJSON *otp = params ? cJSON_GetObjectItem(params, "otp") : NULL;
         if (!(cJSON_IsString(otp) && otp->valuestring && *otp->valuestring)) {
@@ -435,30 +571,31 @@ static void dispatch(const char *payload)
         return;
     }
 
-    /* ---- inject_face（调试钩子，取代旧 inject_score）----
-     * 门控见上方 (a2)：默认关死（1007），开启后仍需鉴权连接（1006）；已并入敏感档，
-     * 故同样吃 req_id 去重与时效。 */
+    /* ---- inject_face（调试钩子，取代旧 inject_score）---- */
     if (strcmp(c, "inject_face") == 0) {
         cJSON *rs = params ? cJSON_GetObjectItem(params, "reason") : NULL;
         int fid = params && cJSON_GetObjectItem(params, "face_id") ? cJSON_GetObjectItem(params, "face_id")->valueint : -1;
-        /* -1 哨兵必须落在**有符号**变量里（D9）：face_reason_t 的取值全为非负，
-         * 编译器可以给它选无符号底层类型，此时 `reason < 0` 因整型提升恒为假，
-         * 非法 reason 会一路走到注入并回 code=0 假成功。先用 int 接住再做范围校验。 */
         int reason_i = parse_face_reason(cJSON_IsString(rs) && rs->valuestring ? rs->valuestring : "");
         if (reason_i < 0) {
             ack(req_id, 1001, "invalid reason（合法：ok/no_match/liveness_fail/timeout/error）");
-        } else {
-            face_service_inject(fid, (face_reason_t)reason_i);
-            /* 审计：调试钩子每次注入都要留痕（谁/何时/几号模板/什么结果）。
-             * log_append 内部带时间戳；操作者记为 "remote"（无 TLS 时无法更强归属）。 */
-            {
-                char detail[96];
-                snprintf(detail, sizeof(detail), "face_id=%d reason=%.32s",
-                         fid, cJSON_IsString(rs) && rs->valuestring ? rs->valuestring : "?");
-                log_append("inject_face", "remote", 1, detail);
-            }
-            ack(req_id, 0, "injected");
+            cJSON_Delete(root);
+            return;
         }
+        /* 人脸注入在板子管线（主线程，无磁盘 IO）；审计日志写盘下沉 worker。 */
+        face_service_inject(fid, (face_reason_t)reason_i);
+        char detail[96];
+        snprintf(detail, sizeof(detail), "face_id=%d reason=%.32s",
+                 fid, cJSON_IsString(rs) && rs->valuestring ? rs->valuestring : "?");
+        rpc_job_t *j = calloc(1, sizeof(*j));
+        if (j) {
+            j->kind = JOB_INJECT_FACE_LOG;
+            strncpy(j->req_id, req_id, sizeof(j->req_id) - 1);
+            strncpy(j->inj_detail, detail, sizeof(j->inj_detail) - 1);
+            worker_post(rpc_job_fn, j, rpc_job_done);
+        } else {
+            log_append("inject_face", "remote", 1, detail);  /* 极端：分配失败退回主线程写 */
+        }
+        ack(req_id, 0, "injected");
         cJSON_Delete(root);
         return;
     }
@@ -466,12 +603,6 @@ static void dispatch(const char *payload)
     ack(req_id, 1003, "未知指令");
     cJSON_Delete(root);
 }
-
-/* 单拍预算：20ms 主循环里 rpc_poll 最多同步处理这么多条指令、或花这么多毫秒，
- * 取先到；剩余留到下一拍。否则 PBKDF2 / 整文件 IO 会卡住主线程导致触摸失响应。
- * 8ms ≈ 一拍的 40%，给 LVGL/face 留足余量；8 条覆盖一次下发 + 其后状态轮询。 */
-#define RPC_POLL_MAX_MSGS 8
-#define RPC_POLL_MAX_MS   8
 
 void rpc_poll(void)
 {
