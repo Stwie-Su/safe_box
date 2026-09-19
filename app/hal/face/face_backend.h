@@ -65,7 +65,6 @@ typedef struct face_backend {
 } face_backend_t;
 
 /* 各后端工厂：未编入构建时返回 NULL */
-const face_backend_t * face_backend_fake(void);
 const face_backend_t * face_backend_fm225(void);
 const face_backend_t * face_backend_none(void);
 

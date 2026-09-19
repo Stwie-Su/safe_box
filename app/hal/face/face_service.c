@@ -49,7 +49,6 @@ static pthread_mutex_t s_last_lock = PTHREAD_MUTEX_INITIALIZER;
 static const face_backend_t * find_backend(const char * name)
 {
     struct { const char * n; const face_backend_t * (*f)(void); } table[] = {
-        { "fake",  face_backend_fake  },
         { "fm225", face_backend_fm225 },
         { "none",  face_backend_none  },
     };

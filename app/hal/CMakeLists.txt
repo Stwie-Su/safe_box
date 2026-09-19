@@ -7,7 +7,6 @@ set(SAFE_HAL_SRC
     face/face_service.c
     face/face_thread.c
     face/fm225_proto.c
-    face/backend_fake.c
     face/backend_fm225.c
     face/backend_none.c
     time/time_service.c
