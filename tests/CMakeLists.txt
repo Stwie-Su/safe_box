@@ -43,6 +43,9 @@ safe_add_test(test_rpc)
 # R9 自研 MQTT 客户端 T01：协议编解码（变长剩余长度边界与畸形、组包→解析
 # round-trip、**半包与粘包**、缓冲不足与非法输入）。纯逻辑，不需要 broker。
 safe_add_test(test_mqtt_codec)
+# R9 T02：未确认报文队列 —— packet id 回绕、**存字节而非指针**、DUP 置位、
+# 重传次数用尽后丢弃、队列满与非法输入。
+safe_add_test(test_mqtt_inflight)
 
 # 分层检查：core 不碰 LVGL/平台头，hal 头文件不带平台实现，ui 不碰底层协议
 find_program(SAFE_BASH bash)

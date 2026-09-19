@@ -19,7 +19,9 @@ set(SAFE_CORE_SRC
     # R9 自研 MQTT 客户端 T01：协议编解码层。纯函数（不 IO / 不取时间 / 不 malloc），
     # 无 paho / cJSON 依赖，故与 rpc_guard 一样**无条件**编入 —— 这样即便在
     # Paho 缺失的构建下（当前板子正是如此）它也能继续编译并跑单测。
-    remote/mqtt_codec.c)
+    remote/mqtt_codec.c
+    # R9 T02：未确认报文队列（QoS1 重传用）。同为纯逻辑、无依赖，无条件编入。
+    remote/mqtt_inflight.c)
 
 # 远程通道：依赖齐了编真实现，缺了编空实现，调用方代码不变
 if(SAFE_HAVE_PAHO AND SAFE_HAVE_CJSON)
