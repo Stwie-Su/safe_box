@@ -59,8 +59,7 @@ static void ack(const char *req_id, int code, const char *msg)
     cJSON_AddStringToObject(j, "msg", msg ? msg : "");
     if (req_id && *req_id) cJSON_AddStringToObject(j, "req_id", req_id);
     char *s = cJSON_PrintUnformatted(j);
-    mqtt_publish("safe/log", s, 1, 0);
-    free(s);
+    if (s) { mqtt_publish("safe/log", s, 1, 0); free(s); }
     cJSON_Delete(j);
 }
 
