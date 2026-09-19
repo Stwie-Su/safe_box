@@ -46,4 +46,20 @@ find_program(SAFE_BASH bash)
 if(SAFE_BASH)
     add_test(NAME check_layers
              COMMAND ${SAFE_BASH} ${CMAKE_SOURCE_DIR}/tools/check_layers.sh ${CMAKE_SOURCE_DIR})
+
+    # 主线程直连 store 写接口门禁（QA-20 防回归）。
+    # 这类问题**改完还会再犯**（QA-20 就是主线程经 dispatch 直调 user_add 等
+    # 写接口，破坏「文件 IO 由 worker 单线程持有」不变式），靠人记不住，
+    # 必须有机械检查。豁免规则见脚本内注释（_worker / rpc_job_fn /
+    # user_del_cascade / 行内 GATE-EXEMPT 标记 / auth_fsm 已知遗留）。
+    add_test(NAME check_main_thread_store
+             COMMAND ${SAFE_BASH} ${CMAKE_SOURCE_DIR}/tools/check_main_thread_store.sh
+                     ${CMAKE_SOURCE_DIR})
 endif()
+
+# ---- Sanitizer 验证（**不默认开启**）----
+# 默认构建不带 Sanitizer（会拖慢并影响板子交叉编译）。要验证内存类问题请显式：
+#   cmake -B /tmp/asan_build -DASAN=ON -DLV_PORT_DEFCONFIG=configs/pc.defconfig
+#   cmake --build /tmp/asan_build -j4 && ctest --test-dir /tmp/asan_build
+# 这条很重要：tests/test_store.c 早就覆盖了 QA-02 的 UAF 场景，却在默认 ctest 下
+# **全绿通过** —— 仅仅因为没开 ASan。今后凡是内存类修复，都应在这套构建下再验一遍。
