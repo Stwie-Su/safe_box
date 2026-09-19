@@ -37,6 +37,8 @@ static void lu_worker(void * p)
     a->list = NULL;
     a->count = 0;
     if (user_load_all(&a->list, &a->count) != 0) {
+        user_list_free(a->list);         /* QA-09：user_load_all 失败时内部已分配好数组却返回错误，
+                                           先释放再置空，避免读盘失败路径内存泄漏 */
         a->list = NULL;
         s_users_load_failed = true;      /* 供 UI 区分「读取失败」与「真的没有」 */
     } else {
@@ -77,6 +79,8 @@ static void ql_worker(void * p)
     a->count = 0;
     const char * f = a->has_filter ? a->evt_filter : NULL;
     if (log_query(f, a->res_filter, &a->list, &a->count) != 0) {
+        free(a->list);                   /* QA-09：log_query 失败时内部已分配好数组却返回错误，
+                                           先释放再置空，避免读盘失败路径内存泄漏 */
         a->list = NULL;
         s_logs_load_failed = true;
     } else {
