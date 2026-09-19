@@ -15,7 +15,11 @@ set(SAFE_CORE_SRC
     support/sha1.c
     # 远程指令的轻量访问控制（req_id 去重 / 时效 / 命令分级）。
     # 纯逻辑、无 paho/cJSON 依赖，故**无条件**编入 core，便于单测直接链接。
-    remote/rpc_guard.c)
+    remote/rpc_guard.c
+    # R9 自研 MQTT 客户端 T01：协议编解码层。纯函数（不 IO / 不取时间 / 不 malloc），
+    # 无 paho / cJSON 依赖，故与 rpc_guard 一样**无条件**编入 —— 这样即便在
+    # Paho 缺失的构建下（当前板子正是如此）它也能继续编译并跑单测。
+    remote/mqtt_codec.c)
 
 # 远程通道：依赖齐了编真实现，缺了编空实现，调用方代码不变
 if(SAFE_HAVE_PAHO AND SAFE_HAVE_CJSON)
