@@ -55,6 +55,9 @@ for hit in "${HITS[@]}"; do
     esac
     case "$text" in
         *user_del_cascade*) continue ;;
+        # 行内显式标记 GATE-EXEMPT：作者已确认该处属有意设计，
+        # 比硬编码行号稳定（行号一变就失效，标记不会）。
+        *GATE-EXEMPT*) continue ;;
     esac
     if is_whitelisted "$f" "$ln"; then
         echo "  [白名单] $f:$ln ($fn) :: $text"

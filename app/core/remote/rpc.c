@@ -593,7 +593,9 @@ static void dispatch(const char *payload)
             strncpy(j->inj_detail, detail, sizeof(j->inj_detail) - 1);
             worker_post(rpc_job_fn, j, rpc_job_done);
         } else {
-            log_append("inject_face", "remote", 1, detail);  /* 极端：分配失败退回主线程写 */
+            log_append("inject_face", "remote", 1, detail);  /* GATE-EXEMPT: 仅当 job 分配失败
+                                                    *（内存耗尽）时才在主线程写这条审计日志；
+                                                    * 正常路径的写盘都在 rpc_job_fn（worker 线程） */
         }
         ack(req_id, 0, "injected");
         cJSON_Delete(root);
