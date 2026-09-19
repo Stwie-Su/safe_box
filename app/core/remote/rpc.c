@@ -467,11 +467,21 @@ static void dispatch(const char *payload)
     cJSON_Delete(root);
 }
 
+/* 单拍预算：20ms 主循环里 rpc_poll 最多同步处理这么多条指令、或花这么多毫秒，
+ * 取先到；剩余留到下一拍。否则 PBKDF2 / 整文件 IO 会卡住主线程导致触摸失响应。
+ * 8ms ≈ 一拍的 40%，给 LVGL/face 留足余量；8 条覆盖一次下发 + 其后状态轮询。 */
+#define RPC_POLL_MAX_MSGS 8
+#define RPC_POLL_MAX_MS   8
+
 void rpc_poll(void)
 {
     char topic[128], payload[512];
+    int processed = 0;
+    const uint32_t budget_start = hal_time_ms();
     while (mqtt_take(topic, sizeof(topic), payload, sizeof(payload))) {
         dispatch(payload);
+        if (++processed >= RPC_POLL_MAX_MSGS) break;
+        if (hal_time_ms() - budget_start >= RPC_POLL_MAX_MS) break;
     }
 }
 
