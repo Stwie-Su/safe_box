@@ -232,7 +232,13 @@ static const char *js_str(const char *p, char *out, size_t cap)
                 case 'n':  out[n++] = '\n'; break;
                 case 'r':  out[n++] = '\r'; break;
                 case 't':  out[n++] = '\t'; break;
-                case 'u':  p += 4; out[n++] = '?'; break;
+                case 'u': {
+                    /* QA-15：\u 后不足 4 字节（手工编辑/传输截断）时只推进到字符串结尾，
+                    避免 p += 4 越界读（safe.log 半行残留里出现 \u 组合即可能越界）。 */
+                    int k = 0;
+                    while (k < 4 && p[1 + k]) k++;
+                    p += k; out[n++] = '?'; break;
+                }
                 default:   if (!*p) return NULL; out[n++] = *p; break;
             }
             p++;
@@ -567,13 +573,18 @@ static int load_users(safe_user_t **list, int *count, bool *ok)
 
     safe_user_t *us = calloc((size_t)n, sizeof(safe_user_t));
     if (!us) { free(json); if (ok) *ok = false; return 0; }
+    /* QA-27：解析失败的槽位不再保留零值用户（id=0/空 name 的幽灵用户会被后续
+       save_users 原样写回，污染用户表并干扰 user_del/find_by_id/next_id）。
+       紧凑数组：只保留成功解析的用户，count 同步收窄。 */
+    int valid = 0;
     for (int i = 0; i < n; i++) {
         const char *uobj = js_arr_at(arr, i);
-        if (!uobj || !parse_user_obj(uobj, &us[i])) { if (ok) *ok = false; }
+        if (!uobj || !parse_user_obj(uobj, &us[valid])) { if (ok) *ok = false; continue; }
+        valid++;
     }
     free(json);
     *list = us;
-    *count = n;
+    *count = valid;
     return 0;
 }
 
@@ -592,18 +603,28 @@ static bool save_users(const safe_user_t *us, int n)
      * 本函数在 worker 线程写盘，而主线程可能同时在改策略，直接取地址会让
      * 下面 7 次字段读取与写入并发（TSan 实锤的竞争点之一）。 */
     const safe_policy_t *p = user_policy();
-    o += (size_t)snprintf(buf + o, cap - o,
+    int w;
+    /* QA-13：snprintf 返回「本应写入的长度」，截断时 o 会越过 cap，
+       后续 cap - o 因 size_t 无符号下溢成巨大值 → 越界写堆。
+       这里每次都校验返回值，越界即放弃，绝不累积下溢。 */
+    w = snprintf(buf + o, cap - o,
         "{\n  \"version\": 1,\n  \"policy\": {\"pin_min_len\": %d, \"pin_max_len\": %d, "
         "\"max_failed\": %d, \"lock_seconds\": %d, \"face_otp_after\": %d, "
         "\"face_verify_timeout_s\": %d, \"virtual_pin_enable\": %s},\n  \"users\": [\n",
         p->pin_min_len, p->pin_max_len, p->max_failed, p->lock_seconds,
         p->face_otp_after, p->face_verify_timeout_s, p->virtual_pin_enable ? "true" : "false");
+    if (w < 0 || (size_t)w >= cap - o) { free(buf); return false; }
+    o += (size_t)w;
     for (int i = 0; i < n; i++) {
-        char one[600];
+        char one[1024];   /* 放大到足以容纳任意单用户 JSON，避免 user_to_json 自身截断 */
         user_to_json(&us[i], one, sizeof(one));
-        o += (size_t)snprintf(buf + o, cap - o, "    %s%s\n", one, (i < n - 1) ? "," : "");
+        w = snprintf(buf + o, cap - o, "    %s%s\n", one, (i < n - 1) ? "," : "");
+        if (w < 0 || (size_t)w >= cap - o) { free(buf); return false; }
+        o += (size_t)w;
     }
-    o += (size_t)snprintf(buf + o, cap - o, "  ]\n}\n");
+    w = snprintf(buf + o, cap - o, "  ]\n}\n");
+    if (w < 0 || (size_t)w >= cap - o) { free(buf); return false; }
+    o += (size_t)w;
     bool r = write_file_all(path, buf, o);
     free(buf);
     return r;
@@ -692,6 +713,14 @@ int user_add(const safe_user_t *u)
     /* 重名检查 */
     for (int i = 0; i < n; i++) {
         if (strcmp(us[i].name, u->name) == 0) { user_list_free(us); return -2; }
+    }
+    /* QA-16：显式 uid 唯一性校验（远程 add_user 可直接指定 id）。重复 id 一旦写入，
+       user_update / user_face_set / user_find_by_id 都只命中第一个，导致后续对该 id
+       的更新静默改错人。统一在 user_add 把关（防御纵深，不依赖调用方）。 */
+    if (u->id > 0) {
+        for (int i = 0; i < n; i++) {
+            if (us[i].id == u->id) { user_list_free(us); return -3; }
+        }
     }
     safe_user_t *nu = realloc(us, (size_t)(n + 1) * sizeof(safe_user_t));
     if (!nu) { user_list_free(us); return -1; }
@@ -884,7 +913,10 @@ void user_policy_set(int max_failed, int lock_seconds)
     if (lock_seconds >= 5 && lock_seconds <= 3600) g_policy.lock_seconds = lock_seconds;
     pthread_mutex_unlock(&g_policy_mutex);
 
+    /* QA-24：users.json 缺失/损坏导致 n==0 时，策略修改（阈值/虚位开关）也必须落盘，
+       否则 SYSTEM 页改的值重启即丢。save_users(NULL,0) 产出合法空数组 JSON。 */
     if (n > 0) save_users(us, n);
+    else       save_users(NULL, 0);
     user_list_free(us);
 }
 
@@ -899,7 +931,10 @@ void user_policy_set_face(int otp_after, int timeout_s)
     if (timeout_s >= 3  && timeout_s <= 120)    g_policy.face_verify_timeout_s = timeout_s;
     pthread_mutex_unlock(&g_policy_mutex);
 
+    /* QA-24：users.json 缺失/损坏导致 n==0 时，策略修改（阈值/虚位开关）也必须落盘，
+       否则 SYSTEM 页改的值重启即丢。save_users(NULL,0) 产出合法空数组 JSON。 */
     if (n > 0) save_users(us, n);
+    else       save_users(NULL, 0);
     user_list_free(us);
 }
 
@@ -912,7 +947,10 @@ void user_policy_set_virtual_pin(bool enable)
     pthread_mutex_lock(&g_policy_mutex);
     g_policy.virtual_pin_enable = enable;
     pthread_mutex_unlock(&g_policy_mutex);
+    /* QA-24：users.json 缺失/损坏导致 n==0 时，策略修改（阈值/虚位开关）也必须落盘，
+       否则 SYSTEM 页改的值重启即丢。save_users(NULL,0) 产出合法空数组 JSON。 */
     if (n > 0) save_users(us, n);
+    else       save_users(NULL, 0);
     user_list_free(us);
 }
 
@@ -1007,20 +1045,29 @@ static bool save_nets(const net_entry_t *ns, int n)
     char path[560];
     file_path(NET_FILE, path, sizeof(path));
     ensure_dir(store_dir());
-    size_t cap = 256 + (size_t)n * 640;
+    /* QA-13：单条预留从 640 放大到 768（ssid160+sec64+psk_enc400+json 开销），
+       避免长 psk_enc 时整条 JSON 被 snprintf 截断；下方逐段校验返回值防 size_t 下溢。 */
+    size_t cap = 256 + (size_t)n * 768;
     char *buf = malloc(cap);
     if (!buf) return false;
     size_t o = 0;
-    o += (size_t)snprintf(buf + o, cap - o, "{\n  \"version\": 1,\n  \"networks\": [\n");
+    int w;
+    w = snprintf(buf + o, cap - o, "{\n  \"version\": 1,\n  \"networks\": [\n");
+    if (w < 0 || (size_t)w >= cap - o) { free(buf); return false; }
+    o += (size_t)w;
     for (int i = 0; i < n; i++) {
         char sq[160], seq[64];
         js_quote(ns[i].ssid, sq, sizeof(sq));
         js_quote(ns[i].sec,  seq, sizeof(seq));
-        o += (size_t)snprintf(buf + o, cap - o,
+        w = snprintf(buf + o, cap - o,
             "    {\"ssid\":%s,\"sec\":%s,\"psk_enc\":\"%s\"}%s\n",
             sq, seq, ns[i].psk_enc, (i < n - 1) ? "," : "");
+        if (w < 0 || (size_t)w >= cap - o) { free(buf); return false; }
+        o += (size_t)w;
     }
-    o += (size_t)snprintf(buf + o, cap - o, "  ]\n}\n");
+    w = snprintf(buf + o, cap - o, "  ]\n}\n");
+    if (w < 0 || (size_t)w >= cap - o) { free(buf); return false; }
+    o += (size_t)w;
     bool r = write_file_all(path, buf, o);
     free(buf);
     return r;
