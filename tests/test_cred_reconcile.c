@@ -115,5 +115,36 @@ int main(void)
     CHECK(user_find_by_face(5, &chk) == 0);
     CHECK(chk.face_enable == false);
 
+    /* ---- 反向孤儿（模组有、本地无认领，2026-09-20 补）：只识别 + 记审计，
+     *      **不自动删** —— 「模组上有脸、本地暂未绑定」可能是用户的临时状态。 ---- */
+    {
+        log_entry_t * lg = NULL;
+        int lc = 0;
+        CHECK(log_query("ALARM", 0, &lg, &lc) == 0);
+        const int before = lc;
+        if (lg) free(lg);
+
+        /* 模组里放 7、8 两个模板：本地无人认领（admin/dave 绑的是 1/5，且均已失效）
+         * → 没有正孤儿可标（返回 0），但应识别出 2 个反向孤儿并记一条审计。 */
+        const int32_t mod2[2] = { 7, 8 };
+        CHECK(cred_reconcile_apply(mod2, 2) == 0);
+
+        CHECK(log_query("ALARM", 0, &lg, &lc) == 0);
+        CHECK(lc > before);                        /* 新增了审计 */
+        bool found = false;
+        for (int i = 0; i < lc; i++) {
+            if (strstr(lg[i].detail, "未被任何本地用户认领") != NULL) {
+                found = true;
+                break;
+            }
+        }
+        if (lg) free(lg);
+        CHECK(found);                              /* 反向孤儿确实被记录 */
+
+        /* 且不得因识别反向孤儿而改动任何本地用户（只读语义） */
+        CHECK(user_find_by_name("dave", &chk) == 0);
+        CHECK(chk.enabled == true);
+    }
+
     TEST_RESULT();
 }

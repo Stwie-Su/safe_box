@@ -2,8 +2,10 @@
  * @file cred_reconcile.c
  * FR-21 防线 3「启动对账」实现：孤儿凭据标失效（需求 §5）。
  *
- * 规格：系统启动或模组就绪后，核对模组用户清单与本地凭据；
- * 孤儿凭据（本地有、模组无）标记失效且不用于放行。
+ * 规格：系统启动或模组就绪后，核对模组用户清单与本地凭据。
+ *   · **正孤儿**（本地有、模组无）→ 标记失效且不用于放行（FR-21 防线 3）；
+ *   · **反向孤儿**（模组有、本地无认领）→ 2026-09-20 补：只**识别 + 记审计**，
+     * 不自动删（「模组上有脸、本地暂未绑定」可能是用户的临时状态）。
  *
  * 落点说明（为什么放在 core/auth，触发点放在 app.c）：
  *   - 对账的输入（模组清单）来自 hal/hal_face.h 的 face_service_module_users()，
@@ -86,6 +88,48 @@ int cred_reconcile_apply(const int32_t * mod_ids, int32_t mod_count)
                    u->name, u->face_id);
         }
     }
+    /* ★ 反向孤儿（模组有、本地无）识别 —— 2026-09-20 补上的能力缺口。
+     *
+     * 含义：模组侧存在某个模板，但**本地没有任何用户认领它**。
+     * 危害：它占着模组的用户名额，而且在界面上**完全不可见** ——
+     *       累积多了就撞容量上限（表现就是「模组容量计数异常（删除被拒）」）。
+     *       正孤儿会被标失效（可见），反向孤儿原本是隐形的，用户永远不知道
+     *       模组为什么会满。
+     *
+     * ★ 为什么**只识别、不自动删**：「模组上有张脸、本地暂时没绑」可能是用户的
+     *   临时状态（比如刚在模组上单独录了一张、还没在 app 里绑人）。自动删会毁掉它，
+     *   而这类破坏不可逆。是否清理交给用户 —— SYSTEM 页「清空模组人脸」，
+     *   或回用户页重新录入以认领它。
+     *
+     * ★ 判据用「face_id 是否匹配」，不看 face_enable：某人脸通道被标失效
+     *   （face_enable=false）只代表本地暂时不用它，模板仍在模组里、仍被本地认领，
+     *   不该误报成无人认领。 */
+    int     orphan_in_mod = 0;
+    int32_t orphan_ids[CRED_RECON_MAX_IDS];
+    int     orphan_n = 0;
+    for(int32_t i = 0; i < mod_count; i++) {
+        bool claimed = false;
+        for(int j = 0; j < n; j++) {
+            if(users[j].face_id == mod_ids[i]) { claimed = true; break; }
+        }
+        if(claimed) continue;
+        orphan_in_mod++;
+        if(orphan_n < CRED_RECON_MAX_IDS) orphan_ids[orphan_n++] = mod_ids[i];
+    }
+    if(orphan_in_mod > 0) {
+        char detail[192];
+        int off = snprintf(detail, sizeof(detail),
+                           "模组侧有 %d 个模板未被任何本地用户认领（占用名额）：",
+                           orphan_in_mod);
+        for(int k = 0; k < orphan_n && off < (int)sizeof(detail) - 8; k++) {
+            off += snprintf(detail + off, sizeof(detail) - (size_t)off, "%s%d",
+                            k ? "," : "", (int)orphan_ids[k]);
+        }
+        log_append(CRED_RECON_EVT, "-", 0, detail);
+        printf("[recon] 反向孤儿：%s\n", detail);
+        printf("[recon]   → 可在「系统」页用「清空模组人脸」清理，或重新录入以认领\n");
+    }
+
     user_list_free(users);
     return changed;
 }
