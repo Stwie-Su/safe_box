@@ -85,6 +85,15 @@ void app_main(void)
     face_service_init(app_config()->face_backend);
     face_service_start();
 
+    /* 把**持久化**的人脸录入模式同步给后端（**只做一次**）。
+     * 策略（users.json 的 policy.enroll_five_way）是唯一真源，env 只作初始默认 ——
+     * 否则用户在界面上切到五向、重启又被 env/默认值顶回单帧。
+     *
+     * ⚠️ 此前这行被误放在 app_tick_fast（20ms 泵）里：它**没有幂等保护**，
+     *    会以每秒 50 次的节奏反复调用 user_policy()（加锁 + 整份拷贝）与后端 setter。
+     *    泵里只适合放幂等的东西（如 cred_reconcile_tick 自带 s_done 短路）。 */
+    face_service_set_enroll_five_way(user_policy()->enroll_five_way);
+
     /* face 线程（步骤 3b，规约 §3.4）：由它 poll 相机 fd 取帧 + 转换（只转最新帧）
      * 与 FM225 UART fd（fm225 后端在上面 start 时已接入），主线程不再直接拉帧。 */
     face_thread_start();
@@ -124,12 +133,6 @@ void app_tick_fast(void)
      * （文件 IO 由 cred_reconcile_tick 内部经 worker_post 下沉后台线程，主线程不落盘）。
      * 放在主线程 20ms 泵里，是因为这里既是 face_service_module_users() 的合法调用点，
      * 也是 worker_post() 的合法调用点，且不引入新线程。 */
-    /* 把**持久化**的人脸录入模式同步给后端。
-     * 策略（users.json 的 policy.enroll_five_way）是唯一真源，env 只作初始默认 ——
-     * 否则用户在界面上切到五向、重启又被 env/默认值顶回单帧。
-     * 放在这里：face 后端已 init，且尚未发生任何录入。 */
-    face_service_set_enroll_five_way(user_policy()->enroll_five_way);
-
     cred_reconcile_tick();
 }
 
