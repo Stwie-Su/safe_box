@@ -142,7 +142,21 @@ static void on_face_event(ev_topic_t topic, const void * payload, void * user)
     (void)user;
     if(topic != EV_FACE_EVENT || payload == NULL) return;
     const ev_face_event_t * e = (const ev_face_event_t *)payload;
-    if(e->ev != FACE_EV_DETECT) return;   /* ENROLL/DELETE/ERROR 与认证状态机无关 */
+
+    /* 人脸录入成功 → 清零**设备级**失败计数（用户要求 2026-09-20）。
+     *
+     * 为什么要清：录入需要管理员 PIN 鉴权 + 当面采集，用户此刻已充分证明身份；
+     * 而 fail_streak 是设备级计数（跨用户累积、不区分是谁失败的）。不清零的话，
+     * 录入/测试过程里累积的几次未匹配会立刻把用户推进 WAIT_OTP
+     * （face_otp_after 默认只有 3）——「录完想马上试一下」必然撞墙。
+     * 这是纯体验修复：**不降低防暴力强度**（真正的暴力尝试不会先通过管理员鉴权
+     * 再录一张脸；而正常开锁成功本来就会在本文件 do_unlock 里清零）。 */
+    if (e->ev == FACE_EV_ENROLL_DONE && e->enroll.err == SAFE_OK) {
+        s_fsm.fail_streak = 0;
+        return;   /* ENROLL 与认证状态机其余逻辑无关，处理完即返回 */
+    }
+
+    if(e->ev != FACE_EV_DETECT) return;   /* DELETE/ERROR 与认证状态机无关 */
     /* mod_name：模组返回的模板名，供 FR-21 核对；空串表示模组未提供 */
     handle_face_result(e->res.face_id, e->res.reason, e->res.user_name);
 }
