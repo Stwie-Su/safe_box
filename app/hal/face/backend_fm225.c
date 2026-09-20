@@ -130,6 +130,16 @@ static bool     s_enroll_hint_done;                    /* 「模组没上报过�
  * 之所以做成可切换：五向的真机表现尚未验证（此前录入一直超时，face_direction
  * 的多向语义一次都没跑通过），保留单帧做对照，出问题可一键回退。 */
 static bool     s_enroll_5way;
+/* 五向录入：**累计已完成的方向掩码**（正 0x01 | 右 0x02 | 左 0x04 | 下 0x08 | 上 0x10）。
+ *
+ * ★ 关键语义（2026-09-20 真机修正）：0x13 ENROLL_5 是「**一次只要求一个方向**」的命令 ——
+ *   face_dir 传的是**本次要求的方向**，应答里带回来的才是累计掩码。
+ *   原实现传 0x1F（五位全 1），模组会当成「五个方向都已完成」而**直接返回成功**：
+ *   实测 914ms 就 SUCCESS、整个会话只有 1 条 NOTE —— 用户根本来不及转头。 */
+static uint8_t  s_enroll_dir_mask;
+/* 前置声明：定义在文件后部，但 fm225_enroll_issue 要用它。
+ * （同一个坑今天在 page_system.c 也踩过：新 static 函数的声明必须放在**使用点之前**。） */
+static uint8_t fm225_next_dir(void);
 
 /* NOTE 姿态快照（yaw/pitch/roll），与 s_face_state 同一跨线程纪律。
  * 五向引导需要它来判断用户有没有真的转头/抬头。
@@ -408,7 +418,9 @@ static bool fm225_enroll_issue(uint32_t now_ms)
      * 这正是「app 显示录入成功、模组里却一个用户都没有」的根因。 */
     const uint8_t enroll_cmd = s_enroll_5way ? FM225_CMD_ENROLL
                                              : FM225_CMD_ENROLL_SINGLE;
-    p[33] = s_enroll_5way ? 0x1F : 0x01;
+    /* ★ 五向：此处传的是**本次要求的那一个方向**，不是 0x1F！
+     *   0x1F 是「五个方向都已完成」的**掩码**语义，模组见它会直接判成功。 */
+    p[33] = s_enroll_5way ? fm225_next_dir() : 0x01;
     /* 超时：五向要依次采集五个朝向，10s 未必够（手册允许最大 255s），
      * 这里给五向单独一个更宽的值，单帧保持原值不变。 */
     p[34] = s_enroll_5way ? FM225_ENROLL_TIMEOUT_5WAY : FM225_ENROLL_TIMEOUT_S;
@@ -818,9 +830,18 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
          *     0x1D → '单脸录入成功 uid=…'（最终结果） */
         if (s_pending_cmd == FM225_CMD_ENROLL) {
             const uint8_t mask = (f->data_len >= 3) ? f->data[2] : 0;
-            if (f->result == FM225_MR_SUCCESS && mask != 0x1F) {
+            if (f->result == FM225_MR_SUCCESS) {
+                s_enroll_dir_mask |= mask;   /* 累计（模组给的就是累计值，取或更稳） */
+            }
+            if (f->result == FM225_MR_SUCCESS && s_enroll_dir_mask != 0x1F) {
+                /* 还没采齐 → **主动续发下一个方向**（0x13 是一次一个方向的命令）。
+                 * 重新 arm 走「等模组空闲 + 静默窗口」那条与首次下发完全相同的路径，
+                 * 避免把下一条命令插到模组尚未消化的时刻上。 */
                 printf("[fm225] 五向录入进度：累计掩码 0x%02X（未达 0x1F）"
-                       "→ 继续等待下一方向\n", mask);
+                       "→ 续发方向 0x%02X\n", s_enroll_dir_mask, fm225_next_dir());
+                s_state            = FM225_ENROLL_ARMING;
+                s_enroll_req       = true;
+                s_enroll_arm_at_ms = hal_time_ms();
                 break;      /* ★ 不置 IDLE、不上报：会话继续 */
             }
         }
@@ -1174,6 +1195,7 @@ static safe_err_t fm225_enroll(const char * user_name)
     copy_name_utf8(s_enroll_name, sizeof(s_enroll_name), user_name);
     s_enroll_req       = true;
     s_enroll_arm_at_ms = hal_time_ms();
+    s_enroll_dir_mask  = 0;      /* 新一轮五向：清空累计掩码 */
     s_state            = FM225_ENROLL_ARMING;
     printf("[fm225] 录入受理：name=\"%s\"（等模组空闲 + %ums 静默窗口后下发 ENROLL）\n",
            s_enroll_name, (unsigned)FM225_SETTLE_MS);
@@ -1202,6 +1224,17 @@ static safe_err_t fm225_delete_tpl(int32_t face_id)
  * 故同样要求模组空闲（否则对端那些命令会永不应答，界面只能等外层兜底超时）。
  * s_delete_id 保持 -1：DELETE_ALL 没有具体模板号，应答里 face_id=-1 即是
  * 「这是一次全清」的标记，UI 据此把本地所有绑定一并清掉。 */
+/* 五向：按固定顺序取下一个尚未完成的方向（正→右→左→下→上）。
+ * 返回 0 = 五个方向都已齐（不该再发）。 */
+static uint8_t fm225_next_dir(void)
+{
+    static const uint8_t order[5] = { 0x01, 0x02, 0x04, 0x08, 0x10 };
+    for(int i = 0; i < 5; i++) {
+        if((s_enroll_dir_mask & order[i]) == 0) return order[i];
+    }
+    return 0;
+}
+
 static safe_err_t fm225_delete_all(void)
 {
     if(s_state != FM225_IDLE || s_pending_len > 0) return SAFE_ERR_BUSY;
