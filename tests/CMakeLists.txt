@@ -46,6 +46,11 @@ safe_add_test(test_mqtt_codec)
 # R9 T02：未确认报文队列 —— packet id 回绕、**存字节而非指针**、DUP 置位、
 # 重传次数用尽后丢弃、队列满与非法输入。
 safe_add_test(test_mqtt_inflight)
+# R9 T03：连接状态机 —— 启动序列 / CONNACK(≠0) 不重连 / ping 超时判半开 /
+# 退避序列（固定种子 → 精确值）/ 重传用尽丢弃 / 重连清空 inflight / 背压不回 PUBACK。
+safe_add_test(test_mqtt_fsm)
+# 只读用户表快照缓存（store_cache，双缓冲）：读侧读不到半张表、stamp 语义、钳位。
+safe_add_test(test_store_cache)
 
 # 分层检查：core 不碰 LVGL/平台头，hal 头文件不带平台实现，ui 不碰底层协议
 find_program(SAFE_BASH bash)

@@ -51,6 +51,15 @@ enum rpc_code {
  * 注意：本机时钟不准会误伤合法请求，故 ts 缺省时不校验（向后兼容，见 rpc_ts_fresh）。 */
 #define RPC_TS_WINDOW_SEC 120
 
+/* sync_time 的「免动态码跳变上限」（秒）：|target - now| <= 该值 视为常规校时
+ * （NTP / RTC 日漂移补偿），只需「鉴权通道 + req_id 去重」；超过则视为
+ * **信任根级操作**，必须带有效的管理员动态码（TOTP）才允许改时钟。
+ *
+ * 3600s（1 小时）的取舍：要覆盖 NTP 常规校时与 RTC 的日漂移，又要在「一次拨几年」
+ * 这种攻击面前面立一道门。现场若要求更严可下调（如 300s），代价是正常校时也会被
+ * 要求输动态码。 */
+#define RPC_CLOCK_JUMP_FREE_SEC 3600
+
 /* req_id 字段最大长度（含结尾 '\0'）。与 rpc.c 中 char req_id[32] 对齐。 */
 #define RPC_REQ_ID_CAP 32
 
@@ -100,6 +109,44 @@ bool rpc_cmd_is_readonly(const char *cmd);
 /* 是否为「能伪造结果的调试钩子」命令（目前仅 inject_face）。
  * 这类命令默认必须关死（门控见 rpc_guard_debug_hook_gate）。 */
 bool rpc_cmd_is_debug_hook(const char *cmd);
+
+/**
+ * 是否需要管理员动态码（TOTP）。
+ *
+ * ★ 白名单式（安全默认方向 = 需要）：除**显式豁免**的两条外，一律需要。
+ *   豁免名单：
+ *     · query_status —— 只读查询，无副作用；
+ *     · submit_otp   —— 它就是「提交动态码」这条指令本身，要求它再带一个动态码
+ *                       是鸡生蛋问题（会让本地 OTP 会话永远走不通）。
+ *   为什么不反过来做成「列出需要的命令」：漏登记的后果会从「新指令意外免检」
+ *   变成「新指令被要求输码」—— 后者才是安全的失败方向。
+ */
+bool rpc_cmd_needs_otp(const char *cmd);
+
+/**
+ * sync_time 跳变门控（QA-03 第 2 层防御）。
+ *
+ *   target   请求要设的目标 Unix 秒（即 params.ts）
+ *   now      本机当前 Unix 秒（★ 必须在**校时之前**取，否则门控会被自己绕过）
+ *   has_otp  本次请求是否带了（且已通过校验的）管理员动态码
+ *   max_jump 允许的「无需 OTP 的最大跳变秒数」（用 RPC_CLOCK_JUMP_FREE_SEC）
+ *
+ * 返回 0 = 放行；否则返回应回的错误码：
+ *   RPC_CODE_BAD_PARAM —— target <= 0（无效时间戳；时钟是 lock_until / valid_until /
+ *                         TOTP 的信任根，0 与负数一律不受理）；
+ *   RPC_CODE_NEED_OTP  —— 跳变超过 max_jump 且未带动态码。
+ *
+ * 语义：|target - now| <= max_jump  → 常规校时，靠「鉴权通道 + req_id 去重」即可；
+ *       |target - now| >  max_jump  → 信任根级操作，**必须**带有效管理员动态码。
+ *
+ * ★ 诚实边界（必须写进文档、面试主动说）：
+ *   门控依赖 hal_time() 的当前值。若攻击者已成功拨过一次时钟，`now` 就不可信
+ *   —— 本门控只能限制「逐步漂移」，挡不住「一次性拨到底后再为所欲为」。
+ *   它是**深度防御**，不是根治；根治路径是双向 TLS + broker ACL，让攻击者
+ *   根本拿不到「可发指令的通道」。选它是因为 30 行代码就能在根治之前把
+ *   「匿名 / 低权限改时钟」这条最粗的口子堵上。
+ */
+int rpc_sync_time_gate(int64_t target, int64_t now, bool has_otp, int64_t max_jump);
 
 /* 调试钩子门控（务必在副作用之前调用）。
  *   allow         = 是否已显式开启（env SAFE_ALLOW_INJECT=1）；

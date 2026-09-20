@@ -10,6 +10,7 @@
 #include "core/remote/mqtt_client.h"
 #include "core/config.h"            /* app_config()：MQTT 连接凭据 */
 #include "core/store/store.h"
+#include "core/store/store_cache.h"  /* 主线程只读快照（QA-20 不变式：读写全归 worker） */
 #include "core/support/worker.h"   /* worker_post：把 store 写操作下沉 worker 线程（QA-20） */
 #include "core/auth/totp.h"
 #include "hal/hal_time.h"
@@ -64,20 +65,21 @@ static void ack(const char *req_id, int code, const char *msg)
     cJSON_Delete(j);
 }
 
-/* ---- 状态快照 ---- */
-static char *build_status(int code, const char *msg, const char *req_id)
+/* ---- 状态快照 ----
+ * ★ QA-21：这里**不能**调整表读盘接口 —— 整份 users.json 读出来再 cJSON 全表
+ *   解析，在 A7 上要几百毫秒，会把 20ms 的 LVGL 泵卡死一拍（`RPC_POLL_MAX_MS 8`
+ *   这种「两条指令之间」的预算防不住它，因为它是**单条指令内部**的耗时）。
+ *   改读 store_cache 快照：worker 每次落盘后刷新，主线程只读、零阻塞。
+ *   user_count 由调用方传入（来自快照），本函数不碰文件。 */
+static char *build_status(int code, const char *msg, const char *req_id, int user_count)
 {
-    safe_user_t *us = NULL; int n = 0;
-    user_load_all(&us, &n);
-    user_list_free(us);
-
     cJSON *j = cJSON_CreateObject();
     cJSON_AddNumberToObject(j, "ts", (double)hal_time());
     cJSON_AddStringToObject(j, "state", auth_fsm_state_name(auth_fsm_state()));
     cJSON_AddNumberToObject(j, "lockout_remain", auth_fsm_lock_remaining());
     cJSON_AddStringToObject(j, "last_reason", face_reason_name(auth_fsm_last_reason()));
     cJSON_AddStringToObject(j, "last_user", auth_fsm_pending_user());
-    cJSON_AddNumberToObject(j, "user_count", n);
+    cJSON_AddNumberToObject(j, "user_count", user_count);
     cJSON_AddStringToObject(j, "time_src", hal_time_source() == TIME_SRC_RTC ? "rtc" : "sys");
     cJSON_AddNumberToObject(j, "mqtt_online", mqtt_is_connected() ? 1 : 0);
     cJSON_AddStringToObject(j, "fw", SAFE_VERSION_STRING);
@@ -95,7 +97,11 @@ static char *build_status(int code, const char *msg, const char *req_id)
 
 void rpc_publish_status_now(void)
 {
-    char *s = build_status(0, NULL, NULL);
+    /* 快照读：不落盘、不阻塞。stamp==0（worker 还没发布过）时 user_count 为 0，
+     * 语义是「未知」而非「确实没有用户」—— 启动后第一次落盘即会填上真值。 */
+    int user_count = 0;
+    store_cache_user_count(&user_count, NULL);
+    char *s = build_status(0, NULL, NULL, user_count);
     if (s) { mqtt_publish("safe/status", s, 0, 0); free(s); }
 }
 
@@ -174,7 +180,8 @@ typedef enum {
     JOB_SET_FACE_ENABLE,
     JOB_SET_FACE_POLICY,
     JOB_REMOTE_UNLOCK,
-    JOB_INJECT_FACE_LOG
+    JOB_INJECT_FACE_LOG,
+    JOB_SET_TIME            /* QA-03：sync_time —— 校时 + 审计日志都在 worker 段 */
 } rpc_job_kind_t;
 
 typedef struct {
@@ -185,6 +192,12 @@ typedef struct {
     bool  has_otp;
     char  otp[32];       /* 主线程按值拷入，② 在 worker 校验 */
 
+    /* ★ 安全红线（面试会追问）：明文 PIN 在 job 里短暂驻留。
+     *   ② 中 pin_hash 之后**立刻** memset 清零；③ 的 rpc_job_done 在 free 前
+     *   **再清一次**。绝不能只靠 free —— free 不擦内容，PIN 会以明文形式
+     *   留在堆里直到该块被复用（core dump / 堆越界读都会泄出来）。 */
+    char  pin[64];
+
     safe_user_t   u;     /* JOB_ADD_USER / JOB_SET_FACE_ENABLE */
     int     del_uid;
     int32_t del_fid;     /* ② 写（JOB_DEL_USER 回填），③ 读 */
@@ -192,6 +205,7 @@ typedef struct {
     int     face_timeout_s;
     bool    fe_enable;   /* JOB_SET_FACE_ENABLE：启用标志（按值，避免被 user_find 覆盖） */
     bool    unlock_ok;   /* ② 写（JOB_REMOTE_UNLOCK），③ 读 */
+    int64_t target_ts;   /* JOB_SET_TIME：目标 Unix 秒 */
     char    inj_detail[96];  /* JOB_INJECT_FACE_LOG */
 } rpc_job_t;
 
@@ -208,6 +222,19 @@ static void rpc_job_fn(void *arg)
     }
     switch (j->kind) {
     case JOB_ADD_USER: {
+        /* ★ QA-21：PBKDF2 下沉 worker。PC 上几十 ms、A7 上几百 ms 的纯 CPU 热点，
+         *   放在主线程会直接卡死 20ms 泵（单拍预算防不住单条指令内部的耗时）。 */
+        uint8_t salt[16];
+        if (pin_hash(j->pin, salt, j->u.pin_hash) != 0) {
+            j->code = 1003;
+            snprintf(j->msg, sizeof(j->msg), "pin 哈希失败");
+            memset(j->pin, 0, sizeof(j->pin));   /* 用完即清，不留明文 */
+            break;
+        }
+        /* 明文 PIN 在此之后不再被使用 —— 立刻清零（不能等到 free）。 */
+        memset(j->pin, 0, sizeof(j->pin));
+        rpc_salt_to_hex(salt, j->u.pin_salt);
+
         if (j->u.id <= 0) j->u.id = user_next_id();   /* 分配 id 在 worker（读盘）做 */
         int r = user_add(&j->u);
         if (r == 0) log_append("user_add", "remote", 1, j->u.name);
@@ -257,6 +284,21 @@ static void rpc_job_fn(void *arg)
         log_append("inject_face", "remote", 1, j->inj_detail);
         break;
     }
+    case JOB_SET_TIME: {
+        /* QA-03 第 3 层：改信任根**必须**留痕。此前 sync_time 完全没有审计日志，
+         * 安全设备改时钟不留痕是硬伤 —— 拨回过去即可解除锁定、复活过期授权。 */
+        int64_t old_ts = (int64_t)hal_time();
+        hal_time_set((uint32_t)j->target_ts);
+        char detail[96];
+        snprintf(detail, sizeof(detail), "old=%lld new=%lld delta=%lld",
+                 (long long)old_ts,
+                 (long long)j->target_ts,
+                 (long long)(j->target_ts - old_ts));
+        log_append("time_sync", "remote", 1, detail);
+        j->code = 0;
+        snprintf(j->msg, sizeof(j->msg), "ok");
+        break;
+    }
     }
 }
 
@@ -282,7 +324,15 @@ static void rpc_job_done(void *arg)
         break;
     case JOB_INJECT_FACE_LOG:
         break;  /* 仅写盘，无主线程副作用 */
+    case JOB_SET_TIME:
+        ack(j->req_id, j->code, j->msg);
+        break;
     }
+    /* ★ 明文敏感数据：free 之前再清一次（见 rpc_job_t 的注释）。
+     * worker 段已清过 pin，但「哈希失败提前 break」等分支也要覆盖；
+     * otp 一直在 worker 段被 backend_admin_verify_totp 消费，同样在此统一清。 */
+    memset(j->pin, 0, sizeof(j->pin));
+    memset(j->otp, 0, sizeof(j->otp));
     free(j);
 }
 
@@ -375,9 +425,12 @@ static void dispatch(const char *payload)
         return;
     }
 
-    /* ---- query_status：立即回状态（只读，主线程） ---- */
+    /* ---- query_status：立即回状态（只读，主线程） ----
+     * ★ QA-21：user_count 取 store_cache 快照，**不在主线程读盘**。 */
     if (strcmp(c, "query_status") == 0) {
-        char *s = build_status(0, NULL, req_id);
+        int user_count = 0;
+        store_cache_user_count(&user_count, NULL);
+        char *s = build_status(0, NULL, req_id, user_count);
         if (s) { mqtt_publish("safe/log", s, 1, 0); free(s); }
         cJSON_Delete(root);
         return;
@@ -457,7 +510,7 @@ static void dispatch(const char *payload)
         strncpy(j->req_id, req_id, sizeof(j->req_id) - 1);
         j->has_otp = true;
         strncpy(j->otp, otpbuf, sizeof(j->otp) - 1);
-        /* 主线程：按值构建（PBKDF2 在主线程算，纯 CPU 不算磁盘 IO）。id 在 ② 分配。 */
+        /* 主线程只按值构建（id 与 PIN 哈希都在 ② worker 段做）。 */
         memset(&j->u, 0, sizeof(j->u));
         j->u.id = uid;
         strncpy(j->u.name, nm->valuestring, sizeof(j->u.name) - 1);
@@ -473,11 +526,10 @@ static void dispatch(const char *payload)
             localtime_r(&tn, &tmv);
             strftime(j->u.created_at, sizeof(j->u.created_at), "%Y-%m-%dT%H:%M:%S", &tmv);
         }
-        uint8_t salt[16];
-        if (pin_hash(pn->valuestring, salt, j->u.pin_hash) != 0) {
-            ack(req_id, 1003, "pin 哈希失败"); free(j); cJSON_Delete(root); return;
-        }
-        rpc_salt_to_hex(salt, j->u.pin_salt);
+        /* ★ QA-21：PBKDF2 **不**在主线程算（PC 几十 ms / A7 几百 ms 的纯 CPU 热点，
+         *   会把 20ms 泵卡死一拍）。明文 PIN 按值拷进 job，由 ② worker 段算完即清零。
+         *   id 也在 ② 分配。这里只做参数校验与按值拷贝。 */
+        strncpy(j->pin, pn->valuestring, sizeof(j->pin) - 1);
         worker_post(rpc_job_fn, j, rpc_job_done);
         cJSON_Delete(root);
         return;
@@ -548,11 +600,46 @@ static void dispatch(const char *payload)
         return;
     }
 
-    /* ---- sync_time（敏感，已收编：强制鉴权 + req_id 去重；ts 时效豁免保留） ---- */
+    /* ---- sync_time（敏感：鉴权 + req_id 去重 + **跳变门控** + 审计日志） ----
+     * QA-03 三层防御：
+     *   第 1 层 白名单分级（a391fb0 已有）：强制鉴权通道 + req_id 去重；
+     *   第 2 层 跳变幅度门控（本次新增）：|target-now| > 3600s 需管理员动态码；
+     *   第 3 层 审计日志（本次新增）：每次校时都写 safe.log（此前完全没有留痕）。
+     *
+     * ★ 时序（避免与 TOTP 的鸡生蛋 / TOCTOU 冲突）：
+     *   ① 主线程：先取 now（**在校时之前**）→ 门控判定 → 需要 OTP 就回 2001 让
+     *      对端补码；不需要就直接投作业。
+     *   ② worker：OTP 校验 → hal_time_set → log_append。「校验」与「校时」在
+     *      同一段串行执行，天然避免「校验通过后时钟又被改」的 TOCTOU。 */
     if (strcmp(c, "sync_time") == 0) {
-        int ts = params && cJSON_GetObjectItem(params, "ts") ? cJSON_GetObjectItem(params, "ts")->valueint : 0;
-        if (ts > 0) { hal_time_set((uint32_t)ts); ack(req_id, 0, "ok"); }
-        else ack(req_id, 1001, "invalid ts");
+        int64_t target = 0;
+        {
+            cJSON *tsj = params ? cJSON_GetObjectItem(params, "ts") : NULL;
+            if (cJSON_IsNumber(tsj)) target = (int64_t)tsj->valuedouble;
+        }
+        /* ★ now 必须在任何校时动作之前取，否则门控会被自己绕过。 */
+        const int64_t now_ts = (int64_t)hal_time();
+        const int gate_t = rpc_sync_time_gate(target, now_ts, false, RPC_CLOCK_JUMP_FREE_SEC);
+        if (gate_t == RPC_CODE_BAD_PARAM) {
+            ack(req_id, RPC_CODE_BAD_PARAM, "invalid ts（须为正的 Unix 秒）");
+            cJSON_Delete(root);
+            return;
+        }
+        char otpbuf[32];
+        const bool has_otp = (gate_t == RPC_CODE_NEED_OTP) ? rpc_otp_present(root, otpbuf) : false;
+        if (gate_t == RPC_CODE_NEED_OTP && !has_otp) {
+            ack(req_id, RPC_CODE_NEED_OTP, "时钟跳变超过 3600s，需要管理员动态码");
+            cJSON_Delete(root);
+            return;
+        }
+        rpc_job_t *j = calloc(1, sizeof(*j));
+        if (!j) { ack(req_id, 1003, "internal"); cJSON_Delete(root); return; }
+        j->kind = JOB_SET_TIME;
+        strncpy(j->req_id, req_id, sizeof(j->req_id) - 1);
+        j->target_ts = target;
+        j->has_otp = has_otp;
+        if (has_otp) strncpy(j->otp, otpbuf, sizeof(j->otp) - 1);
+        worker_post(rpc_job_fn, j, rpc_job_done);
         cJSON_Delete(root);
         return;
     }
@@ -607,7 +694,12 @@ static void dispatch(const char *payload)
 }
 
 /* 单拍预算：20ms 主循环里 rpc_poll 最多同步处理这么多条指令、或花这么多毫秒，
- * 取先到；剩余留到下一拍。否则 PBKDF2 / 整文件 IO 会卡住主线程导致触摸失响应。
+ * 取先到；剩余留到下一拍。
+ *
+ * ★ 这条预算防的是「多条指令累积吃满一拍」，**不是**单条指令的耗时 ——
+ *   它是**在两条指令之间**检查的，单条指令内部跑 300ms 它照样拦不住。
+ *   单条耗时靠「重活下沉 worker」解决（build_status 的整表读盘 → store_cache
+ *   快照；add_user 的 PBKDF2 → rpc_job_fn）。两者不可互相替代，都要有。
  * 8ms ≈ 一拍的 40%，给 LVGL/face 留足余量；8 条覆盖一次下发 + 其后状态轮询。 */
 #define RPC_POLL_MAX_MSGS 8
 #define RPC_POLL_MAX_MS   8

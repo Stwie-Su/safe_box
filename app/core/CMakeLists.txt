@@ -5,6 +5,10 @@ set(SAFE_CORE_SRC
     event_bus.c
     config.c
     store/store.c
+    # 只读用户表快照缓存（双缓冲：worker 写 / 主线程读）。
+    # QA-20 不变式升级为「读写全归 worker」之后，主线程读用户表的唯一合法通道。
+    # 无第三方依赖，无条件编入。
+    store/store_cache.c
     auth/auth_fsm.c
     auth/cred_reconcile.c
     auth/totp.c
@@ -21,7 +25,11 @@ set(SAFE_CORE_SRC
     # Paho 缺失的构建下（当前板子正是如此）它也能继续编译并跑单测。
     remote/mqtt_codec.c
     # R9 T02：未确认报文队列（QoS1 重传用）。同为纯逻辑、无依赖，无条件编入。
-    remote/mqtt_inflight.c)
+    remote/mqtt_inflight.c
+    # R9 T03：连接状态机（纯逻辑，时间由参数注入）。不碰套接字/线程，无条件编入，
+    # 这样即便在 Paho 缺失的构建下（板子正是如此）也能编译并跑单测 —— 这是
+    # 「板子上没有可用轮子才自研」这条主线能落地的前提。
+    remote/mqtt_fsm.c)
 
 # 远程通道：依赖齐了编真实现，缺了编空实现，调用方代码不变
 if(SAFE_HAVE_PAHO AND SAFE_HAVE_CJSON)

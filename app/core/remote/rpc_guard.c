@@ -82,6 +82,35 @@ bool rpc_cmd_is_debug_hook(const char *cmd)
     return cmd != NULL && strcmp(cmd, "inject_face") == 0;
 }
 
+/* 豁免名单（见头文件注释）：只有这两条**不需要**动态码。
+ * 用「豁免名单」而不是「需要名单」，是为了让漏登记的后果落在安全的一侧
+ * —— 新指令默认需要动态码，而不是默认免检。 */
+static bool rpc_cmd_otp_exempt(const char *cmd)
+{
+    if (cmd == NULL) return false;
+    return strcmp(cmd, "query_status") == 0
+        || strcmp(cmd, "submit_otp")   == 0;
+}
+
+bool rpc_cmd_needs_otp(const char *cmd)
+{
+    return !rpc_cmd_otp_exempt(cmd);
+}
+
+int rpc_sync_time_gate(int64_t target, int64_t now, bool has_otp, int64_t max_jump)
+{
+    /* target <= 0：不是合法 Unix 秒（含「未提供 ts」）。时钟是信任根，
+     * 这种请求一律不受理 —— 不接受「把时间设为 1970」这种拨回信任根的操作。 */
+    if (target <= 0) return RPC_CODE_BAD_PARAM;
+    if (max_jump < 0) max_jump = 0;
+
+    int64_t delta = target - now;
+    if (delta < 0) delta = -delta;      /* 往前拨与往后拨同等危险：都能解除锁定 / 复活过期授权 */
+
+    if (delta > max_jump && !has_otp) return RPC_CODE_NEED_OTP;
+    return RPC_CODE_OK;
+}
+
 int rpc_guard_debug_hook_gate(bool allow, bool authenticated)
 {
     if (!allow)        return RPC_CODE_DEBUG_DISABLED;   /* 默认关死：未显式开启一律拒绝 */

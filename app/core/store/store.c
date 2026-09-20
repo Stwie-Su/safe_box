@@ -10,6 +10,7 @@
  * 内置极简 JSON 读写器（仅服务于本模块固定 schema，不做通用库）。
  */
 #include "core/store/store.h"
+#include "core/store/store_cache.h"  /* 只读快照缓存：worker 在读写盘后发布，主线程只读 */
 #include "core/config.h"       /* 运行期配置快照（SAFE_LOG_MAX 等） */
 #include "core/support/crypto.h"
 #include "hal/hal_time.h"        /* R2：时间源统一走 HAL，业务层不直接读系统时钟 */
@@ -595,6 +596,10 @@ static int load_users(safe_user_t **list, int *count, bool *ok)
     free(json);
     *list = us;
     *count = valid;
+    /* 读盘成功 → 刷新只读快照缓存（写侧）。
+     * 本函数按不变式**只由 worker 线程**调用（主线程不得直连 store 读写接口），
+     * 因此这里是发布快照的合法位置之一。 */
+    store_cache_publish_users(us, valid);
     return 0;
 }
 
@@ -638,6 +643,9 @@ static bool save_users(const safe_user_t *us, int n)
     o += (size_t)w;
     bool r = write_file_all(path, buf, o);
     free(buf);
+    /* 落盘成功 → 刷新只读快照缓存（写侧），让主线程的 user_count / find_by_id
+     * 不必再读盘（QA-21：整表读盘在主线程会卡死 20ms 泵）。 */
+    if (r) store_cache_publish_users(us, n);
     return r;
 }
 
