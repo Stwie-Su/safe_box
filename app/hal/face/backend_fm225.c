@@ -481,6 +481,17 @@ static bool fm225_enroll_five_way(void)
     return s_enroll_5way;
 }
 
+/* 五向进度查询：UI 据此显示「第 N/5 步：请向右转」。 */
+static uint8_t fm225_enroll_dir_mask(void)
+{
+    return s_enroll_dir_mask;
+}
+
+static uint8_t fm225_enroll_next_dir(void)
+{
+    return s_enroll_5way ? fm225_next_dir() : 0;
+}
+
 /* 运行时切换录入模式：上层在启动时按持久化策略调一次，之后界面可改。 */
 static void fm225_set_enroll_five_way(bool five_way)
 {
@@ -1292,6 +1303,8 @@ static const face_backend_t backend = {
     .face_state   = fm225_face_state,
     .face_pose    = fm225_face_pose,
     .enroll_five_way = fm225_enroll_five_way,
+    .enroll_dir_mask = fm225_enroll_dir_mask,
+    .enroll_next_dir = fm225_enroll_next_dir,
     .set_enroll_five_way = fm225_set_enroll_five_way,
     .inject        = fm225_inject,
 };

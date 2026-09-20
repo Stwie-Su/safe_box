@@ -251,6 +251,18 @@ void face_service_set_enroll_five_way(bool five_way)
     s_backend->set_enroll_five_way(five_way);
 }
 
+uint8_t face_service_enroll_dir_mask(void)
+{
+    if (s_backend == NULL || s_backend->enroll_dir_mask == NULL) return 0;
+    return s_backend->enroll_dir_mask();
+}
+
+uint8_t face_service_enroll_next_dir(void)
+{
+    if (s_backend == NULL || s_backend->enroll_next_dir == NULL) return 0;
+    return s_backend->enroll_next_dir();
+}
+
 bool face_service_enroll_five_way(void)
 {
     if (s_backend == NULL || s_backend->enroll_five_way == NULL) return false;

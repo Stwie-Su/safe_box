@@ -153,6 +153,13 @@ int32_t face_service_face_pose(int16_t * yaw, int16_t * pitch, int16_t * roll);
  * 由后端 env SAFE_FACE_ENROLL_5WAY 决定，供录入页切换引导文案。 */
 bool face_service_enroll_five_way(void);
 
+/* 五向录入进度（供 UI 在视频上方显示分步引导）：
+ *   face_service_enroll_dir_mask() → 已完成的方向掩码（位：正1 右2 左4 下8 上16）；
+ *   face_service_enroll_next_dir() → 下一个待采集的方向（单一位）；0 = 已采齐 / 非五向。
+ * 后端无此概念时返回 0。 */
+uint8_t face_service_enroll_dir_mask(void);
+uint8_t face_service_enroll_next_dir(void);
+
 /* 运行时切换录入模式（单帧/五向）。上层在启动时按持久化策略调用一次；
  * 后端不支持时静默忽略（保持当前模式）。 */
 void face_service_set_enroll_five_way(bool five_way);

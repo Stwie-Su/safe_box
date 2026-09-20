@@ -246,6 +246,45 @@ static const char * guide_text(int32_t fs, bool five_way)
     }
 }
 
+/* 五向：某一位是否已完成 → 已完成的步数（用于「第 N/5 步」） */
+static int mask_popcount(uint8_t v)
+{
+    int n = 0;
+    while (v) { n += (v & 1); v >>= 1; }
+    return n;
+}
+
+/* 五向：下一个待采集方向 → 人话动作（位序同 fm225 的方向表） */
+static const char * dir_word(uint8_t d)
+{
+    switch (d) {
+        case 0x01: return "正对镜头";
+        case 0x02: return "向右转头";
+        case 0x04: return "向左转头";
+        case 0x08: return "请低头";
+        case 0x10: return "请抬头";
+        default:   return "保持不动";
+    }
+}
+
+/* 五向分步引导：**在视频上方**依次告诉用户当前该做哪个方向。
+ * 优先级：模组报出的位置类问题（太靠上/下/左/右）> 当前该做的方向。
+ * —— 人都不在画面里时，先让人把脸摆对，再谈转头。 */
+static void five_way_guide(char * buf, size_t n, uint8_t mask, uint8_t next_d,
+                          int32_t fs)
+{
+    const int done = mask_popcount(mask);
+    if (next_d == 0) {
+        snprintf(buf, n, "五向录入：五个方向已采齐，处理中…");
+        return;
+    }
+    if (fs >= 2 && fs <= 5) {
+        snprintf(buf, n, "第 %d/5 步：%s", done + 1, guide_text(fs, true));
+        return;
+    }
+    snprintf(buf, n, "第 %d/5 步：%s", done + 1, dir_word(next_d));
+}
+
 /* ===== 拉帧定时器（本页可见才拉帧；两页互斥 → 单消费者） ===== */
 static void frame_timer_cb(lv_timer_t * t)
 {
@@ -305,16 +344,39 @@ static void status_timer_cb(lv_timer_t * t)
      * fs < 0（模组尚未上报）不是「没检测到人脸」，由 guide_text 统一给中性文案。 */
     if (enrolling) {
         int32_t fs = face_service_face_state();
-        lv_label_set_text(s_guide_lb, guide_text(fs, five_way));
+        if (five_way) {
+            char g[96];
+            five_way_guide(g, sizeof(g),
+                           face_service_enroll_dir_mask(),
+                           face_service_enroll_next_dir(), fs);
+            lv_label_set_text(s_guide_lb, g);
+        } else {
+            lv_label_set_text(s_guide_lb, guide_text(fs, false));
+        }
         lv_obj_set_hidden(s_guide_lb, false);
     } else {
         lv_obj_set_hidden(s_guide_lb, true);
     }
 
     /* 头部副文案（冗余一份引导，低视觉权重） */
-    lv_label_set_text(s_sub, enrolling ? guide_text(face_service_face_state(), five_way)
-                                       : (five_way ? "未在录入会话 · 五向模式"
-                                                   : "未在录入会话"));
+    /* 录入期间把模组实时上报的**姿态**显示出来：
+     * ①便于观察模组到底在不在看脸；②为后续「转到位」的阈值标定提供依据
+     *   （yaw/pitch 的正负与量程尚未标定，先只显示数值，不据此判定）。 */
+    if (enrolling) {
+        int16_t yaw = 0, pitch = 0, roll = 0;
+        char sb[96];
+        if (face_service_face_pose(&yaw, &pitch, &roll) == 0) {
+            snprintf(sb, sizeof(sb), "状态=%d  姿态 yaw=%d pitch=%d roll=%d",
+                     (int)face_service_face_state(), (int)yaw, (int)pitch, (int)roll);
+        } else {
+            snprintf(sb, sizeof(sb), "状态=%d（模组未上报姿态）",
+                     (int)face_service_face_state());
+        }
+        lv_label_set_text(s_sub, sb);
+    } else {
+        lv_label_set_text(s_sub, five_way ? "未在录入会话 · 五向模式"
+                                          : "未在录入会话");
+    }
 
     /* 底部状态文案：明确、不空。
      * 结果态（录入成功/失败文案）由 page_enroll_show_result 写入并独占 s_status，

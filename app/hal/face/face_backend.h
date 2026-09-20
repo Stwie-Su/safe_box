@@ -66,6 +66,12 @@ typedef struct face_backend {
     int32_t (*face_pose)(int16_t * yaw, int16_t * pitch, int16_t * roll);
     /* 当前录入模式是否为五向。**可选接口**，NULL 视为单帧。 */
     bool (*enroll_five_way)(void);
+    /* 五向录入进度查询（**可选**，NULL 视为 0）：
+     *   enroll_dir_mask → 已完成的方向掩码（正0x01|右0x02|左0x04|下0x08|上0x10）；
+     *   enroll_next_dir → **下一个待采集的方向**（单一位）；0 = 已采齐 / 非五向。
+     * 供 UI 在视频上方显示「第 N/5 步：请向右转」这类引导。 */
+    uint8_t (*enroll_dir_mask)(void);
+    uint8_t (*enroll_next_dir)(void);
     /* 运行时切换录入模式（单帧/五向）。**可选**接口，NULL = 不支持。
      * 上层在启动时按持久化策略调用一次，之后用户可在界面里切换。 */
     void (*set_enroll_five_way)(bool five_way);
