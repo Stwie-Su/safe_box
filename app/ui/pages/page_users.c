@@ -1794,7 +1794,9 @@ static const char * face_err_hint(bool enroll, safe_err_t e)
         case SAFE_ERR_EXIST:   return enroll ? "这张脸已经录入过（同一张脸只能绑定一个用户）"
                                              : "模组侧未完成删除，请重试";
         case SAFE_ERR_NOMEM:   return enroll ? "模组模板已满，请先删除不需要的人脸"
-                                             : "模组内存不足";
+                                             /* 删除被拒却报容量问题，属模组侧异常；
+                                              * 光说「内存不足」用户无从下手，给出下一步。 */
+                                             : "模组容量计数异常（删除被拒）：请重启模组后重试";
         case SAFE_ERR_PARAM:   return "模组拒绝了请求参数";
         case SAFE_ERR_TIMEOUT: return enroll ? "录入超时：没有检测到人脸，请正对镜头"
                                              : "模组响应超时";
@@ -1839,8 +1841,15 @@ static void on_face_event_ui(ev_topic_t topic, const void * payload, void * user
         else tpl = e->enroll.face_id;
     } else if (e->ev == FACE_EV_DELETE_DONE) {
         if (s_face_op != FACE_OP_DELETE) return;
-        if (e->del.err != SAFE_OK) { tpl = -2; fail_err = e->del.err; }
-        else tpl = -1;                                /* 删除成功：清除绑定 */
+        /* ★ 幂等语义（2026-09-20）：模组回 NOENT 表示**它那儿本来就没有这个
+         *   模板**，而调用方的意图是「解绑」—— 目的已经达成，应当视为成功并
+         *   清除本地绑定。
+         *   否则会**死锁**：本地留着 face_id、模组里没有对应模板，用户想解绑
+         *   却每次都「删除失败」，只能等启动对账兜底（而对账只在启动时跑一次）。
+         *   这正是用户实测场景：「app 态存过人脸，但模组里已删掉」。 */
+        if (e->del.err == SAFE_ERR_NOENT)      tpl = -1;   /* 模组无此模板 = 已达成 */
+        else if (e->del.err != SAFE_OK)      { tpl = -2; fail_err = e->del.err; }
+        else                                   tpl = -1;   /* 正常删除成功 */
     } else {
         return;
     }
@@ -1905,15 +1914,36 @@ static void dlg_confirm_del(const char *msg)
 
 static void dlg_tip(const char *text)
 {
-    dlg_open("提示", 340, 150);  /* 提示 */
+    const int32_t win_w = 340;
+    dlg_open("提示", win_w, 150);
+
+    /* ★ 与 dlg_confirm_begin 同一手法（用户 2026-09-20 截图验收：标题、文案、
+     *   按钮「黏成一坨」，且标题被上边裁、按钮被下边裁）。
+     *   根因：这里用**固定 150 高**且未按内容定高，而 dlg_open 默认是列居中 ——
+     *   内容一旦超过 150 就上下双向溢出（不是只往下长）。PC 1.8x 缩放下
+     *   「标题栏 + app_font_scaled(16) 文案 + 40 高按钮」本来就装不进 150。
+     *   修法：改顶部对齐 + 文案限宽折行 + 实测按钮底边后重新定高居中。 */
+    lv_obj_set_flex_align(s_win, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
     lv_obj_t * m = lv_label_create(s_win);
     lv_label_set_text(m, text);
     lv_obj_add_style(m, &st_warn_text, 0);
     lv_obj_set_style_text_font(m, app_font_scaled(16), 0);
+    lv_obj_set_width(m, win_w - 32);
+    lv_obj_set_style_text_align(m, LV_TEXT_ALIGN_CENTER, 0);
 
-    ui_icon_text_button(s_win, LV_SYMBOL_OK, "知道了",
-                        120, 40, &st_ghost_btn,
-                        theme_color(TH_TEXT), dlg_ok_cb, NULL);
+    lv_obj_t * btn = ui_icon_text_button(s_win, LV_SYMBOL_OK, "知道了",
+                                         120, 40, &st_ghost_btn,
+                                         theme_color(TH_TEXT), dlg_ok_cb, NULL);
+
+    /* 按内容定高：文案折行会让按钮下移，量出实际底边再定高并重新居中。
+     * 必须先 update_layout —— 刚 set_size 完的窗口坐标查询恒为 0（见
+     * dlg_bottom_btn_xy 上方的陷阱注释，同一个坑）。 */
+    lv_obj_update_layout(s_win);
+    int32_t need_h = lv_obj_get_y(btn) + lv_obj_get_height(btn) + 16;
+    int32_t h = (need_h > 150) ? need_h : 150;
+    lv_obj_set_size(s_win, win_w, h);
+    lv_obj_center(s_win);
 }
 
 static void del_worker(void * p)
