@@ -473,6 +473,9 @@ static bool fm225_enroll_five_way(void)
 static void fm225_set_enroll_five_way(bool five_way)
 {
     s_enroll_5way = five_way;
+    /* 打一行日志：否则「界面上切了五向、录入页引导却没变」这类问题无法定位 ——
+     * 到底是后端没收到模式切换，还是引导文案本身没走五向分支。 */
+    printf("[fm225] 录入模式切换 → %s\n", five_way ? "五向" : "单帧");
 }
 
 static int32_t fm225_face_state(void)
