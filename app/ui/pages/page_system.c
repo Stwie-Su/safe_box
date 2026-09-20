@@ -101,6 +101,7 @@ static void clear_face_btn_cb(lv_event_t * e);
 static void do_clear_face_cb(lv_event_t * e);
 /* 模组「全清」应答处理（定义在后；创建页面时要注册订阅） */
 static void on_face_event_sys(ev_topic_t topic, const void * payload, void * user);
+static void clear_face_local_done(void * p);
 static void close_dlg(void);
 static void dlg_cancel_cb(lv_event_t * e);
 static void do_factory_cb(lv_event_t * e);
@@ -685,6 +686,14 @@ static void clear_face_local_worker(void * p)
     user_face_clear_all();
 }
 
+/* 写盘完成后的主线程回调：**广播必须放在这里**，不能放在 worker_post 之后立即发 ——
+ * 否则 USERS 页会抢在写盘完成前 reload，读到的还是旧数据（按钮状态不变）。 */
+static void clear_face_local_done(void * p)
+{
+    (void)p;
+    event_bus_publish(EV_USER_CHANGED, NULL);
+}
+
 /* 模组全清的应答：face_id 恒为 -1（DELETE_ALL 没有具体模板号）——
  * 单条删除是 page_users 的事，这里只认「全清」。 */
 static void on_face_event_sys(ev_topic_t topic, const void * payload, void * user)
@@ -698,7 +707,7 @@ static void on_face_event_sys(ev_topic_t topic, const void * payload, void * use
     if (e->del.err == SAFE_OK) {
         /* 模组侧清空了，本地绑定必须同步清 —— 否则留下一整批「本地有、模组无」
          * 的孤儿，用户刷脸必失败且自己删不掉。 */
-        worker_post(clear_face_local_worker, NULL, NULL);
+        worker_post(clear_face_local_worker, NULL, clear_face_local_done);
         ui_banner("模组人脸已全部清空，本地绑定已同步清除", UI_BANNER_OK, 3000);
     } else {
         ui_banner("清空模组人脸失败，请稍后重试", UI_BANNER_DANGER, 3000);

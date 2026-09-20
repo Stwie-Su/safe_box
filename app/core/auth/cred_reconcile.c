@@ -18,6 +18,7 @@
  *   - 一次性（幂等）：模组清单首次取得后只跑一次，置内部标志防重复；
  *   - -1（无此概念 / fake / none）与 -2（尚未取得）不执行对账——否则会把全部凭据一夜判死。
  */
+#include "core/event_bus.h"   /* 对账完成后广播 EV_USER_CHANGED */
 #include "core/auth/cred_reconcile.h"
 
 #include <stdbool.h>
@@ -102,10 +103,11 @@ static void cred_reconcile_done(void * p)
     cred_recon_job_t * job = (cred_recon_job_t *)p;
     if(job->changed > 0) {
         printf("[recon] 启动对账完成：%d 条孤儿凭据已标记失效\n", job->changed);
-        /* 这里**不**广播 EV_USER_CHANGED —— 全工程没有任何订阅者，属死代码
-         * （QA 复核 低危#3）。UI 的「最后开启 / 用户数」等统计各有独立定时器刷新，
-         * 对账结果最迟一个刷新周期内可见，无需事件驱动。
-         * （若将来确有订阅者，再连同 event_bus.h 一起恢复，勿单留一条空广播。） */
+        /* ★ 2026-09-20 起**恢复广播**：EV_USER_CHANGED 现在有订阅者了
+         * （page_users 订阅它重新拉列表）—— 原注释所说的「全工程无订阅者、
+         * 属死代码」已不成立。对账会把孤儿凭据的 face_enable 标为 false，
+         * 用户页上「删人脸 / 录人脸」按钮状态必须跟着变，否则界面与实际不符。 */
+        event_bus_publish(EV_USER_CHANGED, NULL);
     }
     free(job);
 }

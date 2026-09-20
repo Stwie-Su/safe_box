@@ -125,6 +125,7 @@ static void face_start_cb(lv_event_t * e);
 static void face_set_worker(void * p);
 static void face_set_done(void * p);
 static void on_face_event_ui(ev_topic_t topic, const void * payload, void * user);
+static void on_user_changed(ev_topic_t topic, const void * payload, void * user);
 
 static void dlg_add_user(void);
 static void dlg_change_pwd(void);
@@ -365,6 +366,8 @@ lv_obj_t * page_users_create(lv_obj_t * parent)
     /* 人脸录入/删除的异步应答（UI 现代化 ui3）：本页订阅 ENROLL_DONE / DELETE_DONE，
      * 负责把模组分配的模板号写回 users.json 并刷新列表；横幅由 ui_feedback 出。 */
     event_bus_subscribe(EV_FACE_EVENT, on_face_event_ui, NULL);
+    /* 别处改动了用户数据 → 重新拉列表（见 on_user_changed 的注释）。 */
+    event_bus_subscribe(EV_USER_CHANGED, on_user_changed, NULL);
     return root;
 }
 
@@ -1822,6 +1825,21 @@ static void face_set_done(void * p)
     }
     free(a);
     rebuild_list();   /* 应答到达后重载该用户条目（现有列表刷新路径，spec §4） */
+}
+
+/* EV_USER_CHANGED：**别处**改动了用户数据 → 本页重新拉一次列表。
+ *
+ * 为什么需要：本页原先只在「进入页面」与「自己发起操作」后 reload，别处改的数据
+ * **不会反映到这里**。用户实测（2026-09-20）：在 SYSTEM 页清空模组人脸、本地绑定
+ * 已被同步清掉之后，回到用户页仍看到 admin 挂着「删人脸」按钮。
+ *
+ * 注：EV_USER_CHANGED 此前被判定为「全工程无订阅者的死代码」（QA 低危#3），
+ * 从本次起它有了真实用途（本页 + 启动对账两处广播）。 */
+static void on_user_changed(ev_topic_t topic, const void * payload, void * user)
+{
+    (void)payload; (void)user;
+    if (topic != EV_USER_CHANGED) return;
+    astore_load_users(users_list_loaded);
 }
 
 /* EV_FACE_EVENT 应答：录入成功写回模板号，删除成功写 -1，然后刷新列表 */
