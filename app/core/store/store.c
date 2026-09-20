@@ -511,6 +511,13 @@ static bool parse_user_obj(const char *obj, safe_user_t *u)
     if (js_get_int(obj, "lock_until", &v)) u->lock_until = v;
     /* —— 阶段 1 新增字段：缺省给兼容默认值 —— */
     if (js_get_int(obj, "face_id", &v)) u->face_id = (int)v; else u->face_id = -1;
+    /* ★ 非法 face_id 归一化（2026-09-20）：0xFFFF(65535) 是模组「尚未分配」的占位值。
+     * 旧 bug（单帧录入误用五向命令 0x13）会把它当真实模板号写进 users.json，
+     * 表现是「UI 显示这个人有已录人脸、模组里却查不到、点删除还删不掉
+     *        （模组收到越界 uid，回容量异常）」。
+     * 启动对账虽能发现孤儿，但它是**幂等只跑一次**的 —— 对账之后新产生的假绑定
+     * 不会再被处理，所以必须在读盘这道闸门上一次性清掉所有存量残留。 */
+    if (u->face_id == 0xFFFF || u->face_id > 0xFFFF) u->face_id = -1;
     js_get_bool(obj, "face_enable", &u->face_enable);
     /* 不变式归一化（QA 三轮 A-#10）：face_id<0 ⟹ face_enable=false。
      * 两字段在此各自独立读盘：旧固件的清绑路径（15a1456 之前 user_face_set(uid,-1)

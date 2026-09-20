@@ -2026,7 +2026,12 @@ static void do_del_cb(lv_event_t * e)
     a->del_face_id = -1;
     {
         safe_user_t du;
-        if (s_sel_id >= 0 && user_find_by_id(s_sel_id, &du) == 0) a->del_face_id = du.face_id;
+        if (s_sel_id >= 0 && user_find_by_id(s_sel_id, &du) == 0) {
+            a->del_face_id = du.face_id;
+            /* 非法 face_id（模组「未分配」占位值或越界）→ 模组侧不可能存在这个模板，
+             * 发 DELETE 只会换来一句「容量计数异常」并让用户卡住；直接清本地绑定即可。 */
+            if (a->del_face_id == 0xFFFF || a->del_face_id > 0xFFFF) a->del_face_id = -1;
+        }
     }
     worker_post(del_worker, a, del_done);
 }
