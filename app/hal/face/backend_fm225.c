@@ -458,6 +458,12 @@ static bool fm225_enroll_five_way(void)
     return s_enroll_5way;
 }
 
+/* 运行时切换录入模式：上层在启动时按持久化策略调一次，之后界面可改。 */
+static void fm225_set_enroll_five_way(bool five_way)
+{
+    s_enroll_5way = five_way;
+}
+
 static int32_t fm225_face_state(void)
 {
     return s_face_state;
@@ -1204,6 +1210,7 @@ static const face_backend_t backend = {
     .face_state   = fm225_face_state,
     .face_pose    = fm225_face_pose,
     .enroll_five_way = fm225_enroll_five_way,
+    .set_enroll_five_way = fm225_set_enroll_five_way,
     .inject        = fm225_inject,
 };
 

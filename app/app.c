@@ -124,6 +124,12 @@ void app_tick_fast(void)
      * （文件 IO 由 cred_reconcile_tick 内部经 worker_post 下沉后台线程，主线程不落盘）。
      * 放在主线程 20ms 泵里，是因为这里既是 face_service_module_users() 的合法调用点，
      * 也是 worker_post() 的合法调用点，且不引入新线程。 */
+    /* 把**持久化**的人脸录入模式同步给后端。
+     * 策略（users.json 的 policy.enroll_five_way）是唯一真源，env 只作初始默认 ——
+     * 否则用户在界面上切到五向、重启又被 env/默认值顶回单帧。
+     * 放在这里：face 后端已 init，且尚未发生任何录入。 */
+    face_service_set_enroll_five_way(user_policy()->enroll_five_way);
+
     cred_reconcile_tick();
 }
 

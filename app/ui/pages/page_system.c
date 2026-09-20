@@ -46,6 +46,8 @@ static lv_obj_t * s_lock_lbl;
 static lv_obj_t * s_otp_lbl;
 static lv_obj_t * s_vpin_sw;        /* 虚位密码开关（FR-18）—— 可点，不再是只读 info_row */
 static bool       s_vpin_pending = false;   /* 待写入的开关目标值（管理员验证通过后才落盘） */
+static lv_obj_t * s_mode_sw;        /* 人脸录入模式：单帧 / 五向 */
+static bool       s_mode_pending = false;   /* 待写入的目标值（管理员验证通过后才落盘） */
 static lv_obj_t * s_theme_btns[THEME_COUNT];
 static lv_obj_t * s_theme_cur;      /* 当前主题名（切换后刷新） */
 
@@ -68,10 +70,13 @@ static void refresh_policy(void);
 
 /* 虚位密码开关（FR-18）：落盘走后台线程，不在 UI 线程做文件 IO */
 static lv_obj_t * toggle_row(lv_obj_t * parent, const char * name, const char * hint,
-                             lv_obj_t ** sw_out);
+                             lv_obj_t ** sw_out, lv_event_cb_t cb);
 static void vpin_click_cb(lv_event_t * e);
 static void vpin_refresh(void);
 static void vpin_write_async(bool enable);
+static void mode_click_cb(lv_event_t * e);
+static void mode_refresh(void);
+static void mode_write_async(bool five_way);
 
 /* ---- 管理员二次验证（操作处鉴权，FR-7 2026-09-14 变更）----
  * 原设计把鉴权放在「设置中枢」页级入口；但主导航本就直接暴露 系统/用户/网络，
@@ -84,6 +89,7 @@ typedef enum {
     ADMIN_ACT_FACTORY,
     ADMIN_ACT_VIRTUAL_PIN,
     ADMIN_ACT_CLEAR_FACE,      /* 清空模组人脸：模组被外部写过之后的「拉回一致」手段 */
+    ADMIN_ACT_ENROLL_MODE,     /* 切换人脸录入模式（单帧/五向） */
 } admin_action_t;
 
 static void admin_verify_open(admin_action_t act);
@@ -162,7 +168,7 @@ static lv_obj_t * info_row(lv_obj_t * parent, const char * name, lv_obj_t ** val
  * @param sw_out  回传开关按钮句柄（可为 NULL）
  */
 static lv_obj_t * toggle_row(lv_obj_t * parent, const char * name, const char * hint,
-                             lv_obj_t ** sw_out)
+                             lv_obj_t ** sw_out, lv_event_cb_t cb)
 {
     lv_obj_t * row = lv_obj_create(parent);
     lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
@@ -198,7 +204,9 @@ static lv_obj_t * toggle_row(lv_obj_t * parent, const char * name, const char * 
         lv_obj_set_style_text_font(h, app_font_scaled(11), 0);
     }
 
-    /* 右：开关按钮。文字由 vpin_refresh() 按真实策略值刷新。 */
+    /* 右：开关按钮。文字由各自的 refresh 按真实策略值刷新。
+     * 回调由调用方传入 —— 原先写死 vpin_click_cb，第二个使用者（录入模式）
+     * 点了不会走自己的逻辑（编译期就是 unused-function 警告，正是它暴露的）。 */
     lv_obj_t * sw = lv_button_create(row);
     lv_obj_set_size(sw, SX(92), SY(30));
     lv_obj_add_style(sw, &st_ghost_btn, 0);
@@ -206,7 +214,7 @@ static lv_obj_t * toggle_row(lv_obj_t * parent, const char * name, const char * 
     lv_obj_set_style_pad_hor(sw, SX(6), 0);
     lv_obj_set_style_pad_ver(sw, 0, 0);
     lv_obj_set_style_radius(sw, SX(8), 0);
-    lv_obj_add_event_cb(sw, vpin_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(sw, cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t * sl = lv_label_create(sw);
     lv_label_set_text(sl, "已关闭");
@@ -401,7 +409,13 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     char vpin_hint[64];
     snprintf(vpin_hint, sizeof(vpin_hint),
              "开启后 PIN 前后可加干扰位（最长 %d 位）", SAFE_VIRTUAL_PIN_MAX_INPUT);
-    toggle_row(left, "虚位密码", vpin_hint, &s_vpin_sw);
+    toggle_row(left, "虚位密码", vpin_hint, &s_vpin_sw, vpin_click_cb);
+
+    /* 人脸录入模式：单帧 / 五向。
+     * 放这里（与其它人脸策略同卡）而不是「开发者选项」—— 后者定位是只读诊断。 */
+    toggle_row(left, "人脸录入模式",
+               "五向＝一次录入内依次采集 正/左/右/上/下；单帧＝只采一次",
+               &s_mode_sw, mode_click_cb);
     lv_obj_t * verify_t = NULL;
     info_row(left, "人脸验证超时（秒）", &verify_t);
     if (verify_t) {
@@ -512,6 +526,7 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
 
     refresh_policy();
     vpin_refresh();
+    mode_refresh();
     lv_timer_create(clock_timer_cb, 1000, NULL);
     clock_timer_cb(NULL);
 
@@ -640,6 +655,58 @@ static void vpin_done(void * p)
     astore_append_log("setting_change", "admin", 1,
                       j->enable ? "virtual_pin on" : "virtual_pin off");
     free(j);
+}
+
+/* ---------------- 人脸录入模式（单帧/五向）----------------
+ * 完整照抄 vpin 的范式：点击 → 鉴权 → worker 落盘 → done 刷新。
+ * 差别只有两处：①落盘后把新值**同步给后端**（策略是唯一真源）；
+ * ②按钮文字是「单帧/五向」而不是「已开启/已关闭」。 */
+typedef struct { bool five; } mode_job_t;
+
+static void mode_worker(void * p)
+{
+    mode_job_t * j = (mode_job_t *)p;
+    user_policy_set_enroll_mode(j->five);
+}
+
+static void mode_done(void * p)
+{
+    mode_job_t * j = (mode_job_t *)p;
+    /* 落盘完成后再同步后端 —— 顺序反了会让界面/后端短暂不一致。 */
+    face_service_set_enroll_five_way(j->five);
+    mode_refresh();
+    astore_append_log("setting_change", "admin", 1,
+                      j->five ? "face enroll mode: five-way"
+                              : "face enroll mode: single");
+    free(j);
+}
+
+static void mode_write_async(bool five_way)
+{
+    mode_job_t * j = (mode_job_t *)calloc(1, sizeof(*j));
+    if (!j) return;
+    j->five = five_way;
+    worker_post(mode_worker, j, mode_done);
+}
+
+static void mode_refresh(void)
+{
+    if (!s_mode_sw) return;
+    const safe_policy_t * pol = user_policy();
+    bool five = pol->enroll_five_way;
+
+    if (five) lv_obj_add_state(s_mode_sw, LV_STATE_CHECKED);
+    else      lv_obj_remove_state(s_mode_sw, LV_STATE_CHECKED);
+
+    lv_obj_t * lb = lv_obj_get_child(s_mode_sw, 0);
+    if (lb) lv_label_set_text(lb, five ? "五向" : "单帧");
+}
+
+static void mode_click_cb(lv_event_t * e)
+{
+    (void)e;
+    s_mode_pending = !user_policy()->enroll_five_way;   /* 目标值 = 取反 */
+    admin_verify_open(ADMIN_ACT_ENROLL_MODE);
 }
 
 static void vpin_write_async(bool enable)
@@ -951,6 +1018,7 @@ static void admin_verify_open(admin_action_t act)
     else if (act == ADMIN_ACT_FACTORY) why = "恢复出厂需管理员验证";
     else if (act == ADMIN_ACT_VIRTUAL_PIN) why = "切换虚位密码需管理员验证";
     else if (act == ADMIN_ACT_CLEAR_FACE)  why = "清空模组人脸需管理员验证";
+    else if (act == ADMIN_ACT_ENROLL_MODE) why = "切换人脸录入模式需管理员验证";
 
     s_av_msg = lv_label_create(s_av_win);
     lv_label_set_text(s_av_msg, why);
@@ -1091,6 +1159,9 @@ static void admin_verify_dispatch(void)
         break;
     case ADMIN_ACT_CLEAR_FACE:
         dlg_clear_face();       /* 验证通过后再弹确认框（破坏性操作双重确认） */
+        break;
+    case ADMIN_ACT_ENROLL_MODE:
+        mode_write_async(s_mode_pending);   /* 后台落盘 + 同步后端 */
         break;
     case ADMIN_ACT_NONE:
     default:

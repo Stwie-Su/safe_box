@@ -34,6 +34,7 @@ typedef struct {
     int  face_otp_after;        /* 人脸连续未匹配达此值转动态码 */
     int  face_verify_timeout_s; /* 人脸验证过程超时（秒） */
     bool virtual_pin_enable;    /* 虚位密码开关（FR-18） */
+
     int  max_failed;            /* 连续失败锁定阈值 */
     int  lock_seconds;          /* 锁定时长 */
 

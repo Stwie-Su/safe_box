@@ -66,6 +66,9 @@ typedef struct face_backend {
     int32_t (*face_pose)(int16_t * yaw, int16_t * pitch, int16_t * roll);
     /* 当前录入模式是否为五向。**可选接口**，NULL 视为单帧。 */
     bool (*enroll_five_way)(void);
+    /* 运行时切换录入模式（单帧/五向）。**可选**接口，NULL = 不支持。
+     * 上层在启动时按持久化策略调用一次，之后用户可在界面里切换。 */
+    void (*set_enroll_five_way)(bool five_way);
 
     /* 注入模拟结果，仅 FACE_CAP_INJECT 后端需要实现 */
     safe_err_t (*inject)(int32_t face_id, face_reason_t reason);

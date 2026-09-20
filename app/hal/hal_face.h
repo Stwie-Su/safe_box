@@ -153,6 +153,10 @@ int32_t face_service_face_pose(int16_t * yaw, int16_t * pitch, int16_t * roll);
  * 由后端 env SAFE_FACE_ENROLL_5WAY 决定，供录入页切换引导文案。 */
 bool face_service_enroll_five_way(void);
 
+/* 运行时切换录入模式（单帧/五向）。上层在启动时按持久化策略调用一次；
+ * 后端不支持时静默忽略（保持当前模式）。 */
+void face_service_set_enroll_five_way(bool five_way);
+
 /* 是否有录入会话在途（录入实时引导小字的显隐依据）。 */
 bool face_service_enrolling(void);
 

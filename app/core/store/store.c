@@ -56,7 +56,9 @@ static int log_retention_max(void)
 
 /* ---------------- 全局 ---------------- */
 static char g_dir[512] = {0};          /* 数据目录（store_set_dir 覆盖） */
-static safe_policy_t g_policy = { 4, 8, 5, 30, 3, 10, true };
+/* 位置初始化：顺序与 safe_policy_t 字段一一对应，**新增字段必须在此补值**
+ * （否则触发 -Wmissing-field-initializers，本项目零告警纪律）。 */
+static safe_policy_t g_policy = { 4, 8, 5, 30, 3, 10, true, false };
 /* pin_min/max/max_failed/lock_seconds/face_otp_after/face_verify_timeout_s/virtual_pin_enable */
 
 /* DESIGN.md §9：g_policy 被主线程(user_policy)与后台 worker(user_policy_set/load_users)
@@ -560,6 +562,7 @@ static int load_users(safe_user_t **list, int *count, bool *ok)
         /* 虚位密码开关（FR-18）：save_users 一直有写这个字段，但此前从没在读盘时回填，
          * 导致管理员改过的开关重启即丢、内存里恒为编译期默认。此处补上读取。 */
         js_get_bool(pol, "virtual_pin_enable", &g_policy.virtual_pin_enable);
+        js_get_bool(pol, "enroll_five_way",    &g_policy.enroll_five_way);
         pthread_mutex_unlock(&g_policy_mutex);
         /* 越界钳制在锁外补记审计（log_append 会在不持 g_policy_mutex 时调用）。 */
         if (pin_len_clamped)
@@ -610,9 +613,10 @@ static bool save_users(const safe_user_t *us, int n)
     w = snprintf(buf + o, cap - o,
         "{\n  \"version\": 1,\n  \"policy\": {\"pin_min_len\": %d, \"pin_max_len\": %d, "
         "\"max_failed\": %d, \"lock_seconds\": %d, \"face_otp_after\": %d, "
-        "\"face_verify_timeout_s\": %d, \"virtual_pin_enable\": %s},\n  \"users\": [\n",
+        "\"face_verify_timeout_s\": %d, \"virtual_pin_enable\": %s, \"enroll_five_way\": %s},\n  \"users\": [\n",
         p->pin_min_len, p->pin_max_len, p->max_failed, p->lock_seconds,
-        p->face_otp_after, p->face_verify_timeout_s, p->virtual_pin_enable ? "true" : "false");
+        p->face_otp_after, p->face_verify_timeout_s, p->virtual_pin_enable ? "true" : "false",
+        p->enroll_five_way ? "true" : "false");
     if (w < 0 || (size_t)w >= cap - o) { free(buf); return false; }
     o += (size_t)w;
     for (int i = 0; i < n; i++) {
@@ -963,6 +967,22 @@ void user_policy_set_face(int otp_after, int timeout_s)
 }
 
 /* 虚位密码开关（FR-18）落盘 —— 与上面两个 setter 同一顺序不变式。 */
+/* 录入模式（单帧/五向）落盘 —— 与其它 setter 同一顺序不变式：
+ * 先 load（同步基线）→ 改内存 → 最后 save。 */
+void user_policy_set_enroll_mode(bool five_way)
+{
+    safe_user_t *us = NULL;
+    int n = 0;
+    load_users(&us, &n, NULL);
+    pthread_mutex_lock(&g_policy_mutex);
+    g_policy.enroll_five_way = five_way;
+    pthread_mutex_unlock(&g_policy_mutex);
+
+    if (n > 0) save_users(us, n);
+    else       save_users(NULL, 0);
+    user_list_free(us);
+}
+
 void user_policy_set_virtual_pin(bool enable)
 {
     safe_user_t *us = NULL;

@@ -36,6 +36,12 @@ typedef struct {
     int  face_otp_after;     /* 人脸连续未匹配达此值转动态码（FR-2 按原因分流） */
     int  face_verify_timeout_s; /* 人脸验证过程超时（秒，DETECTING 停留上限） */
     bool virtual_pin_enable; /* 虚位密码开关（FR-18，键盘层消费） */
+    /* 人脸录入模式：false = 单帧（默认，一次采集即成模板）；
+     * true = 五向（一次 ENROLL 内由模组依次采集 正/左/右/上/下，
+     * face_direction = 0x1F）。做成可切换是因为五向的真机表现需实测确认，
+     * 保留单帧作对照、出问题可一键回退。
+     * 启动时由 app.c 同步给后端；env SAFE_FACE_ENROLL_5WAY 仅作初始环境默认。 */
+    bool enroll_five_way;
 } safe_policy_t;
 
 /* ---------------- 用户数据模型（DESIGN.md §2.2，阶段 1 扩展） ---------------- */
@@ -106,6 +112,7 @@ void user_policy_set(int max_failed, int lock_seconds);   /* 修改安全策略�
 void user_policy_set_face(int otp_after, int timeout_s);  /* 修改人脸策略（FR-2/FR-7）并落盘 */
 /* 虚位密码开关（FR-18）并落盘。实现里顺序为「先 load 同步、再改内存、最后 save」：
  * load_users() 会用文件里的 policy 回写内部策略，若先改内存再 load 会被冲掉。 */
+void user_policy_set_enroll_mode(bool five_way);  /* 录入模式（单帧/五向）并落盘 */
 void user_policy_set_virtual_pin(bool enable);
 /* 角色合法性（FR-1 / FR-9）：仅 "admin" / "user" / "temp" 为合法角色。 */
 bool user_role_valid(const char * role);
