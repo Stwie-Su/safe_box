@@ -759,8 +759,13 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
      *    若按 pending 过滤会被整条丢掉，对账永远拿不到清单；
      *  - ENROLL/DELETE 须对上 pending 命令——防与其它命令应答串话；无 pending
      *    时的迟到应答丢弃（作业早已超时上报）。 */
+    /* ★ 五向录入（0x13）会**分多次**上报「单方向成功」的进度帧；第一帧落地时
+     * s_pending_len 已被清 0，后续帧若不在此豁免就会被这行直接丢掉 ——
+     * 会话于是永远等不到那帧 0x1F（全方向采完），只能一路等到超时。
+     * VERIFY / GET_ALL_USERID 同理，都属于「一命令、多应答」型。 */
     if(f->mid_or_nid != FM225_CMD_VERIFY &&
        f->mid_or_nid != FM225_CMD_GET_ALL_USERID &&
+       f->mid_or_nid != FM225_CMD_ENROLL &&
        (s_pending_len == 0 || f->mid_or_nid != s_pending_cmd)) return;
     if(s_pending_len != 0 && f->mid_or_nid == s_pending_cmd) {
         s_pending_len   = 0;                 /* 应答落地，停止重发计时 */
@@ -798,8 +803,24 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
          * 的 REARM 退避统一续发，轮间强制留静默间隔（模组一次 VERIFY 只出一组结果）。 */
         break;
     }
-    case FM225_CMD_ENROLL:          /* 五向（进度帧） */
-    case FM225_CMD_ENROLL_SINGLE: { /* 单脸（最终结果） */
+    case FM225_CMD_ENROLL:          /* 五向：**进度帧**，一命令多应答 */
+    case FM225_CMD_ENROLL_SINGLE: { /* 单脸：**最终结果**，一命令一应答 */
+        /* ★ 五向录入是逐方向上报的：face_dir 是**累计掩码**，只有累计到 0x1F
+         *   （正 0x01 | 右 0x02 | 左 0x04 | 下 0x08 | 上 0x10）才算采完。
+         *   中途那几帧必须**留在会话里继续等**，绝不能当最终结果上报 ——
+         *   否则重演「假绑定」：模组才采了一个方向、uid 还是 0xFFFF 未分配
+         *   占位值，却被当成「录入成功」写回本地。
+         *   判据来自桌面 FM225 测试工具的应答解析：
+         *     0x13 → '五向录入·单方向成功 uid=… 已录入方向掩码=0x..'（进度）
+         *     0x1D → '单脸录入成功 uid=…'（最终结果） */
+        if (s_pending_cmd == FM225_CMD_ENROLL) {
+            const uint8_t mask = (f->data_len >= 3) ? f->data[2] : 0;
+            if (f->result == FM225_MR_SUCCESS && mask != 0x1F) {
+                printf("[fm225] 五向录入进度：累计掩码 0x%02X（未达 0x1F）"
+                       "→ 继续等待下一方向\n", mask);
+                break;      /* ★ 不置 IDLE、不上报：会话继续 */
+            }
+        }
         s_state = FM225_IDLE;
         face_enroll_result_t r;
         memset(&r, 0, sizeof(r));
