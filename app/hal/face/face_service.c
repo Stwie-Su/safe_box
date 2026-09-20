@@ -211,6 +211,12 @@ face_module_health_t face_service_module_health(void)
     return s_backend->module_health();
 }
 
+safe_err_t face_service_delete_all_async(void)
+{
+    if(s_backend == NULL || s_backend->delete_all == NULL) return SAFE_ERR_UNSUP;
+    return s_backend->delete_all();
+}
+
 safe_err_t face_service_delete_async(int32_t face_id)
 {
     if(s_backend == NULL) return SAFE_ERR_STATE;

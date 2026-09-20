@@ -1142,6 +1142,22 @@ static safe_err_t fm225_delete_tpl(int32_t face_id)
     return e;
 }
 
+/* 清空模组全部模板（DELETE_ALL 0x21）。
+ * 与 fm225_delete_tpl 同属「会话型命令」：会抢占进行中的 ENROLL / VERIFY，
+ * 故同样要求模组空闲（否则对端那些命令会永不应答，界面只能等外层兜底超时）。
+ * s_delete_id 保持 -1：DELETE_ALL 没有具体模板号，应答里 face_id=-1 即是
+ * 「这是一次全清」的标记，UI 据此把本地所有绑定一并清掉。 */
+static safe_err_t fm225_delete_all(void)
+{
+    if(s_state != FM225_IDLE || s_pending_len > 0) return SAFE_ERR_BUSY;
+    static const uint8_t empty[1] = { 0 };   /* 该命令无 payload；不用 NULL 以免
+                                              * 底层 memcpy 解引用 */
+    safe_err_t e = fm225_send_cmd(FM225_CMD_DELETE_ALL, empty, 0);
+    s_state     = (e == SAFE_OK) ? FM225_WAIT_DELETE : FM225_IDLE;
+    s_delete_id = -1;
+    return e;
+}
+
 /* 真实模组不支持注入，调用方应在调用前查 FACE_CAP_INJECT */
 /* 模组侧已注册用户清单（FR-21 防线 3）。语义见 hal_face.h。 */
 static int32_t fm225_module_users(int32_t * ids, int32_t cap)
@@ -1182,6 +1198,7 @@ static const face_backend_t backend = {
     .verify_once  = fm225_verify_once,
     .enroll        = fm225_enroll,
     .delete_tpl    = fm225_delete_tpl,
+    .delete_all    = fm225_delete_all,
     .module_users  = fm225_module_users,
     .module_health = fm225_module_health,
     .face_state   = fm225_face_state,

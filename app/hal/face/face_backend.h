@@ -34,6 +34,13 @@ typedef struct face_backend {
      * 该参数（不支持写名的后端），此时模组返回用户名为空、核对自动跳过。 */
     safe_err_t (*enroll)(const char * user_name);
     safe_err_t (*delete_tpl)(int32_t face_id);
+    /* 清空模组侧**全部**人脸模板（FM225 的 DELETE_ALL 0x21）。
+     * 用途：模组被外部工具单独写过之后，本地与模组会长期不一致（编号空间被两方
+     * 共用，见 preview/uid 相关记录）—— 这条命令是唯一的「拖回一致」手段。
+     * 应答经 face_service_emit(FACE_EV_DELETE_DONE) 上报，且该事件的 face_id
+     * 恒为 **-1**（没有具体模板号），调用方据此与单条删除区分。
+     * 可为 NULL（后端不支持 → SAFE_ERR_UNSUP）。 */
+    safe_err_t (*delete_all)(void);
 
     /* 单次识别（FR-27 拍板：识别由界面按钮触发，不再自动循环）。受理后结果经
      * face_service_emit(FACE_EV_DETECT) 上报，会话结束即静默（低功耗）。

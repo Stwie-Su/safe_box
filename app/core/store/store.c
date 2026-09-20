@@ -804,6 +804,30 @@ int user_del(int id)
     return user_del_cascade(id, NULL);
 }
 
+/* 清空**所有用户**的人脸绑定（face_id=-1 且 face_enable=false）。
+ * 调用时机：模组侧被整体清空（DELETE_ALL）之后，本地必须同步清掉 —— 否则会留下
+ * 一整批「本地有绑定、模组无模板」的孤儿，用户刷脸必失败且自己删不掉。
+ * 保持不变式：face_id < 0 ⟹ face_enable == false。
+ * 无改动时**不写盘**（避免无谓的 IO 与原子重写）。 */
+int user_face_clear_all(void)
+{
+    safe_user_t *us = NULL;
+    int n = 0;
+    if (load_users(&us, &n, NULL) != 0 || n <= 0) { user_list_free(us); return -1; }
+
+    bool changed = false;
+    for (int i = 0; i < n; i++) {
+        if (us[i].face_id >= 0 || us[i].face_enable) {
+            us[i].face_id     = -1;
+            us[i].face_enable = false;
+            changed = true;
+        }
+    }
+    bool ok = changed ? save_users(us, n) : true;
+    user_list_free(us);
+    return ok ? 0 : -1;
+}
+
 int user_update(const safe_user_t *u)
 {
     if (!u) return -1;

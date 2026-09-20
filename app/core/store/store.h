@@ -88,6 +88,11 @@ int user_del(int id);                                    /* 0=成功 */
  *   宁可在模组里留一个孤儿模板（由启动对账标失效、不占可用凭据），
  *   也绝不能把别人的模板号交出去删掉。 */
 int user_del_cascade(int id, int32_t *out_face_id);       /* 0=成功 */
+
+/* 清空所有用户的人脸绑定（face_id=-1 / face_enable=false，保持不变式）。
+ * 用于模组侧被整体清空（DELETE_ALL）之后的本地同步，避免留下一整批孤儿绑定。
+ * 无改动时不写盘。返回 0=成功。 */
+int user_face_clear_all(void);
 int user_update(const safe_user_t *u);                   /* 按 id 整体覆盖；0=成功 */
 int user_face_set(int user_id, int face_id);             /* 便捷写：绑定模板(>=0 同时启用 face 通道)/清除(-1)；0=成功 */
 int user_find_by_name(const char *name, safe_user_t *out);/* 0=找到 */

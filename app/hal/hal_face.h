@@ -127,6 +127,12 @@ safe_err_t face_service_enroll_async(const char * user_name);
 /* 异步删除指定模板。 */
 safe_err_t face_service_delete_async(int32_t face_id);
 
+/* 异步清空模组侧**全部**模板（DELETE_ALL）。
+ * 结果经 FACE_EV_DELETE_DONE 上报，**face_id 恒为 -1**（无具体模板号）——
+ * 调用方据此区分「全清完成」与「单条删除完成」。
+ * 后端不支持 → SAFE_ERR_UNSUP；模组忙 → SAFE_ERR_BUSY。 */
+safe_err_t face_service_delete_all_async(void);
+
 /* 单次识别（FR-27 拍板 2026-09-15）：触发一次识别会话，结果/超时走既有事件链，
  * 会话结束即静默（模组红外与传感停工作）。识别不再自动循环；忙 = SAFE_ERR_BUSY，
  * 后端不支持 = SAFE_ERR_UNSUP。 */

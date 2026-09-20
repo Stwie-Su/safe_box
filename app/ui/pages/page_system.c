@@ -30,6 +30,9 @@
 #include "core/config.h"
 #include "core/support/async_store.h"
 #include "core/support/worker.h"
+#include "core/event_bus.h"      /* 订阅 EV_FACE_EVENT：识别「全清完成」 */
+#include "hal/hal_face.h"        /* face_service_delete_all_async */
+#include "ui/ui_feedback.h"      /* ui_banner：操作结果横幅 */
 #include "hal/hal_time.h"      /* R2：时间源统一走 HAL，不直接读系统时钟 */
 #include "app_version.h"       /* SAFE_VERSION_STRING：版本卡 */
 #include <string.h>
@@ -80,6 +83,7 @@ typedef enum {
     ADMIN_ACT_SAVE_POLICY,
     ADMIN_ACT_FACTORY,
     ADMIN_ACT_VIRTUAL_PIN,
+    ADMIN_ACT_CLEAR_FACE,      /* 清空模组人脸：模组被外部写过之后的「拉回一致」手段 */
 } admin_action_t;
 
 static void admin_verify_open(admin_action_t act);
@@ -92,6 +96,11 @@ static void admin_verify_update(void);
 static void admin_verify_done(int r);
 
 static void dlg_factory(void);
+static void dlg_clear_face(void);
+static void clear_face_btn_cb(lv_event_t * e);
+static void do_clear_face_cb(lv_event_t * e);
+/* 模组「全清」应答处理（定义在后；创建页面时要注册订阅） */
+static void on_face_event_sys(ev_topic_t topic, const void * payload, void * user);
 static void close_dlg(void);
 static void dlg_cancel_cb(lv_event_t * e);
 static void do_factory_cb(lv_event_t * e);
@@ -100,6 +109,8 @@ static int s_pending_max_failed = 5;
 static int s_pending_lock_secs  = 60;
 
 static admin_action_t s_admin_act = ADMIN_ACT_NONE;
+/* 事件订阅幂等标志：本页可能被反复创建，重复订阅会累积回调 */
+static bool s_sys_subscribed = false;
 static lv_obj_t * s_av_ov   = NULL;
 static lv_obj_t * s_av_win = NULL;
 static lv_obj_t * s_av_disp = NULL;
@@ -489,10 +500,26 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
                                         lv_color_white(), factory_btn_cb, NULL);
     (void)fr;
 
+    /* 「清空模组人脸」单独成按钮（**不**并入恢复出厂）：恢复出厂是 app 侧概念
+     * （清用户/网络/日志），而这条动的是模组侧数据、且不可撤销 —— 混在一起会让
+     * 「清 app 数据」意外清掉模组。它的作用是：模组被外部工具单独写过之后，
+     * 本地与模组长期不一致（uid 编号空间被两方共用），这条是唯一的「拉回一致」手段。 */
+    lv_obj_t * cf = ui_icon_text_button(danger, LV_SYMBOL_TRASH, "清空模组人脸",
+                                        SX(190), SY(40), &st_danger_btn,
+                                        lv_color_white(), clear_face_btn_cb, NULL);
+    (void)cf;
+
     refresh_policy();
     vpin_refresh();
     lv_timer_create(clock_timer_cb, 1000, NULL);
     clock_timer_cb(NULL);
+
+    /* 订阅人脸事件：只关心「全清完成」（face_id == -1）。
+     * 幂等保护：页面可被反复创建，不判重会累积回调（同一事件触发多次）。 */
+    if (!s_sys_subscribed) {
+        event_bus_subscribe(EV_FACE_EVENT, on_face_event_sys, NULL);
+        s_sys_subscribed = true;
+    }
     return root;
 }
 
@@ -642,6 +669,114 @@ static void vpin_click_cb(lv_event_t * e)
     const safe_policy_t * pol = user_policy();
     s_vpin_pending = !pol->virtual_pin_enable;   /* 目标值 = 取反 */
     admin_verify_open(ADMIN_ACT_VIRTUAL_PIN);
+}
+
+/* ---------------- 清空模组人脸 ---------------- */
+
+static void dlg_clear_face(void);
+static void clear_face_btn_cb(lv_event_t * e);
+static void do_clear_face_cb(lv_event_t * e);
+
+/* 本地绑定同步清空 —— **必须走 worker**：这是 store 写操作（重写 users.json），
+ * 主线程直接调会破坏「文件 IO 由 worker 单线程持有」的不变式（QA-20）。 */
+static void clear_face_local_worker(void * p)
+{
+    (void)p;
+    user_face_clear_all();
+}
+
+/* 模组全清的应答：face_id 恒为 -1（DELETE_ALL 没有具体模板号）——
+ * 单条删除是 page_users 的事，这里只认「全清」。 */
+static void on_face_event_sys(ev_topic_t topic, const void * payload, void * user)
+{
+    (void)user;
+    if (topic != EV_FACE_EVENT || payload == NULL) return;
+    const ev_face_event_t * e = (const ev_face_event_t *)payload;
+    if (e->ev != FACE_EV_DELETE_DONE) return;
+    if (e->del.face_id != -1) return;
+
+    if (e->del.err == SAFE_OK) {
+        /* 模组侧清空了，本地绑定必须同步清 —— 否则留下一整批「本地有、模组无」
+         * 的孤儿，用户刷脸必失败且自己删不掉。 */
+        worker_post(clear_face_local_worker, NULL, NULL);
+        ui_banner("模组人脸已全部清空，本地绑定已同步清除", UI_BANNER_OK, 3000);
+    } else {
+        ui_banner("清空模组人脸失败，请稍后重试", UI_BANNER_DANGER, 3000);
+    }
+}
+
+static void clear_face_btn_cb(lv_event_t * e)
+{
+    (void)e;
+    admin_verify_open(ADMIN_ACT_CLEAR_FACE);
+}
+
+static void do_clear_face_cb(lv_event_t * e)
+{
+    (void)e;
+    close_dlg();
+    safe_err_t r = face_service_delete_all_async();
+    if (r == SAFE_OK)            ui_banner("正在清空模组人脸…", UI_BANNER_INFO, 2000);
+    else if (r == SAFE_ERR_BUSY) ui_banner("模组忙（可能正在录入/识别），请稍后重试",
+                                           UI_BANNER_DANGER, 3000);
+    else                         ui_banner("当前模组不支持清空操作", UI_BANNER_DANGER, 3000);
+}
+
+/* 确认弹窗：版式与 dlg_factory 一致（危险操作双重确认） */
+static void dlg_clear_face(void)
+{
+    close_dlg();
+    lv_obj_t * scr = lv_screen_active();
+    s_ov = lv_obj_create(scr);
+    lv_obj_set_size(s_ov, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_bg_color(s_ov, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_ov, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_ov, 0, 0);
+    lv_obj_set_scrollable(s_ov, false);
+
+    const int32_t win_w = 380, win_h = 200;
+    s_win = lv_obj_create(s_ov);
+    lv_obj_set_size(s_win, win_w, win_h);
+    lv_obj_add_style(s_win, &st_panel, 0);
+    lv_obj_set_style_radius(s_win, 16, 0);
+    lv_obj_center(s_win);
+    lv_obj_set_scrollable(s_win, false);
+    lv_obj_set_flex_flow(s_win, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_win, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(s_win, 10, 0);
+
+    lv_obj_t * t = lv_label_create(s_win);
+    lv_label_set_text(t, "将删除模组内的全部人脸模板，且本地所有人脸绑定一并清除");
+    lv_obj_add_style(t, &st_danger_text, 0);
+    lv_obj_set_style_text_font(t, app_font_scaled(16), 0);
+    lv_obj_set_width(t, win_w - 32);            /* 限宽折行，否则长句冲出窗口 */
+    lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_msg = lv_label_create(s_win);
+    lv_label_set_text(s_msg, "此操作不可撤销");
+    lv_obj_add_style(s_msg, &st_warn_text, 0);
+    lv_obj_set_style_text_font(s_msg, app_font_scaled(14), 0);
+
+    const int32_t btn_y = win_h - 16 - 44 - 16;   /* 用常量算，勿回查 s_win 坐标 */
+    const int32_t btn_x = (win_w - 32 - 280) / 2 + 16;
+
+    lv_obj_t * cc = lv_button_create(s_win);
+    lv_obj_set_size(cc, 136, 44);
+    lv_obj_set_pos(cc, btn_x, btn_y);
+    lv_obj_set_floating(cc, true);
+    lv_obj_add_style(cc, &st_ghost_btn, 0);
+    lv_obj_add_event_cb(cc, dlg_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * ccl = lv_label_create(cc);
+    lv_label_set_text(ccl, "取消");
+    lv_obj_set_style_text_font(ccl, app_font_scaled(14), 0);
+    lv_obj_center(ccl);
+
+    lv_obj_t * yy = ui_icon_text_button(s_win, LV_SYMBOL_TRASH, "确认清空",
+                                        136, 44, &st_danger_btn,
+                                        lv_color_white(), do_clear_face_cb, NULL);
+    lv_obj_set_floating(yy, true);
+    lv_obj_set_pos(yy, btn_x + 144, btn_y);
 }
 
 /* ---------------- 恢复出厂 ---------------- */
@@ -806,6 +941,7 @@ static void admin_verify_open(admin_action_t act)
     if (act == ADMIN_ACT_SAVE_POLICY)  why = "修改安全策略需管理员验证";
     else if (act == ADMIN_ACT_FACTORY) why = "恢复出厂需管理员验证";
     else if (act == ADMIN_ACT_VIRTUAL_PIN) why = "切换虚位密码需管理员验证";
+    else if (act == ADMIN_ACT_CLEAR_FACE)  why = "清空模组人脸需管理员验证";
 
     s_av_msg = lv_label_create(s_av_win);
     lv_label_set_text(s_av_msg, why);
@@ -943,6 +1079,9 @@ static void admin_verify_dispatch(void)
     case ADMIN_ACT_VIRTUAL_PIN:
         /* 虚位密码开关落盘：后台线程写 users.json，完成后回调刷新控件 */
         vpin_write_async(s_vpin_pending);
+        break;
+    case ADMIN_ACT_CLEAR_FACE:
+        dlg_clear_face();       /* 验证通过后再弹确认框（破坏性操作双重确认） */
         break;
     case ADMIN_ACT_NONE:
     default:
