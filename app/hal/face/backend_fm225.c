@@ -396,13 +396,24 @@ static bool fm225_enroll_issue(uint32_t now_ms)
     uint8_t p[35];
     memset(p, 0, sizeof(p));
     copy_name_utf8((char *)(p + 1), 32, s_enroll_name);
-    /* 可切换录入模式：单帧 0x00 / 五向 0x1F（见 s_enroll_5way 注释） */
-    p[33] = s_enroll_5way ? 0x1F : 0x00;
-    /* 超时：五向要依次采集五个朝向，10s 未必够（手册说 timeout 最大 255s），
+    /* ★ 命令码与 face_dir **都要按模式选**（依据：桌面 FM225 测试工具的命令表
+     *  + 其应答解析，两者一致）：
+     *   单帧 → 0x1D ENROLL_SINGLE，face_dir = 0x01（正脸）；**应答即最终结果**
+     *   五向 → 0x13 ENROLL_5，     face_dir = 0x1F（位掩码）；**应答是单方向进度**
+     *
+     * 原实现对两种模式**一律发 0x13** 且单帧时 face_dir=0 —— 等于拿五向命令做单帧：
+     * 模组回的是「某个方向采成功了」的进度帧（uid 还是未分配的 0xFFFF 占位），
+     * 而 app 把它当成「录入完成」，于是写下一个指向不存在用户的假绑定 ——
+     * 刷脸永远匹配不上、自己删不掉，只能等启动对账标失效。
+     * 这正是「app 显示录入成功、模组里却一个用户都没有」的根因。 */
+    const uint8_t enroll_cmd = s_enroll_5way ? FM225_CMD_ENROLL
+                                             : FM225_CMD_ENROLL_SINGLE;
+    p[33] = s_enroll_5way ? 0x1F : 0x01;
+    /* 超时：五向要依次采集五个朝向，10s 未必够（手册允许最大 255s），
      * 这里给五向单独一个更宽的值，单帧保持原值不变。 */
     p[34] = s_enroll_5way ? FM225_ENROLL_TIMEOUT_5WAY : FM225_ENROLL_TIMEOUT_S;
 
-    safe_err_t e = fm225_send_cmd(FM225_CMD_ENROLL, p, sizeof(p));
+    safe_err_t e = fm225_send_cmd(enroll_cmd, p, sizeof(p));
     s_enroll_req = false;
 
     if(e != SAFE_OK) {
@@ -787,13 +798,26 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
          * 的 REARM 退避统一续发，轮间强制留静默间隔（模组一次 VERIFY 只出一组结果）。 */
         break;
     }
-    case FM225_CMD_ENROLL: {
+    case FM225_CMD_ENROLL:          /* 五向（进度帧） */
+    case FM225_CMD_ENROLL_SINGLE: { /* 单脸（最终结果） */
         s_state = FM225_IDLE;
         face_enroll_result_t r;
         memset(&r, 0, sizeof(r));
         r.err = mr_to_err(f->result);
         if(r.err == SAFE_OK && f->data_len >= 2) {
             r.face_id = (int32_t)(((uint16_t)f->data[0] << 8) | f->data[1]);
+            /* ★ uid 合法性校验（2026-09-20 真机实测）：模组可能回 mr=SUCCESS
+             * 但 uid = 0xFFFF(65535) —— 那是它「尚未分配」的占位值（实测此时
+             * 模组用户清单为 0 个）。若不在此拦下，本地会凭空多出一个
+             * face_id=65535 的假绑定：刷脸永远匹配不上（模组没这个用户），
+             * 用户自己也删不掉，只能等启动对账标失效。
+             * 这是「把伪成功当成功」，不是「记录一次失败」，必须在源头拒绝。 */
+            if(r.face_id <= 0 || r.face_id == 0xFFFF) {
+                printf("[fm225] enroll 应答的 uid=%d 无效（0xFFFF/0 是模组「未分配」"
+                       "占位值）→ 判为失败，不写回绑定\n", (int)r.face_id);
+                r.face_id = -1;
+                r.err     = SAFE_ERR_FAIL;
+            }
         } else {
             r.face_id = -1;
         }
@@ -983,7 +1007,7 @@ static void fm225_session_giveup(void)
      * （手册 §3）。清场命令自己不应答也无所谓，故走静默下发。 */
     fm225_send_silent(FM225_CMD_RESET);
 
-    if(cmd == FM225_CMD_ENROLL) {
+    if(cmd == FM225_CMD_ENROLL || cmd == FM225_CMD_ENROLL_SINGLE) {
         printf("[fm225] ENROLL 会话超时：%ums 无应答，放弃本轮（不重发）——"
                "疑似 ENROLL 被抢占或命令未落地；会话期间模组上报人脸状态 %u 条"
                "（末次 state=%d）\n",
@@ -1057,7 +1081,8 @@ static void fm225_tick(uint32_t now_ms)
      *   放弃并上报（ENROLL → FACE_EV_ENROLL_DONE(TIMEOUT)；VERIFY → FACE_EV_ERROR），
      *   由用户/上层重新发起，比「看起来在重试其实在互相踩」诚实。 */
     const bool     session_cmd = (s_pending_cmd == FM225_CMD_VERIFY ||
-                                  s_pending_cmd == FM225_CMD_ENROLL);
+                                  (s_pending_cmd == FM225_CMD_ENROLL ||
+                                  s_pending_cmd == FM225_CMD_ENROLL_SINGLE));
     const uint32_t pending_timeout_ms = session_cmd ? FM225_SESSION_TIMEOUT_MS
                                                     : FM225_REPLY_TIMEOUT_MS;
     if(s_pending_len > 0 && s_started &&

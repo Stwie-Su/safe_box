@@ -43,7 +43,13 @@ extern "C" {
 #define FM225_CMD_RESET         0x10u
 #define FM225_CMD_GET_STATUS    0x11u
 #define FM225_CMD_VERIFY        0x12u
+/* 0x13 ENROLL_5：五向录入。face_dir 是位掩码；**应答是「单方向成功」的进度**，
+ *   需累计到 0x1F 才算全部完成（会有多帧应答，不是一次定案）。 */
 #define FM225_CMD_ENROLL        0x13u
+/* 0x1D ENROLL_SINGLE：单脸录入。face_dir = 0x01（正脸）；**应答即最终结果**。
+ *   依据：桌面 FM225 测试工具（fm225_debug_platform）的命令表与应答解析，
+ *   两处一致 —— 单脸用 0x1D、五向用 0x13，二者应答语义不同，不可混用。 */
+#define FM225_CMD_ENROLL_SINGLE 0x1Du
 #define FM225_CMD_DELETE_USER   0x20u
 #define FM225_CMD_DELETE_ALL    0x21u
 /* 查询类命令（对账用，FR-21 防线 3）：

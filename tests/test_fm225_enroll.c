@@ -11,7 +11,11 @@
  *   1) 录入受理与下发分离：enroll() 只受理，ENROLL 帧要等「模组空闲 + 静默窗口」；
  *   2) 录入会话期间独占：VERIFY / DELETE / 第二次 ENROLL 一律 SAFE_ERR_BUSY，
  *      且对账查询（0x24）不得插入；
- *   3) 会话型命令不重发：ENROLL 下发后不管过多久都只有 1 条 0x13 帧；
+ *   0) 录入命令按模式区分（2026-09-20 修正）：单帧 = 0x1D ENROLL_SINGLE、
+ *      五向 = 0x13 ENROLL_5。**本测试全程单帧**，故断言 0x1D。
+ *      原实现一律发 0x13，等于用五向命令做单帧，模组回的是「单方向进度」帧，
+ *      却被当成录入完成 —— 那正是「app 显示成功、模组一个用户都没有」的根因。
+ *   3) 会话型命令不重发：ENROLL 下发后不管过多久都只有 1 条 0x1D 帧（单帧录入命令）；
  *   4) 静默无应答兜底：模组永不回应答时，后端在会话超时点放弃并上报
  *      FACE_EV_ENROLL_DONE(SAFE_ERR_TIMEOUT)，而不是挂到外层 30s 兜底；
  *      录入以失败收尾时用 0x23 FACE RESET 清录入残留状态（成功时**不**发）。
@@ -224,20 +228,20 @@ static void test_enroll_exclusive(void)
     t_tick();                                   /* 受理后第一个 tick：静默窗口未过 */
     t_drain();
     t_parse(&t);
-    CHECK(t_count(&t, FM225_CMD_ENROLL) == 0);  /* ★ 没把 ENROLL 插到在途命令上 */
+    CHECK(t_count(&t, FM225_CMD_ENROLL_SINGLE) == 0);  /* ★ 没把 ENROLL 插到在途命令上 */
     CHECK(t_count(&t, FM225_CMD_RESET) == 1);   /* 清场：0x10 MID_RESET */
 
     /* 静默窗口未过（100ms < 300ms）：仍不下发 */
     g_adv += 100;
     t_tick(); t_drain(); t_parse(&t);
-    CHECK(t_count(&t, FM225_CMD_ENROLL) == 0);
+    CHECK(t_count(&t, FM225_CMD_ENROLL_SINGLE) == 0);
 
     /* 窗口过了（500ms）：模组已空闲 → 下发，且只此一条 */
     g_adv += 400;
     t_tick(); t_drain(); t_parse(&t);
-    CHECK(t_count(&t, FM225_CMD_ENROLL) == 1);
+    CHECK(t_count(&t, FM225_CMD_ENROLL_SINGLE) == 1);
     /* ENROLL 必须排在清场命令之后（顺序即「先清场再录入」） */
-    CHECK(t_first(&t, FM225_CMD_ENROLL) > t_first(&t, FM225_CMD_RESET));
+    CHECK(t_first(&t, FM225_CMD_ENROLL_SINGLE) > t_first(&t, FM225_CMD_RESET));
 
     /* 载入会话期间：其它会话型命令一律不受理（否则会互相抢占） */
     CHECK(g_b->verify_once()  == SAFE_ERR_BUSY);
@@ -250,7 +254,7 @@ static void test_enroll_exclusive(void)
     g_adv += 4000;
     t_tick(); t_drain(); t_parse(&t);
     CHECK(t_count(&t, FM225_CMD_GET_ALL_USERID) == 1);
-    CHECK(t_count(&t, FM225_CMD_ENROLL) == 1);
+    CHECK(t_count(&t, FM225_CMD_ENROLL_SINGLE) == 1);
 }
 
 /* ---------------- 用例 2：静默无应答兜底（不重发 + 超时上报） ---------------- */
@@ -265,8 +269,8 @@ static void test_enroll_silent_no_reply(void)
     t_tick(); t_drain(); t_pump();
     t_parse(&t);
 
-    /* ★ 不重发：从下发到放弃，0x13 始终只有 1 条 */
-    CHECK(t_count(&t, FM225_CMD_ENROLL) == 1);
+    /* ★ 不重发：从下发到放弃，0x1D（单帧录入）始终只有 1 条 */
+    CHECK(t_count(&t, FM225_CMD_ENROLL_SINGLE) == 1);
     /* 放弃时把模组拉回 STANDBY 的 0x10（用例 1 的清场 1 条 + 本条） */
     CHECK(t_count(&t, FM225_CMD_RESET) == 2);
 
@@ -302,23 +306,25 @@ static void test_enroll_payload_and_face_reset(void)
     t_tick(); t_drain();
     txlog_t t;
     t_parse(&t);
-    CHECK(t_count(&t, FM225_CMD_ENROLL) == 1);
+    CHECK(t_count(&t, FM225_CMD_ENROLL_SINGLE) == 1);
 
     /* 载荷校验（手册 §六 H>>M：admin + user_name[32] + face_dir + timeout = 35B） */
-    int idx = t_first(&t, FM225_CMD_ENROLL);
+    int idx = t_first(&t, FM225_CMD_ENROLL_SINGLE);
     CHECK(idx >= 0);
     if(idx >= 0) {
         const logframe_t * f = &t.f[idx];
         CHECK(f->data_len == 35);
         CHECK(f->data[0] == 0x00);                       /* admin */
         CHECK(memcmp(f->data + 1, "carol", 5) == 0);     /* user_name */
-        CHECK(f->data[33] == 0x00);                      /* face_dir = 默认正向 */
+        /* 单帧模式的 face_dir = 0x01（正脸）。原断言写 0x00 是锁定了旧行为：
+     * 旧实现两种模式都发 0x13 且单帧传 0，等于用五向命令做单帧。 */
+    CHECK(f->data[33] == 0x01);                      /* face_dir = 默认正向 */
         CHECK(f->data[34] == 10);                        /* timeout = 10s */
     }
 
     /* 模组回「录入超时」（真机故障现场的那个码：mr=0x0D FAILED4_TIMEOUT） */
     g_ev_n = 0;
-    t_reply(FM225_CMD_ENROLL, FM225_MR_FAILED4_TIMEOUT, NULL, 0);
+    t_reply(FM225_CMD_ENROLL_SINGLE, FM225_MR_FAILED4_TIMEOUT, NULL, 0);
     t_drain(); t_pump();
     t_parse(&t);
 
@@ -353,13 +359,13 @@ static void test_enroll_success_no_face_reset(void)
     g_ev_n = 0;
     {
         const uint8_t uid[2] = { 0x00, 0x07 };          /* user_id = 7 */
-        t_reply(FM225_CMD_ENROLL, FM225_MR_SUCCESS, uid, 2);
+        t_reply(FM225_CMD_ENROLL_SINGLE, FM225_MR_SUCCESS, uid, 2);
     }
     t_drain(); t_pump();
     txlog_t t;
     t_parse(&t);
 
-    CHECK(t_count(&t, FM225_CMD_ENROLL) == 1);
+    CHECK(t_count(&t, FM225_CMD_ENROLL_SINGLE) == 1);
     CHECK(t_count(&t, FM225_CMD_FACE_RESET) == 0);      /* ★ 成功路径不发 0x23 */
 
     const ev_face_event_t * e = t_find_enroll_done();
