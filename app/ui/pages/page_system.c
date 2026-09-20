@@ -525,6 +525,12 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     (void)cf;
 
     refresh_policy();
+    /* 编辑态初值 = 已落盘值：这样「点一下」就是从当前状态取反，语义正确。 */
+    {
+        const safe_policy_t * pol0 = user_policy();
+        s_vpin_pending = pol0->virtual_pin_enable;
+        s_mode_pending = pol0->enroll_five_way;
+    }
     vpin_refresh();
     mode_refresh();
     lv_timer_create(clock_timer_cb, 1000, NULL);
@@ -692,8 +698,8 @@ static void mode_write_async(bool five_way)
 static void mode_refresh(void)
 {
     if (!s_mode_sw) return;
-    const safe_policy_t * pol = user_policy();
-    bool five = pol->enroll_five_way;
+    /* 显示**待定值**（理由同 vpin_refresh）。 */
+    bool five = s_mode_pending;
 
     if (five) lv_obj_add_state(s_mode_sw, LV_STATE_CHECKED);
     else      lv_obj_remove_state(s_mode_sw, LV_STATE_CHECKED);
@@ -705,8 +711,9 @@ static void mode_refresh(void)
 static void mode_click_cb(lv_event_t * e)
 {
     (void)e;
-    s_mode_pending = !user_policy()->enroll_five_way;   /* 目标值 = 取反 */
-    admin_verify_open(ADMIN_ACT_ENROLL_MODE);
+    /* 同 vpin：只改待定值 + 刷新显示，鉴权与落盘交给「保存策略」。 */
+    s_mode_pending = !s_mode_pending;
+    mode_refresh();
 }
 
 static void vpin_write_async(bool enable)
@@ -721,8 +728,9 @@ static void vpin_write_async(bool enable)
 static void vpin_refresh(void)
 {
     if (!s_vpin_sw) return;
-    const safe_policy_t * pol = user_policy();
-    bool en = pol->virtual_pin_enable;
+    /* 显示**待定值**而非已落盘值 —— 编辑态下用户改完就该立刻看到开关变化，
+     * 而是否真的生效要等「保存策略」验证通过。 */
+    bool en = s_vpin_pending;
 
     if (en) lv_obj_add_state(s_vpin_sw, LV_STATE_CHECKED);
     else    lv_obj_remove_state(s_vpin_sw, LV_STATE_CHECKED);
@@ -734,9 +742,13 @@ static void vpin_refresh(void)
 static void vpin_click_cb(lv_event_t * e)
 {
     (void)e;
-    const safe_policy_t * pol = user_policy();
-    s_vpin_pending = !pol->virtual_pin_enable;   /* 目标值 = 取反 */
-    admin_verify_open(ADMIN_ACT_VIRTUAL_PIN);
+    /* ★ 2026-09-20 改为「编辑态」语义（用户指出）：点击开关**只改待定值**，
+     * 不立即弹管理员验证；真正的鉴权 + 落盘统一由「保存策略」按钮触发一次。
+     * 好处：①改多个开关不必重复输 PIN；②与「保存策略」的心智一致
+     * （按钮上写着保存，就该由它负责落盘）。
+     * 取反基于 **pending**（不是实际值）—— 否则连点两次会得到同一个值。 */
+    s_vpin_pending = !s_vpin_pending;
+    vpin_refresh();
 }
 
 /* ---------------- 清空模组人脸 ---------------- */
@@ -1147,21 +1159,26 @@ static void admin_verify_dispatch(void)
 {
     switch (s_admin_act) {
     case ADMIN_ACT_SAVE_POLICY:
-        /* 策略落盘（重写 users.json）放后台；日志异步追加 */
+        /* 一次鉴权，落盘**全部**编辑态改动（数值策略 + 虚位密码 + 录入模式）。
+         * 三个写操作都经 worker（单线程串行），每个内部都是完整的
+         * 「load → 改 → save」，串行执行不会互相覆盖；三者改的又是不同字段，
+         * 因此最终都会生效。 */
         astore_set_policy(s_pending_max_failed, s_pending_lock_secs, policy_saved_done);
+        vpin_write_async(s_vpin_pending);
+        mode_write_async(s_mode_pending);
         break;
     case ADMIN_ACT_FACTORY:
         dlg_factory();          /* 验证通过后再弹恢复出厂确认框（破坏性操作双重确认） */
         break;
     case ADMIN_ACT_VIRTUAL_PIN:
-        /* 虚位密码开关落盘：后台线程写 users.json，完成后回调刷新控件 */
-        vpin_write_async(s_vpin_pending);
+        /* 已改由「保存策略」统一处理（编辑态 + 一次鉴权）。保留分支仅为
+         * 兼容既有枚举，不再由点击直接触发。 */
         break;
     case ADMIN_ACT_CLEAR_FACE:
         dlg_clear_face();       /* 验证通过后再弹确认框（破坏性操作双重确认） */
         break;
     case ADMIN_ACT_ENROLL_MODE:
-        mode_write_async(s_mode_pending);   /* 后台落盘 + 同步后端 */
+        /* 同上：改由「保存策略」统一处理。 */
         break;
     case ADMIN_ACT_NONE:
     default:
