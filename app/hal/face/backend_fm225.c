@@ -147,6 +147,7 @@ static uint8_t fm225_next_dir(void);
 static volatile int16_t s_pose_yaw;
 static volatile int16_t s_pose_pitch;
 static volatile int16_t s_pose_roll;
+static volatile int16_t s_face_l, s_face_t, s_face_r, s_face_b;  /* 人脸框（NOTE v[1..4]）*/
 
 /* ---------- NOTE 明细诊断（env SAFE_FM225_NOTE_DEBUG，默认关） ----------
  * 用途：定位「模组进了录入会话却看不到脸」这类问题——需要看模组**到底上报了什么**：
@@ -476,6 +477,16 @@ static int32_t fm225_face_pose(int16_t * yaw, int16_t * pitch, int16_t * roll)
     return 0;
 }
 
+/* 人脸框读取（与 s_face_state 同源、同一次 NOTE 更新） */
+static int32_t fm225_face_box(int16_t * l, int16_t * t, int16_t * r, int16_t * b)
+{
+    if (l) *l = s_face_l;
+    if (t) *t = s_face_t;
+    if (r) *r = s_face_r;
+    if (b) *b = s_face_b;
+    return 0;
+}
+
 static bool fm225_enroll_five_way(void)
 {
     return s_enroll_5way;
@@ -734,6 +745,14 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
                     ro = (int16_t)((uint16_t)f->data[15] | ((uint16_t)f->data[16] << 8));
                 }
                 s_pose_yaw = y; s_pose_pitch = pi; s_pose_roll = ro;
+                /* 人脸框（与姿态同源、同一次 NOTE）：v[1..4] = left/top/right/bottom，
+                 * 偏移同姿态的 1 + k*2（v[5]=data[11..12] 已验证与 yaw 一致）。 */
+                if(f->data_len >= 11) {
+                    s_face_l = (int16_t)((uint16_t)f->data[3]  | ((uint16_t)f->data[4]  << 8));
+                    s_face_t = (int16_t)((uint16_t)f->data[5]  | ((uint16_t)f->data[6]  << 8));
+                    s_face_r = (int16_t)((uint16_t)f->data[7]  | ((uint16_t)f->data[8]  << 8));
+                    s_face_b = (int16_t)((uint16_t)f->data[9]  | ((uint16_t)f->data[10] << 8));
+                }
             }
             if(s_note_dbg) {
                 /* 完整解析 LE int16 × 8：v[0]=state, v[1..4]=left/top/right/bottom,
@@ -1302,6 +1321,7 @@ static const face_backend_t backend = {
     .module_health = fm225_module_health,
     .face_state   = fm225_face_state,
     .face_pose    = fm225_face_pose,
+    .face_box     = fm225_face_box,
     .enroll_five_way = fm225_enroll_five_way,
     .enroll_dir_mask = fm225_enroll_dir_mask,
     .enroll_next_dir = fm225_enroll_next_dir,

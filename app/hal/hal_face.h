@@ -148,6 +148,8 @@ int32_t face_service_face_state(void);
  * 返回 0 = 取到；< 0 = 后端无姿态概念或未上报。
  * 与 face_service_face_state() 属于**同一帧的两个侧面**，调用方应成对读取。 */
 int32_t face_service_face_pose(int16_t * yaw, int16_t * pitch, int16_t * roll);
+/* 人脸框（left/top/right/bottom），与 face_state 同一次 NOTE 更新；不支持返回 -1。 */
+int32_t face_service_face_box(int16_t * l, int16_t * t, int16_t * r, int16_t * b);
 
 /* 当前录入模式是否为五向（face_direction=0x1F）。false = 单帧。
  * 由后端 env SAFE_FACE_ENROLL_5WAY 决定，供录入页切换引导文案。 */

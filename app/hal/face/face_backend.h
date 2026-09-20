@@ -64,6 +64,9 @@ typedef struct face_backend {
      * 返回 0 = 取到；< 0 = 该后端无姿态概念。**可选接口**，可为 NULL。
      * 语义：NOTE NID_FACE_STATE 的 8 个 int16 中的第 6/7/8 个（小端，实测）。 */
     int32_t (*face_pose)(int16_t * yaw, int16_t * pitch, int16_t * roll);
+    /* 人脸框（NOTE v[1..4] = left/top/right/bottom）。**可选**，NULL 视为不支持。
+     * 可用于在预览上画框、或提示「太远（框太小）/ 太近（框太大）」。 */
+    int32_t (*face_box)(int16_t * l, int16_t * t, int16_t * r, int16_t * b);
     /* 当前录入模式是否为五向。**可选接口**，NULL 视为单帧。 */
     bool (*enroll_five_way)(void);
     /* 五向录入进度查询（**可选**，NULL 视为 0）：

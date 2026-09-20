@@ -982,7 +982,30 @@ static void face_status_timer_cb(lv_timer_t * t)
     else if (!face_service_running()) st = "人脸后端未运行 · 请检查设备";
     else if (!live)         st = "等待摄像头出帧…";
     else                    st = face_status_from_result();
-    if (s_face_status != NULL) lv_label_set_text(s_face_status, st);
+
+    /* ★ 把模组**实时上报**的信息一并显示出来（用户要求「窗口应显示所有信息」）。
+     * NOTE 帧带 8 个 int16：state（人脸状态）+ 人脸框 L/T/R/B + 姿态 yaw/pitch/roll。
+     * 以前这些只有开 SAFE_FM225_NOTE_DEBUG 才能在终端看到，界面上完全不可见；
+     * 现在只要相机在出帧且后端在跑，就实时显示在同一行里 ——
+     * ①便于观察模组到底在不在看脸；②为「转到位」阈值标定提供依据。 */
+    if (s_face_status != NULL) {
+        if (live && !backend_none && face_service_running()) {
+            char buf[160];
+            int16_t l = 0, t = 0, r = 0, b = 0, yaw = 0, pit = 0, rol = 0;
+            char boxs[40] = "";
+            char poses[48] = "";
+            if (face_service_face_box(&l, &t, &r, &b) == 0 && (l | t | r | b))
+                snprintf(boxs, sizeof(boxs), " 框(%d,%d,%d,%d)", l, t, r, b);
+            if (face_service_face_pose(&yaw, &pit, &rol) == 0)
+                snprintf(poses, sizeof(poses), " yaw=%d pitch=%d roll=%d",
+                         yaw, pit, rol);
+            snprintf(buf, sizeof(buf), "%s |状态=%d%s%s", st,
+                     (int)face_service_face_state(), boxs, poses);
+            lv_label_set_text(s_face_status, buf);
+        } else {
+            lv_label_set_text(s_face_status, st);
+        }
+    }
 
     /* ---- 画面区占位 ---- */
     if (live) {

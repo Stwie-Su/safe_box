@@ -245,6 +245,12 @@ int32_t face_service_face_pose(int16_t * yaw, int16_t * pitch, int16_t * roll)
     return s_backend->face_pose(yaw, pitch, roll);
 }
 
+int32_t face_service_face_box(int16_t * l, int16_t * t, int16_t * r, int16_t * b)
+{
+    if (s_backend == NULL || s_backend->face_box == NULL) return -1;
+    return s_backend->face_box(l, t, r, b);
+}
+
 void face_service_set_enroll_five_way(bool five_way)
 {
     if (s_backend == NULL || s_backend->set_enroll_five_way == NULL) return;

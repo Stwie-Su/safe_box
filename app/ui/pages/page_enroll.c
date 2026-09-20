@@ -365,12 +365,18 @@ static void status_timer_cb(lv_timer_t * t)
     if (enrolling) {
         int16_t yaw = 0, pitch = 0, roll = 0;
         char sb[96];
+        /* 同验证页：把模组实时上报的**全部**信息都摆出来（状态 + 人脸框 + 姿态）。 */
+        int16_t l = 0, t = 0, rr = 0, bb = 0;
+        char boxs[40] = "";
+        if (face_service_face_box(&l, &t, &rr, &bb) == 0 && (l | t | rr | bb))
+            snprintf(boxs, sizeof(boxs), " 框(%d,%d,%d,%d)", l, t, rr, bb);
         if (face_service_face_pose(&yaw, &pitch, &roll) == 0) {
-            snprintf(sb, sizeof(sb), "状态=%d  姿态 yaw=%d pitch=%d roll=%d",
-                     (int)face_service_face_state(), (int)yaw, (int)pitch, (int)roll);
+            snprintf(sb, sizeof(sb), "状态=%d%s  姿态 yaw=%d pitch=%d roll=%d",
+                     (int)face_service_face_state(), boxs,
+                     (int)yaw, (int)pitch, (int)roll);
         } else {
-            snprintf(sb, sizeof(sb), "状态=%d（模组未上报姿态）",
-                     (int)face_service_face_state());
+            snprintf(sb, sizeof(sb), "状态=%d%s（模组未上报姿态）",
+                     (int)face_service_face_state(), boxs);
         }
         lv_label_set_text(s_sub, sb);
     } else {
