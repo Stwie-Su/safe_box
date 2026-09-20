@@ -251,8 +251,13 @@ static void dlg_psk(void)
     lv_obj_set_style_bg_opa(s_ov, LV_OPA_50, 0);
     lv_obj_set_style_border_width(s_ov, 0, 0);
 
+    /* ★ 尺寸用常量算：按钮坐标要拿它做绝对定位，而**不能**在 set_size 之后
+     * 回查 lv_obj_get_height(s_win) —— 刚建的对象要到下一次布局才有 coords，
+     * 此处查询恒为 0，按钮会落到负坐标画不出来（page_users.c 的
+     * dlg_bottom_btn_xy 上方早有同一陷阱的注释）。 */
+    const int32_t win_w = 380, win_h = 200;
     s_win = lv_obj_create(s_ov);
-    lv_obj_set_size(s_win, 380, 200);
+    lv_obj_set_size(s_win, win_w, win_h);
     lv_obj_add_style(s_win, &st_panel, 0);
     lv_obj_set_style_radius(s_win, 16, 0);
     lv_obj_align(s_win, LV_ALIGN_TOP_MID, 0, 60);
@@ -266,6 +271,9 @@ static void dlg_psk(void)
     lv_label_set_text(t, tbuf);
     lv_obj_add_style(t, &st_text, 0);
     lv_obj_set_style_text_font(t, app_font_scaled(20), 0);
+    /* 限宽折行：SSID 可能很长，不限宽会被 LVGL 排成单行冲出窗口右边界 */
+    lv_obj_set_width(t, win_w - 32);
+    lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
 
     s_msg = lv_label_create(s_win);
     lv_label_set_text(s_msg, " ");
@@ -286,8 +294,8 @@ static void dlg_psk(void)
     lv_obj_add_event_cb(ta, kb_focus_cb, LV_EVENT_FOCUSED, NULL);
 
     /* 底部操作按钮：FLOATING 脱离 flex 布局 + 绝对定位（见 page_users 同样注释） */
-    const int32_t btn_y = lv_obj_get_height(s_win) - 16 - 44 - 16;
-    const int32_t btn_x = (lv_obj_get_width(s_win) - 32 - 300) / 2 + 16;
+    const int32_t btn_y = win_h - 16 - 44 - 16;
+    const int32_t btn_x = (win_w - 32 - 300) / 2 + 16;
 
     lv_obj_t * cc = lv_button_create(s_win);
     lv_obj_set_size(cc, 146, 44);

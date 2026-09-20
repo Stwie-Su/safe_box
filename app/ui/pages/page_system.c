@@ -675,8 +675,12 @@ static void dlg_factory(void)
     lv_obj_set_style_border_width(s_ov, 0, 0);
     lv_obj_set_scrollable(s_ov, false);
 
+    /* ★ 尺寸一律用常量算，**不要**在 set_size 之后回查 lv_obj_get_height(s_win)：
+     * 刚创建的对象要到下一次布局才有 coords，此处查询恒为 0，会让按钮算到负坐标
+     * （page_users.c 的 dlg_bottom_btn_xy 上方有同一个陷阱的注释，那边早就改对了）。 */
+    const int32_t win_w = 380, win_h = 200;
     s_win = lv_obj_create(s_ov);
-    lv_obj_set_size(s_win, 380, 200);
+    lv_obj_set_size(s_win, win_w, win_h);
     lv_obj_add_style(s_win, &st_panel, 0);
     lv_obj_set_style_radius(s_win, 16, 0);
     lv_obj_center(s_win);
@@ -689,6 +693,11 @@ static void dlg_factory(void)
     lv_label_set_text(t, "恢复出厂将清除全部用户 / 网络 / 日志");
     lv_obj_add_style(t, &st_danger_text, 0);
     lv_obj_set_style_text_font(t, app_font_scaled(16), 0);
+    /* ★ 必须限宽，否则 LVGL 让标签按内容自适应成**单行**，长句直接冲出窗口右边界
+     *   （用户 2026-09-20 截图：「...全部用户 / 网络 / 日」被截断，末尾看不见）。
+     *   限宽后自动折行，再居中显示。 */
+    lv_obj_set_width(t, win_w - 32);
+    lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
 
     s_msg = lv_label_create(s_win);
     lv_label_set_text(s_msg, " ");
@@ -696,8 +705,8 @@ static void dlg_factory(void)
     lv_obj_set_style_text_font(s_msg, app_font_scaled(14), 0);
 
     /* 底部操作按钮：FLOATING 脱离 flex 布局 + 绝对定位（见 page_users 同样注释） */
-    const int32_t btn_y = lv_obj_get_height(s_win) - 16 - 44 - 16;
-    const int32_t btn_x = (lv_obj_get_width(s_win) - 32 - 280) / 2 + 16;
+    const int32_t btn_y = win_h - 16 - 44 - 16;
+    const int32_t btn_x = (win_w - 32 - 280) / 2 + 16;
 
     lv_obj_t * cc = lv_button_create(s_win);
     lv_obj_set_size(cc, 136, 44);
