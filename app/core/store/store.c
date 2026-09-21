@@ -1357,7 +1357,27 @@ bool store_init(void)
     char path[560];
     file_path(USERS_FILE, path, sizeof(path));
     FILE *f = fopen(path, "rb");
-    if (f) { fclose(f); return true; }
+    if (f) {
+        fclose(f);
+        /* ★ 启动时就把 policy 装进内存（2026-09-21 修）。
+         *
+         * 此前这里直接 return —— g_policy 保持**编译期默认值**
+         * （`{4,8,5,30,3,10,true,false}`，其中 enroll_five_way=false），
+         * 直到 UI/业务第一次调用 load_users() 才把盘上的真值读进来。
+         * 后果：app_main 里那句「把持久化录入模式同步给后端」在**启动早期**执行，
+         * 拿到的是默认的 false → 后端被设成单帧；而界面上明明存着五向。
+         * 用户实测：users.json 里 enroll_five_way=true，启动日志却是
+         * 「录入模式切换 → 单帧」—— 正是本行造成的。
+         *
+         * 之所以放在 init 而不是推迟同步调用点：**初始化内存态本来就是
+         * store_init 的职责**，任何「启动早期读 policy」的代码都该拿到真值，
+         * 不该逐处去规避。 */
+        safe_user_t *us = NULL;
+        int n = 0;
+        load_users(&us, &n, NULL);   /* 副作用即填充 g_policy */
+        user_list_free(us);
+        return true;
+    }
 
     safe_user_t boot;
     memset(&boot, 0, sizeof(boot));
