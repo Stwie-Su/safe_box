@@ -398,6 +398,9 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_obj_set_style_radius(s_box_obj, 2, 0);
     lv_obj_set_hidden(s_box_obj, true);
     s_box_visible = false;
+    /* ★ 必须移到最上层：s_canvas 在本对象**之后**创建（后创建者在摻绘上层），
+     *   不移上去会被画布整层盖住 —— 用户实测「框会出但框不住人脸」实为此因。 */
+    lv_obj_move_foreground(s_box_obj);
 
     /* 预览画布：尺寸由 SIZE_CHANGED 回调里设置，初始先不绑 buffer */
     s_canvas = lv_canvas_create(s_preview);
