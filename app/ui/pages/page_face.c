@@ -402,7 +402,6 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
         lv_obj_set_hidden(s_box_seg[i], true);
     }
     s_box_visible = false;
-    printf("[FACE-BOX] 画框已启用（bg 矩形版 + 480×640 标定）\n");
 
     /* 预览画布：尺寸由 SIZE_CHANGED 回调里设置，初始先不绑 buffer */
     s_canvas = lv_canvas_create(s_preview);
@@ -990,14 +989,7 @@ static void face_box_update(void)
     if (s_box_seg[0] == NULL) return;
     int16_t l = 0, t = 0, r = 0, b = 0;
 
-    /* 调试开关：SAFE_BOX_FAKE=1 时注入固定框（无人脸也能验证渲染链路）。 */
-    int32_t bret;
-    if (getenv("SAFE_BOX_FAKE") != NULL) {
-        l = 100; t = 150; r = 400; b = 500;
-        bret = 0;
-    } else {
-        bret = face_service_face_box(&l, &t, &r, &b);
-    }
+    const int32_t bret = face_service_face_box(&l, &t, &r, &b);
 
     bool bad = (bret != 0) || ((l | t | r | b) == 0);
     if (!bad) {
