@@ -344,24 +344,21 @@ static void face_box_update(void)
         if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
         return;
     }
-    /* 旋转后的矩形（源 320×240 → 旋转后宽高互换/不变） */
-    int32_t l2, t2, r2, b2;
-    if (s_rot_deg == 90)       { l2 = CAP_H - 1 - b;  t2 = l;          r2 = CAP_H - 1 - t;  b2 = r; }
-    else if (s_rot_deg == 270) { l2 = t;              t2 = CAP_W - 1 - r; r2 = b;          b2 = CAP_W - 1 - l; }
-    else if (s_rot_deg == 180) { l2 = CAP_W - 1 - r;  t2 = CAP_H - 1 - b; r2 = CAP_W - 1 - l;  b2 = CAP_H - 1 - t; }
-    else                       { l2 = l; t2 = t; r2 = r; b2 = b; }
-    const int32_t src_w = (s_rot_deg == 90 || s_rot_deg == 270) ? CAP_H : CAP_W;
-    const int32_t src_h = (s_rot_deg == 90 || s_rot_deg == 270) ? CAP_W : CAP_H;
-    if (s_vid_w <= 0 || s_vid_h <= 0 || src_w <= 0 || src_h <= 0) {
+    if (s_vid_w <= 0 || s_vid_h <= 0) {
         if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
         return;
     }
     /* ★ 先乘后除（int64 中间量）：整数除法先算 kx=vid_w/src_w 会**丢掉全部小数**，
      *   视频矩形比源小的时候 kx 直接得 0，框宽高随之归零、根本画不出来。 */
-    const int32_t x1 = s_vid_x + (int32_t)((int64_t)l2 * s_vid_w / src_w);
-    const int32_t y1 = s_vid_y + (int32_t)((int64_t)t2 * s_vid_h / src_h);
-    const int32_t x2 = s_vid_x + (int32_t)(((int64_t)r2 + 1) * s_vid_w / src_w);
-    const int32_t y2 = s_vid_y + (int32_t)(((int64_t)b2 + 1) * s_vid_h / src_h);
+    /* ★ 映射基准 = 模组检测图 480×640（竖版 3:4，实测标定）：
+     *   三条样本框中心 x=(L+R)/2 除以 480 恒为 49~50%（完美居中），
+     *   而 320×240 会出界（R=356>320）、640×480 中心 x=37% 偏左 —— 唯一自洽。
+     * 且 480×640 与预览旋转后的竖版源（240×320）同视场（1.5 倍分辨率），
+     * 方向一致 → 直接按比例映射，不做旋转。若后续发现上下镜像，在 scale 前翻 y。 */
+    const int32_t x1 = s_vid_x + (int32_t)((int64_t)l * s_vid_w / 480);
+    const int32_t y1 = s_vid_y + (int32_t)((int64_t)t * s_vid_h / 640);
+    const int32_t x2 = s_vid_x + (int32_t)(((int64_t)r + 1) * s_vid_w / 480);
+    const int32_t y2 = s_vid_y + (int32_t)(((int64_t)b + 1) * s_vid_h / 640);
     if (x2 <= x1 || y2 <= y1 || x2 < 0 || y2 < 0 || x1 > s_canvas_w || y1 > s_canvas_h) {
         if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
         return;
