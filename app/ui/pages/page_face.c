@@ -405,18 +405,17 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_obj_move_foreground(s_box_obj);
     printf("[FACE-BOX] 画框已启用（480×640 标定 + z 序置顶）\n");
 
-    /* ===== 人不在时的虚线占位框：4 条 lv_line（dash 样式）拼成矩形 =====
-     * LVGL 的 border 不支持虚线；lv_line 支持（dash_width/dash_gap 样式）。 */
+    /* ===== 人不在时的占位框：4 条**细长 lv_obj** 拼成矩形 =====
+     * 曾实现为 lv_line + dash 样式（LVGL 的 SW 绘制器确实有 dash 分支），
+     * 但实测该组合不出图（对象非空、样式与坐标均已核对正确）——
+     * 改用最普通的 lv_obj 细矩形，渲染路径确定。 */
     {
-        /* 正确的样式 API 是 lv_obj_set_style_line_dash_width/gap（v9 的 line 支持 dash，
-         * 渲染在 lv_draw_sw_line.c；此前误写成 lv_style_set_dash_width —— 该函数不存在）。 */
         for (int i = 0; i < 4; i++) {
-            s_dash[i] = lv_line_create(s_preview);
-            lv_obj_set_style_line_color(s_dash[i], lv_color_hex(0x9AA5B1), 0);
-            lv_obj_set_style_line_width(s_dash[i], 2, 0);
-            lv_obj_set_style_line_opa(s_dash[i], LV_OPA_80, 0);
-            lv_obj_set_style_line_dash_width(s_dash[i], 8, 0);
-            lv_obj_set_style_line_dash_gap(s_dash[i], 8, 0);
+            s_dash[i] = lv_obj_create(s_preview);
+            lv_obj_remove_style_all(s_dash[i]);
+            lv_obj_set_style_bg_color(s_dash[i], lv_color_hex(0x3498DB), 0);
+            lv_obj_set_style_bg_opa(s_dash[i], LV_OPA_60, 0);
+            lv_obj_set_style_radius(s_dash[i], 0, 0);
             lv_obj_set_hidden(s_dash[i], true);
         }
         s_dash_visible = false;
@@ -1004,25 +1003,63 @@ static void verify_btn_cb(lv_event_t * e)
  * 坐标映射链与预览帧管线同源：模组坐标(按 CAP_W×CAP_H) → 旋转变换 → ×缩放 → +视频偏移。
  * ⚠️ 模组检测相机与 app 预览的 UVC 相机**不是同一传感器**，视场/安装位置不同 ——
  * 框是「模组视角」的投影，位置/大小仅作参考；明显错位时开 SAFE_FM225_NOTE_DEBUG 标定。 */
-/* 人不在时：把虚线占位框定位到「视频矩形内缩 12%」的位置（提示把脸对准这里） */
+/* 人不在时：把占位框定位到「视频矩形内缩 12%」（提示把脸对准这里）。
+ * 4 条边 = 4 个细长 lv_obj（上/右/下/左）。 */
 static void face_dash_update(void)
 {
     if (s_vid_w <= 4 || s_vid_h <= 4) return;
-    const int32_t mx = s_vid_w * 12 / 100, my = s_vid_h * 12 / 100;
+    const int32_t TH = 3;                        /* 边框粗细 */
+    const int32_t mx = s_vid_w * 12 / 100;
+    const int32_t my = s_vid_h * 12 / 100;
     const int32_t x1 = s_vid_x + mx, y1 = s_vid_y + my;
     const int32_t x2 = s_vid_x + s_vid_w - mx, y2 = s_vid_y + s_vid_h - my;
-    static lv_point_precise_t pts[4][2];
-    pts[0][0].x = x1; pts[0][0].y = y1; pts[0][1].x = x2; pts[0][1].y = y1;
-    pts[1][0].x = x2; pts[1][0].y = y1; pts[1][1].x = x2; pts[1][1].y = y2;
-    pts[2][0].x = x2; pts[2][0].y = y2; pts[2][1].x = x1; pts[2][1].y = y2;
-    pts[3][0].x = x1; pts[3][0].y = y2; pts[3][1].x = x1; pts[3][1].y = y1;
-    for (int i = 0; i < 4; i++) lv_line_set_points(s_dash[i], pts[i], 2);
+    const int32_t w = x2 - x1, h = y2 - y1;
+    if (w <= 0 || h <= 0) return;
+    lv_obj_set_pos(s_dash[0],  x1, y1);          /* 上 */
+    lv_obj_set_size(s_dash[0], w, TH);
+    lv_obj_set_pos(s_dash[1],  x2 - TH, y1);     /* 右 */
+    lv_obj_set_size(s_dash[1], TH, h);
+    lv_obj_set_pos(s_dash[2],  x1, y2 - TH);     /* 下 */
+    lv_obj_set_size(s_dash[2], w, TH);
+    lv_obj_set_pos(s_dash[3],  x1, y1);          /* 左 */
+    lv_obj_set_size(s_dash[3], TH, h);
+    for (int i = 0; i < 4; i++) lv_obj_move_foreground(s_dash[i]);
 }
 
 static void face_box_update(void)
 {
     if (s_box_obj == NULL) return;
     int16_t l = 0, t = 0, r = 0, b = 0;
+    /* 临时诊断：每 5s 打一次链路状态（定位「虚线框不显示」），定案后删 */
+    {
+        static uint32_t s_dbg_next = 0;
+        uint32_t now = hal_time_ms();
+        if ((int32_t)(now - s_dbg_next) >= 0) {
+            s_dbg_next = now + 5000u;
+            int16_t dl = 0, dt = 0, dr = 0, db = 0;
+            int32_t ret = face_service_face_box(&dl, &dt, &dr, &db);
+            printf("[FACE-BOX-DBG] update: box_obj=%p dash0=%p ret=%d 框=(%d,%d,%d,%d)"
+                   " vid=(%d,%d %dx%d)\n",
+                   (void*)s_box_obj, (void*)s_dash[0], (int)ret,
+                   (int)dl, (int)dt, (int)dr, (int)db,
+                   (int)s_vid_x, (int)s_vid_y, (int)s_vid_w, (int)s_vid_h);
+        }
+    }
+    /* 临时诊断：每 5s 打一次链路状态（定位「虚线框不显示」），定案后删 */
+    {
+        static uint32_t s_dbg_next = 0;
+        uint32_t now = hal_time_ms();
+        if ((int32_t)(now - s_dbg_next) >= 0) {
+            s_dbg_next = now + 5000u;
+            int16_t dl = 0, dt = 0, dr = 0, db = 0;
+            int32_t ret = face_service_face_box(&dl, &dt, &dr, &db);
+            printf("[FACE-BOX-DBG] update: box_obj=%p dash0=%p ret=%d 框=(%d,%d,%d,%d)"
+                   " vid=(%d,%d %dx%d)\n",
+                   (void*)s_box_obj, (void*)s_dash[0], (int)ret,
+                   (int)dl, (int)dt, (int)dr, (int)db,
+                   (int)s_vid_x, (int)s_vid_y, (int)s_vid_w, (int)s_vid_h);
+        }
+    }
     if (face_service_face_box(&l, &t, &r, &b) != 0 || (l | t | r | b) == 0) {
         /* ★ 人不在：绿框隐藏，虚线占位框显示（提示把脸对准这里） */
         if (s_box_visible) {
