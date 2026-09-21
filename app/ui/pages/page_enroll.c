@@ -615,6 +615,7 @@ lv_obj_t * page_enroll_create(lv_obj_t * parent)
     /* ★ 必须移到最上层：s_canvas 在本对象**之后**创建（后创建者在摻绘上层），
      *   不移上去会被画布整层盖住 —— 用户实测「框会出但框不住人脸」实为此因。 */
     lv_obj_move_foreground(s_box_obj);
+    printf("[FACE-BOX] 画框已启用（480×640 标定 + z 序置顶）\n");
 
     s_canvas = lv_canvas_create(s_preview);
     lv_obj_set_pos(s_canvas, 0, 0);
