@@ -862,6 +862,33 @@ int user_update(const safe_user_t *u)
     user_list_free(us);
     return ok ? 0 : -1;
 }
+/* 改名（FR：用户页「修改信息」）。复用 save_users 的加锁快照 + 原子写路径，
+ * 不另起写盘逻辑。重名（排除自身）返回 -2；未找到 / 写盘失败返回 -1；成功返回 0。 */
+int user_rename(int id, const char *newname)
+{
+    if (!newname || newname[0] == '\0') return -1;
+    safe_user_t *us = NULL;
+    int n = 0;
+    if (load_users(&us, &n, NULL) != 0 || n <= 0) { user_list_free(us); return -1; }
+
+    int idx = -1;
+    for (int i = 0; i < n; i++) {
+        if (us[i].id == id) {
+            idx = i;
+        } else if (strcmp(us[i].name, newname) == 0) {  /* 与他人重名 */
+            user_list_free(us);
+            return -2;
+        }
+    }
+    if (idx < 0) { user_list_free(us); return -1; }
+
+    strncpy(us[idx].name, newname, sizeof(us[idx].name) - 1);
+    us[idx].name[sizeof(us[idx].name) - 1] = '\0';
+
+    bool ok = save_users(us, n);
+    user_list_free(us);
+    return ok ? 0 : -1;
+}
 
 /* 人脸模板绑定单字段写（规约 §5.5 / UI 现代化 ui3）。
  * 读整表 → 定位 → 改 face_id → 整表原子落盘，读改写收在 store 一处，

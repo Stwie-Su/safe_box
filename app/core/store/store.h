@@ -100,6 +100,7 @@ int user_del_cascade(int id, int32_t *out_face_id);       /* 0=成功 */
  * 无改动时不写盘。返回 0=成功。 */
 int user_face_clear_all(void);
 int user_update(const safe_user_t *u);                   /* 按 id 整体覆盖；0=成功 */
+int user_rename(int id, const char *newname);            /* 改名（重名返回 -2）；复用 save_users 原子写；0=成功 */
 int user_face_set(int user_id, int face_id);             /* 便捷写：绑定模板(>=0 同时启用 face 通道)/清除(-1)；0=成功 */
 int user_find_by_name(const char *name, safe_user_t *out);/* 0=找到 */
 int user_find_by_id(int id, safe_user_t *out);            /* 0=找到 */

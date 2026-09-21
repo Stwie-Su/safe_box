@@ -73,9 +73,37 @@ static lv_obj_t * s_auth_msg  = NULL;
 static char s_auth_pin[16]    = {0};
 
 /* 修改管理员密码 — 动态码二次确认（FR-3 敏感操作）状态 */
-static bool s_pwd_is_admin    = false;   /* 当前改密目标是否为管理员 */
+static bool s_pwd_is_admin    = false;   /* 当前操作目标是否为管理员 */
 static char s_pending_old[16] = {0};     /* 暂存：管理员改密跨弹窗的 旧PIN */
 static char s_pending_new[16] = {0};     /* 暂存：管理员改密跨弹窗的 新PIN */
+static char s_pending_name[32]= {0};     /* 暂存：跨 OTP 弹窗的新用户名 */
+static bool s_pending_do_pin  = false;   /* 跨 OTP 弹窗：是否改 PIN */
+static bool s_pending_do_rename = false; /* 跨 OTP 弹窗：是否改名 */
+static char s_cur_name[32]    = {0};     /* 弹窗打开时的原始用户名，用于判定是否改名 */
+
+/* 行构建时缓存 id→显示名，供「修改信息」弹窗预填当前用户名。
+ * 仅读内存、不直连 store，满足 QA-20 主线程门禁（禁止 UI 线程直接调 store 读盘）。 */
+#define NAME_CACHE_SZ 128
+static int   s_nc_id[NAME_CACHE_SZ];
+static char  s_nc_name[NAME_CACHE_SZ][32];
+static int   s_nc_cnt = 0;
+static void name_cache_put(int id, const char *nm)
+{
+    int slot = -1;
+    for (int i = 0; i < s_nc_cnt; i++) if (s_nc_id[i] == id) { slot = i; break; }
+    if (slot < 0 && s_nc_cnt < NAME_CACHE_SZ) slot = s_nc_cnt++;
+    if (slot >= 0) {
+        s_nc_id[slot] = id;
+        strncpy(s_nc_name[slot], nm, sizeof(s_nc_name[0]) - 1);
+        s_nc_name[slot][sizeof(s_nc_name[0]) - 1] = '\0';
+    }
+}
+static const char * name_cache_get(int id)
+{
+    for (int i = 0; i < s_nc_cnt; i++) if (s_nc_id[i] == id) return s_nc_name[i];
+    return NULL;
+}
+
 static lv_obj_t * s_otp_ov    = NULL;
 static lv_obj_t * s_otp_disp  = NULL;
 static lv_obj_t * s_otp_msg   = NULL;
@@ -167,7 +195,8 @@ static void pwd_otp_key_cb(lv_event_t * e);
 static void pwd_otp_ok_cb(lv_event_t * e);
 static void pwd_otp_cancel_cb(lv_event_t * e);
 static bool user_is_admin(int id);
-static void post_chg_pwd(int id, const char *oldp, const char *newp);
+static void post_chg_pwd(int id, const char *oldp, const char *newp,
+                         const char *name, bool do_pin, bool do_rename);
 
 /* 后台 worker 类型 */
 typedef struct {
@@ -178,7 +207,15 @@ typedef struct {
     int     use_limit;      /* 临时用户开锁次数上限（0 = 不限） */
     int     result;
 } add_user_job_t;
-typedef struct { int id; char oldpin[16]; char newpin[16]; int result; } chg_pwd_job_t;
+typedef struct {
+    int  id;
+    char oldpin[16];
+    char newpin[16];
+    char newname[32];   /* 新用户名（改名时非空） */
+    bool do_pin;        /* 是否改 PIN */
+    bool do_rename;     /* 是否改名 */
+    int  result;
+} chg_pwd_job_t;
 /* del_face_id：仅「删除用户」路径使用 —— 待联动删除的模组侧模板号（-1 = 无需联动）。
  * 放在这里是因为 user_del 之后本地记录就没了，模板号必须在删之前取好。 */
 typedef struct { int id; int result; int del_face_id; } user_op_job_t;
@@ -502,6 +539,9 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
 {
     int uid = u->id;
 
+    /* 缓存 id→name，供修改信息弹窗预填（主线程读内存，不直连 store） */
+    name_cache_put(u->id, u->name);
+
     /* 行容器 */
     lv_obj_t * row = lv_obj_create(s_list);
     lv_obj_set_size(row, lv_pct(100), SY(56));
@@ -601,7 +641,7 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
     lv_obj_set_style_border_width(sp2, 0, 0);
     lv_obj_set_scrollable(sp2, false);
 
-    /* --- 右侧操作组：改密 / 启停 / 人脸 / 删除 --- */
+    /* --- 右侧操作组：修改信息 / 启停 / 人脸 / 删除 --- */
     lv_obj_t * ops = lv_obj_create(row);
     lv_obj_set_size(ops, LV_SIZE_CONTENT, SY(34));
     lv_obj_set_style_bg_opa(ops, LV_OPA_TRANSP, 0);
@@ -612,8 +652,8 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
     lv_obj_set_flex_align(ops, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(ops, false);
 
-    /* 改密 */
-    row_op_btn(ops, UI_GLYPH_EDIT, "改密", SX(76), &st_ghost_btn, TH_TEXT,
+    /* 修改信息（改名 + 可选改 PIN） */
+    row_op_btn(ops, UI_GLYPH_EDIT, "修改信息", SX(76), &st_ghost_btn, TH_TEXT,
                row_pwd_cb, uid);
 
     /* 启用/停用 —— 末位管理员锁死 */
@@ -656,6 +696,7 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
 static void users_list_loaded(safe_user_t * us, int n)
 {
     lv_obj_clean(s_list);
+    s_nc_cnt = 0;   /* 重建列表前清空 id→name 缓存 */
 
     /* 空态：store 保证至少有一个管理员，理论上到不了这里；真到了也要说清
      * 「下一步该做什么」，而不是留一片空白（信息架构里的空态提示）。 */
@@ -1231,13 +1272,29 @@ static void pwd_btn_cb(lv_event_t * e)
 
 static void dlg_change_pwd(void)
 {
-    /* 改的是管理员吗？是则保存前强制走动态码二次确认 */
+    /* 改的是管理员吗？仅当真正改 PIN 时，保存前才强制走动态码二次确认 */
     s_pwd_is_admin = user_is_admin(s_sel_id);
-    lv_obj_t * win = dlg_open("修改密码", SX(380), SY(420));  /* 修改密码 */
+
+    /* 记住弹窗打开时的原始用户名，保存时据其与输入框比对判断是否改名。
+     * 从行构建缓存取（主线程读内存，不直连 store，满足 QA-20 主线程门禁）。 */
+    const char * cur = name_cache_get(s_sel_id);
+    if (cur) {
+        strncpy(s_cur_name, cur, sizeof(s_cur_name) - 1);
+        s_cur_name[sizeof(s_cur_name) - 1] = '\0';
+    } else {
+        s_cur_name[0] = '\0';
+    }
+
+    lv_obj_t * win = dlg_open("修改信息", SX(380), SY(470));  /* 修改信息 */
     (void)win;
-    dlg_textarea("旧 PIN",         true, true, 0);
-    dlg_textarea("新 PIN(4-8 位)",  true, true, 1);  /* 默认焦点 */
-    dlg_textarea("确认新 PIN",       true, true, 2);
+
+    /* 姓名：置顶，预填当前用户名；文字键盘。留空或与原名相同 = 不改名 */
+    lv_obj_t * ta_name = dlg_textarea_ex(win, "姓名", false, false, 3, SX(300));
+    lv_textarea_set_text(ta_name, s_cur_name);
+
+    dlg_textarea("旧 PIN",             true, true, 0);
+    dlg_textarea("新 PIN(留空则只改名)", true, true, 1);  /* 默认焦点（数字键盘） */
+    dlg_textarea("确认新 PIN",           true, true, 2);
 
     lv_obj_t * save = ui_icon_text_button(s_win, LV_SYMBOL_SAVE, "保存",
                                           SX(160), SY(44), &st_accent_btn,
@@ -1251,21 +1308,37 @@ static void chg_pwd_worker(void * p)
     safe_user_t * us = NULL;
     int n = 0;
     if (user_load_all(&us, &n) != 0) { user_list_free(us); a->result = -1; return; }
-    safe_user_t u;
     bool found = false;
-    for (int i = 0; i < n; i++) if (us[i].id == a->id) { u = us[i]; found = true; break; }
+    for (int i = 0; i < n; i++) if (us[i].id == a->id) { found = true; break; }
     user_list_free(us);
     if (!found) { a->result = -1; return; }
 
-    if (user_verify_pin(u.name, a->oldpin) != 0) { a->result = 1; return; }
-
-    uint8_t salt[16];
-    pin_hash(a->newpin, salt, u.pin_hash);
-    salt_to_hex(salt, u.pin_salt);
-    u.failed_attempts = 0;
-    u.lock_until = 0;
-    a->result = (user_update(&u) == 0) ? 0 : -1;
-    if (a->result == 0) log_append("pwd_change", u.name, 1, "pin updated");
+    int res = 0;
+    /* —— 改名优先：复用 store 层 user_rename（内部 save_users 原子写） —— */
+    if (a->do_rename) {
+        int rr = user_rename(a->id, a->newname);
+        if (rr == -2)      { a->result = 2;  return; }  /* 重名 */
+        else if (rr == -1) { a->result = -1; return; }   /* 写盘失败 */
+        log_append("user_rename", a->newname, 1, "name updated");
+    }
+    /* —— 改 PIN：沿用原流程（原 PIN 校验 + 重算哈希 + 整记录覆盖） —— */
+    if (a->do_pin) {
+        safe_user_t * us2 = NULL; int n2 = 0;
+        if (user_load_all(&us2, &n2) != 0) { user_list_free(us2); a->result = -1; return; }
+        safe_user_t u2; bool f2 = false;
+        for (int i = 0; i < n2; i++) if (us2[i].id == a->id) { u2 = us2[i]; f2 = true; break; }
+        user_list_free(us2);
+        if (!f2) { a->result = -1; return; }
+        if (user_verify_pin(u2.name, a->oldpin) != 0) { a->result = 1; return; }
+        uint8_t salt[16];
+        pin_hash(a->newpin, salt, u2.pin_hash);
+        salt_to_hex(salt, u2.pin_salt);
+        u2.failed_attempts = 0;
+        u2.lock_until = 0;
+        res = (user_update(&u2) == 0) ? 0 : -1;
+        if (res == 0) log_append("pwd_change", u2.name, 1, "pin updated");
+    }
+    a->result = res;
 }
 
 static void chg_pwd_done(void * p)
@@ -1276,6 +1349,8 @@ static void chg_pwd_done(void * p)
         rebuild_list();
     } else if (a->result == 1) {
         dlg_set_msg("旧 PIN 错误");  /* 旧 PIN 错误 */
+    } else if (a->result == 2) {
+        dlg_set_msg("用户名已存在");  /* 用户名已存在 */
     } else {
         dlg_set_msg("保存失败");  /* 保存失败 */
     }
@@ -1285,44 +1360,65 @@ static void chg_pwd_done(void * p)
 static void save_pwd_cb(lv_event_t * e)
 {
     (void)e;
-    lv_obj_t * tas[3];
-    int ti = dlg_get_tas(tas, 3);
-    if (ti < 3) return;
+    lv_obj_t * tas[4];
+    int ti = dlg_get_tas(tas, 4);
+    if (ti < 4) return;
 
-    const char * oldp = lv_textarea_get_text(tas[0]);
-    const char * newp = lv_textarea_get_text(tas[1]);
-    const char * newp2 = lv_textarea_get_text(tas[2]);
+    const char * name  = lv_textarea_get_text(tas[0]);  /* 姓名 */
+    const char * oldp  = lv_textarea_get_text(tas[1]);  /* 旧 PIN */
+    const char * newp  = lv_textarea_get_text(tas[2]);  /* 新 PIN */
+    const char * newp2 = lv_textarea_get_text(tas[3]);  /* 确认新 PIN */
 
-    const safe_policy_t * pol = user_policy();
-    size_t plen = strlen(newp);
-    if (plen < (size_t)pol->pin_min_len || plen > (size_t)pol->pin_max_len) {
-        dlg_set_msg("新 PIN 长度需 4-8 位");  /* 新 PIN 长度需 4-8 位 */
+    bool do_pin    = (newp[0] != '\0');                 /* 新 PIN 非空 → 走改密 */
+    bool do_rename = (name[0] != '\0' && strcmp(name, s_cur_name) != 0);
+
+    if (!do_pin && !do_rename) {
+        dlg_set_msg("姓名与新 PIN 均未改动");  /* 无改动 */
         return;
     }
-    if (strcmp(newp, newp2) != 0) {
-        dlg_set_msg("两次新 PIN 不一致");  /* 两次新 PIN 不一致 */
-        return;
+
+    if (do_pin) {
+        const safe_policy_t * pol = user_policy();
+        size_t plen = strlen(newp);
+        if (plen < (size_t)pol->pin_min_len || plen > (size_t)pol->pin_max_len) {
+            dlg_set_msg("新 PIN 长度需 4-8 位");  /* 新 PIN 长度需 4-8 位 */
+            return;
+        }
+        if (strcmp(newp, newp2) != 0) {
+            dlg_set_msg("两次新 PIN 不一致");  /* 两次新 PIN 不一致 */
+            return;
+        }
     }
 
-    /* ★ 敏感操作（管理员改密）：先过动态码二次确认，通过后才提交改密 */
-    if (s_pwd_is_admin) {
+    /* ★ 敏感操作（管理员改 PIN）：先过动态码二次确认，通过后才提交 */
+    if (s_pwd_is_admin && do_pin) {
         strncpy(s_pending_old, oldp, sizeof(s_pending_old) - 1);
         strncpy(s_pending_new, newp, sizeof(s_pending_new) - 1);
-        close_dlg();          /* 收起 PIN 弹窗 */
+        strncpy(s_pending_name, name, sizeof(s_pending_name) - 1);
+        s_pending_do_pin = do_pin;
+        s_pending_do_rename = do_rename;
+        close_dlg();          /* 收起信息弹窗 */
         pwd_otp_show();       /* 弹动态码键盘 */
         return;
     }
-    post_chg_pwd(s_sel_id, oldp, newp);
+
+    post_chg_pwd(s_sel_id, oldp, newp, name, do_pin, do_rename);
 }
 
-/* 提交改密（管理员已通过动态码，或非管理员直接走这里） */
-static void post_chg_pwd(int id, const char *oldp, const char *newp)
+/* 提交（管理员已通过动态码，或非管理员直接走这里）。
+ * name/do_pin/do_rename 透传：改名与改 PIN 可独立或组合。 */
+static void post_chg_pwd(int id, const char *oldp, const char *newp,
+                         const char *name, bool do_pin, bool do_rename)
 {
     chg_pwd_job_t * a = (chg_pwd_job_t *)calloc(1, sizeof(*a));
     if (!a) return;
     a->id = id;
-    strncpy(a->oldpin, oldp, sizeof(a->oldpin) - 1);
-    strncpy(a->newpin, newp, sizeof(a->newpin) - 1);
+    strncpy(a->oldpin,  oldp,  sizeof(a->oldpin)  - 1);
+    strncpy(a->newpin,  newp,  sizeof(a->newpin)  - 1);
+    strncpy(a->newname, name,  sizeof(a->newname) - 1);
+    a->newname[sizeof(a->newname) - 1] = '\0';
+    a->do_pin    = do_pin;
+    a->do_rename = do_rename;
     worker_post(chg_pwd_worker, a, chg_pwd_done);
 }
 
@@ -2103,7 +2199,7 @@ static void pwd_otp_ok_cb(lv_event_t * e)
     auth_result_t r = backend_admin_verify_totp(s_otp_pin);
     if (r == AUTH_OK) {
         pwd_otp_close();
-        post_chg_pwd(s_sel_id, s_pending_old, s_pending_new);
+        post_chg_pwd(s_sel_id, s_pending_old, s_pending_new, s_pending_name, s_pending_do_pin, s_pending_do_rename);
     } else {
         s_otp_pin[0] = '\0';
         pwd_otp_update_disp();
