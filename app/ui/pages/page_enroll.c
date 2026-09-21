@@ -42,9 +42,8 @@ static lv_obj_t * s_sub;              /* 头部引导副文案（模组 NOTE 实
 static lv_obj_t * s_preview;
 static lv_obj_t * s_canvas;
 static lv_obj_t * s_guide_lb;         /* 录入实时引导小字（叠在视频顶部居中） */
-static lv_obj_t * s_box_obj;          /* 人脸框（模组 NOTE 上报的框，叠加在预览上） */
-static lv_obj_t * s_dash[4];          /* 人不在时的占位框（上右下左 4 条细矩形） */
-static bool       s_dash_visible;
+/* 人脸框：4 条细长 lv_obj（上/右/下/左）用**背景填充**拼成矩形（与识别页同款）。 */
+static lv_obj_t * s_box_seg[4];
 static bool       s_box_visible;      /* 框当前是否显示（避免每 500ms 重复 set 引发重绘） */
 static lv_obj_t * s_status;           /* 底部状态文案 */
 static lv_timer_t * s_frame_timer;
@@ -338,81 +337,58 @@ static void frame_timer_cb(lv_timer_t * t)
  *   ⚠️ 注意：模组的检测相机与 app 预览用的 UVC 相机**不是同一个传感器**，
  *   两者的视场/安装位置不同 —— 所以这个框是「模组视角」的投影，位置/大小
  *   只能作参考。若显示明显错位，开 SAFE_FM225_NOTE_DEBUG 看框数值范围再标定。 */
-/* 人不在时：把占位框定位到「视频矩形内缩 12%」（提示把脸对准这里）。 */
-static void face_dash_update(void)
-{
-    if (s_vid_w <= 4 || s_vid_h <= 4) return;
-    const int32_t TH = 3;
-    const int32_t mx = s_vid_w * 12 / 100;
-    const int32_t my = s_vid_h * 12 / 100;
-    const int32_t x1 = s_vid_x + mx, y1 = s_vid_y + my;
-    const int32_t x2 = s_vid_x + s_vid_w - mx, y2 = s_vid_y + s_vid_h - my;
-    const int32_t w = x2 - x1, h = y2 - y1;
-    if (w <= 0 || h <= 0) return;
-    lv_obj_set_pos(s_dash[0],  x1, y1);          /* 上 */
-    lv_obj_set_size(s_dash[0], w, TH);
-    lv_obj_set_pos(s_dash[1],  x2 - TH, y1);     /* 右 */
-    lv_obj_set_size(s_dash[1], TH, h);
-    lv_obj_set_pos(s_dash[2],  x1, y2 - TH);     /* 下 */
-    lv_obj_set_size(s_dash[2], w, TH);
-    lv_obj_set_pos(s_dash[3],  x1, y1);          /* 左 */
-    lv_obj_set_size(s_dash[3], TH, h);
-    for (int i = 0; i < 4; i++) lv_obj_move_foreground(s_dash[i]);
-}
-
 static void face_box_update(void)
 {
-    if (s_box_obj == NULL) return;
+    if (s_box_seg[0] == NULL) return;
     int16_t l = 0, t = 0, r = 0, b = 0;
-    if (face_service_face_box(&l, &t, &r, &b) != 0 || (l | t | r | b) == 0) {
-        if (s_box_visible) {
-            printf("[录入页-BOX] 隐藏：无框数据（ret/全零）\n");
-            lv_obj_set_hidden(s_box_obj, true); s_box_visible = false;
-        }
-        /* ★ 人不在：绿框隐藏，改为显示占位框（提示把脸对准这里） */
-        if (s_dash[0] != NULL) {
-            face_dash_update();
-            if (!s_dash_visible) {
-                for (int i = 0; i < 4; i++) lv_obj_set_hidden(s_dash[i], false);
-                s_dash_visible = true;
+
+    /* 调试开关：SAFE_BOX_FAKE=1 时注入固定框（无人脸也能验证渲染链路）。 */
+    int32_t bret;
+    if (getenv("SAFE_BOX_FAKE") != NULL) {
+        l = 100; t = 150; r = 400; b = 500;
+        bret = 0;
+    } else {
+        bret = face_service_face_box(&l, &t, &r, &b);
+    }
+
+    bool bad = (bret != 0) || ((l | t | r | b) == 0);
+    if (!bad) {
+        /* 框坐标系 = 模组检测图 480×640（竖版 3:4，实测标定）。 */
+        const int32_t nx1 = s_vid_x + (int32_t)((int64_t)l * s_vid_w / 480);
+        const int32_t ny1 = s_vid_y + (int32_t)((int64_t)t * s_vid_h / 640);
+        const int32_t nx2 = s_vid_x + (int32_t)(((int64_t)r + 1) * s_vid_w / 480);
+        const int32_t ny2 = s_vid_y + (int32_t)(((int64_t)b + 1) * s_vid_h / 640);
+        const int32_t TH = 3;
+        const int32_t w = nx2 - nx1, h = ny2 - ny1;
+        /* ★ 只判退化：s_vid_* 与 s_canvas_w/h 不同坐标系，拿后者判会误判出界、框永不显示。 */
+        if (s_vid_w <= 0 || s_vid_h <= 0 || w < 2 * TH || h < 2 * TH) {
+            bad = true;
+        } else {
+            lv_obj_set_pos(s_box_seg[0],  nx1, ny1);        /* 上 */
+            lv_obj_set_size(s_box_seg[0], w, TH);
+            lv_obj_set_pos(s_box_seg[1],  nx2 - TH, ny1);   /* 右 */
+            lv_obj_set_size(s_box_seg[1], TH, h);
+            lv_obj_set_pos(s_box_seg[2],  nx1, ny2 - TH);   /* 下 */
+            lv_obj_set_size(s_box_seg[2], w, TH);
+            lv_obj_set_pos(s_box_seg[3],  nx1, ny1);        /* 左 */
+            lv_obj_set_size(s_box_seg[3], TH, h);
+            for (int i = 0; i < 4; i++) {
+                lv_obj_move_foreground(s_box_seg[i]);
+                lv_obj_set_hidden(s_box_seg[i], false);
             }
+            if (!s_box_visible) {
+                printf("[录入页-BOX] 显示：框(%d,%d,%d,%d) → 画布(%d,%d) %dx%d\n",
+                       l, t, r, b, nx1, ny1, w, h);
+                s_box_visible = true;
+            }
+            return;
         }
-        return;
     }
-    if (s_vid_w <= 0 || s_vid_h <= 0) {
-        if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
-        return;
+    if (s_box_visible) {
+        printf("[录入页-BOX] 隐藏（无框数据或退化）\n");
+        for (int i = 0; i < 4; i++) lv_obj_set_hidden(s_box_seg[i], true);
+        s_box_visible = false;
     }
-    /* ★ 先乘后除（int64 中间量）：整数除法先算 kx=vid_w/src_w 会**丢掉全部小数**，
-     *   视频矩形比源小的时候 kx 直接得 0，框宽高随之归零、根本画不出来。 */
-    /* ★ 映射基准 = 模组检测图 480×640（竖版 3:4，实测标定）：
-     *   三条样本框中心 x=(L+R)/2 除以 480 恒为 49~50%（完美居中），
-     *   而 320×240 会出界（R=356>320）、640×480 中心 x=37% 偏左 —— 唯一自洽。
-     * 且 480×640 与预览旋转后的竖版源（240×320）同视场（1.5 倍分辨率），
-     * 方向一致 → 直接按比例映射，不做旋转。若后续发现上下镜像，在 scale 前翻 y。 */
-    const int32_t x1 = s_vid_x + (int32_t)((int64_t)l * s_vid_w / 480);
-    const int32_t y1 = s_vid_y + (int32_t)((int64_t)t * s_vid_h / 640);
-    const int32_t x2 = s_vid_x + (int32_t)(((int64_t)r + 1) * s_vid_w / 480);
-    const int32_t y2 = s_vid_y + (int32_t)(((int64_t)b + 1) * s_vid_h / 640);
-    if (x2 <= x1 || y2 <= y1 || x2 < 0 || y2 < 0 || x1 > s_canvas_w || y1 > s_canvas_h) {
-        if (s_box_visible) {
-            printf("[录入页-BOX] 隐藏：映射出界 x1=%d y1=%d x2=%d y2=%d\n", x1, y1, x2, y2);
-            lv_obj_set_hidden(s_box_obj, true); s_box_visible = false;
-        }
-        return;
-    }
-    if (!s_box_visible) {
-        printf("[录入页-BOX] 显示：框(%d,%d,%d,%d) → 画布(%d,%d) %dx%d\n",
-               l, t, r, b, x1, y1, x2 - x1, y2 - y1);
-        lv_obj_set_hidden(s_box_obj, false); s_box_visible = true;
-    }
-    if (s_dash_visible) {
-        for (int i = 0; i < 4; i++) lv_obj_set_hidden(s_dash[i], true);
-        s_dash_visible = false;
-    }
-    lv_obj_move_foreground(s_box_obj);
-    lv_obj_set_pos(s_box_obj, x1, y1);
-    lv_obj_set_size(s_box_obj, x2 - x1, y2 - y1);
 }
 
 /* ===== 状态定时器（500ms）：引导小字 + 状态文案 ===== */
@@ -640,32 +616,17 @@ lv_obj_t * page_enroll_create(lv_obj_t * parent)
     lv_obj_set_scrollable(s_preview, false);
     lv_obj_add_event_cb(s_preview, preview_size_changed_cb, LV_EVENT_SIZE_CHANGED, NULL);
 
-    /* 人脸框：绿色 2px 边框的透明矩形，浮在画布上层；坐标由 face_box_update 维护 */
-    s_box_obj = lv_obj_create(s_preview);
-    lv_obj_remove_style_all(s_box_obj);
-    lv_obj_set_style_border_color(s_box_obj, lv_color_hex(0x2ECC71), 0);
-    lv_obj_set_style_border_width(s_box_obj, 2, 0);
-    lv_obj_set_style_border_opa(s_box_obj, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(s_box_obj, 2, 0);
-    lv_obj_set_hidden(s_box_obj, true);
-    s_box_visible = false;
-    /* ★ 必须移到最上层：s_canvas 在本对象**之后**创建（后创建者在摻绘上层），
-     *   不移上去会被画布整层盖住 —— 用户实测「框会出但框不住人脸」实为此因。 */
-    lv_obj_move_foreground(s_box_obj);
-
-    /* ===== 人不在时的占位框：4 条细长 lv_obj 拼成矩形 =====
-     * （识别页同款实现；曾试 lv_line + dash 样式，SW 绘制器上不出图，已弃用。） */
-    {
-        for (int i = 0; i < 4; i++) {
-            s_dash[i] = lv_obj_create(s_preview);
-            lv_obj_remove_style_all(s_dash[i]);
-            lv_obj_set_style_bg_color(s_dash[i], lv_color_hex(0x3498DB), 0);
-            lv_obj_set_style_bg_opa(s_dash[i], LV_OPA_60, 0);
-            lv_obj_set_style_radius(s_dash[i], 0, 0);
-            lv_obj_set_hidden(s_dash[i], true);
-        }
-        s_dash_visible = false;
+    /* 人脸框：4 条细长 lv_obj 拼成矩形（bg 填充，确定可渲染）。
+     * 人不在时不显示任何框（2026-09-21 按用户要求移除蓝色占位框）。 */
+    for (int i = 0; i < 4; i++) {
+        s_box_seg[i] = lv_obj_create(s_preview);
+        lv_obj_remove_style_all(s_box_seg[i]);
+        lv_obj_set_style_bg_color(s_box_seg[i], lv_color_hex(0x2ECC71), 0);
+        lv_obj_set_style_bg_opa(s_box_seg[i], LV_OPA_COVER, 0);
+        lv_obj_set_hidden(s_box_seg[i], true);
     }
+    s_box_visible = false;
+    printf("[ENROLL-BOX] 画框已启用（bg 矩形版 + 480×640 标定）\n");
     printf("[FACE-BOX] 画框已启用（480×640 标定 + z 序置顶）\n");
 
     s_canvas = lv_canvas_create(s_preview);
