@@ -356,10 +356,12 @@ static void face_box_update(void)
         if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
         return;
     }
-    const int32_t kx = s_vid_w / src_w;   /* 与帧管线的最近邻缩放同源 */
-    const int32_t ky = s_vid_h / src_h;
-    const int32_t x1 = s_vid_x + l2 * kx, y1 = s_vid_y + t2 * ky;
-    const int32_t x2 = s_vid_x + (r2 + 1) * kx, y2 = s_vid_y + (b2 + 1) * ky;
+    /* ★ 先乘后除（int64 中间量）：整数除法先算 kx=vid_w/src_w 会**丢掉全部小数**，
+     *   视频矩形比源小的时候 kx 直接得 0，框宽高随之归零、根本画不出来。 */
+    const int32_t x1 = s_vid_x + (int32_t)((int64_t)l2 * s_vid_w / src_w);
+    const int32_t y1 = s_vid_y + (int32_t)((int64_t)t2 * s_vid_h / src_h);
+    const int32_t x2 = s_vid_x + (int32_t)(((int64_t)r2 + 1) * s_vid_w / src_w);
+    const int32_t y2 = s_vid_y + (int32_t)(((int64_t)b2 + 1) * s_vid_h / src_h);
     if (x2 <= x1 || y2 <= y1 || x2 < 0 || y2 < 0 || x1 > s_canvas_w || y1 > s_canvas_h) {
         if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
         return;
