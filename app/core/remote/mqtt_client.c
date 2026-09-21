@@ -113,7 +113,8 @@ static volatile int     g_state = 0;         /* mqtt_fsm_state_t 的镜像（供
 
 static int  g_wake_rd = -1;                  /* self-pipe 读端（进 poll） */
 static int  g_wake_wr = -1;                  /* self-pipe 写端（任何线程唤醒 net 线程） */
-static int  g_sock = -1;                     /* tls_stream_connect() 返回的描述符 */
+static int  g_sock = -1;                     /* 底层 fd，取自 tls_stream_fd() */
+static tls_stream_t * g_ts = NULL;           /* 传输层句柄（明文/TLS 由它封装） */
 static int  g_connecting = 0;                /* 非阻塞 connect 进行中 */
 
 static mqtt_fsm_t       g_fsm;
@@ -196,7 +197,7 @@ static int tx_flush(void)
 {
     size_t before = g_tx_sent;
     while (g_tx_sent < g_tx_len) {
-        int n = tls_stream_write(g_tx + g_tx_sent, g_tx_len - g_tx_sent);
+        int n = tls_stream_write(g_ts, g_tx + g_tx_sent, g_tx_len - g_tx_sent);
         if (n > 0) { g_tx_sent += (size_t)n; continue; }
         if (n == 0) break;                      /* EAGAIN：等 POLLOUT */
         return -1;
@@ -230,7 +231,7 @@ static void tx_send(const uint8_t *buf, size_t len, uint32_t now_ms)
 
 static void do_close(void)
 {
-    tls_stream_close();
+    tls_stream_close(g_ts);
     g_sock = -1;
     g_connecting = 0;
     g_tx_len = 0;
@@ -241,8 +242,9 @@ static void do_open(uint32_t now_ms)
 {
     mqtt_fsm_out_t o;
     do_close();
-    int fd = tls_stream_connect(g_host[0] ? g_host : "127.0.0.1",
-                                g_port > 0 ? g_port : 1883, NULL);
+    if (g_ts == NULL) g_ts = tls_stream_new(NULL);   /* NULL = 恒等后端（明文 TCP），T06 可传 TLS 配置 */
+    int fd = tls_stream_connect(g_ts, g_host[0] ? g_host : "127.0.0.1",
+                                g_port > 0 ? g_port : 1883);
     if (fd < 0) {
         g_sock = -1;
         /* 建连失败：立刻回灌状态机（否则要等「等 CONNACK」超时才退避，白白多等 20s） */
@@ -614,6 +616,9 @@ static void * mqtt_net_thread(void *arg)
             fds[0].events = POLLIN;
             if (g_connecting) fds[0].events |= POLLOUT;
             if (g_tx_len > g_tx_sent) fds[0].events |= POLLOUT;
+            /* ★ 握手期的事件掩码由**传输层**决定：TLS 握手时 mbedTLS 可能想写
+             *   （WANT_WRITE）而不是想读。若写死 POLLIN，握手会永久卡住。 */
+            if (tls_stream_want_write(g_ts)) fds[0].events |= POLLOUT;
         }
         int n = poll(fds, 2, timeout);
         if (n < 0) {
@@ -625,7 +630,7 @@ static void * mqtt_net_thread(void *arg)
 
         /* 6) 非阻塞 connect 进度 */
         if (g_connecting && g_sock >= 0 && (fds[0].revents & POLLOUT)) {
-            int r = tls_stream_connect_poll(0);
+            int r = tls_stream_connect_poll(g_ts, 0);
             g_connecting = 0;
             if (r == 0) {
                 mqtt_fsm_on_event(&g_fsm, MQTT_EV_SOCK_CONNECTED, NULL, now_ms, &out);
@@ -654,7 +659,7 @@ static void * mqtt_net_thread(void *arg)
             int io_err = 0;
             for (;;) {
                 if (rx_len >= sizeof(rx)) break;
-                int m = tls_stream_read(rx + rx_len, sizeof(rx) - rx_len, 0);
+                int m = tls_stream_read(g_ts, rx + rx_len, sizeof(rx) - rx_len, 0);
                 if (m > 0) { rx_len += (size_t)m; continue; }
                 if (m == 0) io_err = 1;        /* EOF：对端关闭 */
                 else if (m < -1) io_err = 1;   /* 真错误 */
