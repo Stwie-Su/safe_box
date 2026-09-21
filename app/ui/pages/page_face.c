@@ -88,6 +88,8 @@ static lv_obj_t * s_fps_ui;           // UI fps 徽章
 static lv_obj_t * s_fps_vid;          // 视频 fps 徽章
 static lv_obj_t * s_face_sub;         // 标题副文案（后端/模板/健康）
 static lv_obj_t * s_face_status;      // 状态文案（头部行内）
+static lv_obj_t * s_box_obj;          /* 人脸框（模组 NOTE 上报的框，叠加在预览上） */
+static bool       s_box_visible;      /* 框当前是否显示（避免重复 set 触发无谓重绘） */
 static lv_obj_t * s_btn_verify;       // 开始识别（单次会话，FR-27）
 static lv_obj_t * s_btn_verify_ic;
 static lv_obj_t * s_btn_verify_lb;
@@ -386,6 +388,16 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     lv_obj_set_scrollable(s_preview, false);
     /* 监听面板大小变化：触发画布/视频矩形/映射表/四角/光带/FPS 重算 */
     lv_obj_add_event_cb(s_preview, preview_size_changed_cb, LV_EVENT_SIZE_CHANGED, NULL);
+
+    /* 人脸框：绿色 2px 边框透明矩形，浮在画布上层；坐标由 face_box_update 维护 */
+    s_box_obj = lv_obj_create(s_preview);
+    lv_obj_remove_style_all(s_box_obj);
+    lv_obj_set_style_border_color(s_box_obj, lv_color_hex(0x2ECC71), 0);
+    lv_obj_set_style_border_width(s_box_obj, 2, 0);
+    lv_obj_set_style_border_opa(s_box_obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_box_obj, 2, 0);
+    lv_obj_set_hidden(s_box_obj, true);
+    s_box_visible = false;
 
     /* 预览画布：尺寸由 SIZE_CHANGED 回调里设置，初始先不绑 buffer */
     s_canvas = lv_canvas_create(s_preview);
@@ -963,6 +975,41 @@ static void verify_btn_cb(lv_event_t * e)
     else                     ui_banner("识别已启动，请正对模组（10 秒内）", UI_BANNER_INFO, UI_ANIM_BANNER_HOLD_MS_S);
 }
 
+/* ===== 人脸框（叠加在预览上） =====
+ * 数据源：模组 NOTE 帧的 v[1..4] = left/top/right/bottom（face_service_face_box 读出）。
+ * 坐标映射链与预览帧管线同源：模组坐标(按 CAP_W×CAP_H) → 旋转变换 → ×缩放 → +视频偏移。
+ * ⚠️ 模组检测相机与 app 预览的 UVC 相机**不是同一传感器**，视场/安装位置不同 ——
+ * 框是「模组视角」的投影，位置/大小仅作参考；明显错位时开 SAFE_FM225_NOTE_DEBUG 标定。 */
+static void face_box_update(void)
+{
+    if (s_box_obj == NULL) return;
+    int16_t l = 0, t = 0, r = 0, b = 0;
+    if (face_service_face_box(&l, &t, &r, &b) != 0 || (l | t | r | b) == 0) {
+        if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
+        return;
+    }
+    int32_t l2, t2, r2, b2;
+    if (s_rot_deg == 90)       { l2 = CAP_H - 1 - b;  t2 = l;          r2 = CAP_H - 1 - t;  b2 = r; }
+    else if (s_rot_deg == 270) { l2 = t;              t2 = CAP_W - 1 - r; r2 = b;          b2 = CAP_W - 1 - l; }
+    else if (s_rot_deg == 180) { l2 = CAP_W - 1 - r;  t2 = CAP_H - 1 - b; r2 = CAP_W - 1 - l;  b2 = CAP_H - 1 - t; }
+    else                       { l2 = l; t2 = t; r2 = r; b2 = b; }
+    if (s_src_w <= 0 || s_src_h <= 0 || s_vid_w <= 0 || s_vid_h <= 0) {
+        if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
+        return;
+    }
+    const int32_t kx = s_vid_w / s_src_w;
+    const int32_t ky = s_vid_h / s_src_h;
+    const int32_t x1 = s_vid_x + l2 * kx, y1 = s_vid_y + t2 * ky;
+    const int32_t x2 = s_vid_x + (r2 + 1) * kx, y2 = s_vid_y + (b2 + 1) * ky;
+    if (x2 <= x1 || y2 <= y1 || x2 < 0 || y2 < 0 || x1 > s_canvas_w || y1 > s_canvas_h) {
+        if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
+        return;
+    }
+    lv_obj_set_pos(s_box_obj, x1, y1);
+    lv_obj_set_size(s_box_obj, x2 - x1, y2 - y1);
+    if (!s_box_visible) { lv_obj_set_hidden(s_box_obj, false); s_box_visible = true; }
+}
+
 /* 状态刷新（500ms）：状态文案 + 画面区占位 + 按钮可用性 + 标题副文案 */
 static void face_status_timer_cb(lv_timer_t * t)
 {
@@ -1006,6 +1053,8 @@ static void face_status_timer_cb(lv_timer_t * t)
             lv_label_set_text(s_face_status, st);
         }
     }
+
+    face_box_update();   /* 人脸框随模组 NOTE 更新（500ms 节拍足够） */
 
     /* ---- 画面区占位 ---- */
     if (live) {

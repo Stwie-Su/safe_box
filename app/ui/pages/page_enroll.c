@@ -42,6 +42,8 @@ static lv_obj_t * s_sub;              /* 头部引导副文案（模组 NOTE 实
 static lv_obj_t * s_preview;
 static lv_obj_t * s_canvas;
 static lv_obj_t * s_guide_lb;         /* 录入实时引导小字（叠在视频顶部居中） */
+static lv_obj_t * s_box_obj;          /* 人脸框（模组 NOTE 上报的框，叠加在预览上） */
+static bool       s_box_visible;      /* 框当前是否显示（避免每 500ms 重复 set 引发重绘） */
 static lv_obj_t * s_status;           /* 底部状态文案 */
 static lv_timer_t * s_frame_timer;
 static lv_timer_t * s_status_timer;
@@ -326,6 +328,47 @@ static void frame_timer_cb(lv_timer_t * t)
     }
 }
 
+/* ===== 人脸框（叠加在预览上） =====
+ * 数据源：模组 NOTE 帧的 v[1..4] = left/top/right/bottom（经 face_service_face_box 读出）。
+ *
+ * ★ 坐标映射链与预览帧管线**完全同源**：
+ *   模组坐标(按 CAP_W×CAP_H) → 按预览旋转角变换 → ×缩放系数 → +视频矩形偏移。
+ *   ⚠️ 注意：模组的检测相机与 app 预览用的 UVC 相机**不是同一个传感器**，
+ *   两者的视场/安装位置不同 —— 所以这个框是「模组视角」的投影，位置/大小
+ *   只能作参考。若显示明显错位，开 SAFE_FM225_NOTE_DEBUG 看框数值范围再标定。 */
+static void face_box_update(void)
+{
+    if (s_box_obj == NULL) return;
+    int16_t l = 0, t = 0, r = 0, b = 0;
+    if (face_service_face_box(&l, &t, &r, &b) != 0 || (l | t | r | b) == 0) {
+        if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
+        return;
+    }
+    /* 旋转后的矩形（源 320×240 → 旋转后宽高互换/不变） */
+    int32_t l2, t2, r2, b2;
+    if (s_rot_deg == 90)       { l2 = CAP_H - 1 - b;  t2 = l;          r2 = CAP_H - 1 - t;  b2 = r; }
+    else if (s_rot_deg == 270) { l2 = t;              t2 = CAP_W - 1 - r; r2 = b;          b2 = CAP_W - 1 - l; }
+    else if (s_rot_deg == 180) { l2 = CAP_W - 1 - r;  t2 = CAP_H - 1 - b; r2 = CAP_W - 1 - l;  b2 = CAP_H - 1 - t; }
+    else                       { l2 = l; t2 = t; r2 = r; b2 = b; }
+    const int32_t src_w = (s_rot_deg == 90 || s_rot_deg == 270) ? CAP_H : CAP_W;
+    const int32_t src_h = (s_rot_deg == 90 || s_rot_deg == 270) ? CAP_W : CAP_H;
+    if (s_vid_w <= 0 || s_vid_h <= 0 || src_w <= 0 || src_h <= 0) {
+        if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
+        return;
+    }
+    const int32_t kx = s_vid_w / src_w;   /* 与帧管线的最近邻缩放同源 */
+    const int32_t ky = s_vid_h / src_h;
+    const int32_t x1 = s_vid_x + l2 * kx, y1 = s_vid_y + t2 * ky;
+    const int32_t x2 = s_vid_x + (r2 + 1) * kx, y2 = s_vid_y + (b2 + 1) * ky;
+    if (x2 <= x1 || y2 <= y1 || x2 < 0 || y2 < 0 || x1 > s_canvas_w || y1 > s_canvas_h) {
+        if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
+        return;
+    }
+    lv_obj_set_pos(s_box_obj, x1, y1);
+    lv_obj_set_size(s_box_obj, x2 - x1, y2 - y1);
+    if (!s_box_visible) { lv_obj_set_hidden(s_box_obj, false); s_box_visible = true; }
+}
+
 /* ===== 状态定时器（500ms）：引导小字 + 状态文案 ===== */
 static void status_timer_cb(lv_timer_t * t)
 {
@@ -357,6 +400,8 @@ static void status_timer_cb(lv_timer_t * t)
     } else {
         lv_obj_set_hidden(s_guide_lb, true);
     }
+
+    face_box_update();   /* 人脸框随模组 NOTE 更新（500ms 节拍足够） */
 
     /* 头部副文案（冗余一份引导，低视觉权重） */
     /* 录入期间把模组实时上报的**姿态**显示出来：
@@ -548,6 +593,16 @@ lv_obj_t * page_enroll_create(lv_obj_t * parent)
     lv_obj_set_scroll_dir(s_preview, LV_DIR_NONE);
     lv_obj_set_scrollable(s_preview, false);
     lv_obj_add_event_cb(s_preview, preview_size_changed_cb, LV_EVENT_SIZE_CHANGED, NULL);
+
+    /* 人脸框：绿色 2px 边框的透明矩形，浮在画布上层；坐标由 face_box_update 维护 */
+    s_box_obj = lv_obj_create(s_preview);
+    lv_obj_remove_style_all(s_box_obj);
+    lv_obj_set_style_border_color(s_box_obj, lv_color_hex(0x2ECC71), 0);
+    lv_obj_set_style_border_width(s_box_obj, 2, 0);
+    lv_obj_set_style_border_opa(s_box_obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_box_obj, 2, 0);
+    lv_obj_set_hidden(s_box_obj, true);
+    s_box_visible = false;
 
     s_canvas = lv_canvas_create(s_preview);
     lv_obj_set_pos(s_canvas, 0, 0);
