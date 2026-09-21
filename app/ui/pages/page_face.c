@@ -89,6 +89,8 @@ static lv_obj_t * s_fps_vid;          // 视频 fps 徽章
 static lv_obj_t * s_face_sub;         // 标题副文案（后端/模板/健康）
 static lv_obj_t * s_face_status;      // 状态文案（头部行内）
 static lv_obj_t * s_box_obj;          /* 人脸框（模组 NOTE 上报的框，叠加在预览上） */
+static lv_obj_t * s_dash[4];          /* 人不在时的虚线占位框（上右下左 4 条边） */
+static bool       s_dash_visible;
 static bool       s_box_visible;      /* 框当前是否显示（避免重复 set 触发无谓重绘） */
 static lv_obj_t * s_btn_verify;       // 开始识别（单次会话，FR-27）
 static lv_obj_t * s_btn_verify_ic;
@@ -402,6 +404,24 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
      *   不移上去会被画布整层盖住 —— 用户实测「框会出但框不住人脸」实为此因。 */
     lv_obj_move_foreground(s_box_obj);
     printf("[FACE-BOX] 画框已启用（480×640 标定 + z 序置顶）\n");
+
+    /* ===== 人不在时的虚线占位框：4 条 lv_line（dash 样式）拼成矩形 =====
+     * LVGL 的 border 不支持虚线；lv_line 支持（dash_width/dash_gap 样式）。 */
+    {
+        /* 正确的样式 API 是 lv_obj_set_style_line_dash_width/gap（v9 的 line 支持 dash，
+         * 渲染在 lv_draw_sw_line.c；此前误写成 lv_style_set_dash_width —— 该函数不存在）。 */
+        for (int i = 0; i < 4; i++) {
+            s_dash[i] = lv_line_create(s_preview);
+            lv_obj_set_style_line_color(s_dash[i], lv_color_hex(0x9AA5B1), 0);
+            lv_obj_set_style_line_width(s_dash[i], 2, 0);
+            lv_obj_set_style_line_opa(s_dash[i], LV_OPA_80, 0);
+            lv_obj_set_style_line_dash_width(s_dash[i], 8, 0);
+            lv_obj_set_style_line_dash_gap(s_dash[i], 8, 0);
+            lv_obj_set_hidden(s_dash[i], true);
+        }
+        s_dash_visible = false;
+    }
+    for (int i = 0; i < 4; i++) lv_obj_move_foreground(s_dash[i]);
 
     /* 预览画布：尺寸由 SIZE_CHANGED 回调里设置，初始先不绑 buffer */
     s_canvas = lv_canvas_create(s_preview);
@@ -984,14 +1004,37 @@ static void verify_btn_cb(lv_event_t * e)
  * 坐标映射链与预览帧管线同源：模组坐标(按 CAP_W×CAP_H) → 旋转变换 → ×缩放 → +视频偏移。
  * ⚠️ 模组检测相机与 app 预览的 UVC 相机**不是同一传感器**，视场/安装位置不同 ——
  * 框是「模组视角」的投影，位置/大小仅作参考；明显错位时开 SAFE_FM225_NOTE_DEBUG 标定。 */
+/* 人不在时：把虚线占位框定位到「视频矩形内缩 12%」的位置（提示把脸对准这里） */
+static void face_dash_update(void)
+{
+    if (s_vid_w <= 4 || s_vid_h <= 4) return;
+    const int32_t mx = s_vid_w * 12 / 100, my = s_vid_h * 12 / 100;
+    const int32_t x1 = s_vid_x + mx, y1 = s_vid_y + my;
+    const int32_t x2 = s_vid_x + s_vid_w - mx, y2 = s_vid_y + s_vid_h - my;
+    static lv_point_precise_t pts[4][2];
+    pts[0][0].x = x1; pts[0][0].y = y1; pts[0][1].x = x2; pts[0][1].y = y1;
+    pts[1][0].x = x2; pts[1][0].y = y1; pts[1][1].x = x2; pts[1][1].y = y2;
+    pts[2][0].x = x2; pts[2][0].y = y2; pts[2][1].x = x1; pts[2][1].y = y2;
+    pts[3][0].x = x1; pts[3][0].y = y2; pts[3][1].x = x1; pts[3][1].y = y1;
+    for (int i = 0; i < 4; i++) lv_line_set_points(s_dash[i], pts[i], 2);
+}
+
 static void face_box_update(void)
 {
     if (s_box_obj == NULL) return;
     int16_t l = 0, t = 0, r = 0, b = 0;
     if (face_service_face_box(&l, &t, &r, &b) != 0 || (l | t | r | b) == 0) {
+        /* ★ 人不在：绿框隐藏，虚线占位框显示（提示把脸对准这里） */
         if (s_box_visible) {
             printf("[识别页-BOX] 隐藏：无框数据（ret/全零）\n");
             lv_obj_set_hidden(s_box_obj, true); s_box_visible = false;
+        }
+        if (s_dash[0] != NULL) {
+            face_dash_update();
+            if (!s_dash_visible) {
+                for (int i = 0; i < 4; i++) lv_obj_set_hidden(s_dash[i], false);
+                s_dash_visible = true;
+            }
         }
         return;
     }
@@ -1016,6 +1059,10 @@ static void face_box_update(void)
         printf("[识别页-BOX] 显示：框(%d,%d,%d,%d) → 画布(%d,%d) %dx%d\n",
                l, t, r, b, x1, y1, x2 - x1, y2 - y1);
         lv_obj_set_hidden(s_box_obj, false); s_box_visible = true;
+    }
+    if (s_dash_visible) {
+        for (int i = 0; i < 4; i++) lv_obj_set_hidden(s_dash[i], true);
+        s_dash_visible = false;
     }
     lv_obj_set_pos(s_box_obj, x1, y1);
     lv_obj_set_size(s_box_obj, x2 - x1, y2 - y1);
