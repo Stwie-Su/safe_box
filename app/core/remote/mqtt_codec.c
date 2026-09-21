@@ -121,6 +121,12 @@ int mqtt_pack_connect(uint8_t *buf, size_t cap, size_t *out_n,
     uint8_t cflag = clean_session ? 0x02 : 0x00;
     bool has_will = (will_topic && will_msg);
     if (has_will)  cflag |= 0x04;                       /* Will Flag */
+    /* ★ R9 T04：Will QoS = 1（bit3）+ Will Retain = 1（bit5）。
+     * 这两位是**固定**的，不是遗漏：LWT 的唯一用途是「设备异常掉线时让 broker
+     * 代发一条离线通告」，QoS0 会在弱网下丢、非 retain 会让后上线的订阅者
+     * 看不到这台设备是离线的 —— 两种都让 LWT 失去意义。本客户端不需要别的
+     * 组合，故不把它做成参数（做成参数就得在调用方再写一遍同样的常数）。 */
+    if (has_will)  cflag |= 0x08 | 0x20;
     if (username)  cflag |= 0x80;                       /* User Name Flag */
     if (password)  cflag |= 0x40;                       /* Password Flag */
     body[bo++] = cflag;

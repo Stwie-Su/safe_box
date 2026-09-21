@@ -125,7 +125,7 @@ void mqtt_fsm_cfg_default(mqtt_fsm_cfg_t *cfg)
     cfg->ping_timeout_ms  = 20000u;   /* = keepalive*1000：一个 keepalive 周期收不到 PINGRESP 即判半开 */
     cfg->retry_timeout_ms = 5000u;
     cfg->backoff_base_ms  = 500u;
-    /* 封顶 30s（而非 Paho 的 8s）：broker 重启场景下 8s 封顶会在 30s 内产生
+    /* 封顶 30s（而非原第三方库默认的 8s）：broker 重启场景下 8s 封顶会在 30s 内产生
      * ~6 次注定失败的重连，每次都要走域名解析/TCP/建连，对单核 A7 是纯浪费。
      * 代价是故障恢复感知慢，但有 LWT + 5s 状态快照兜底，可接受。 */
     cfg->backoff_max_ms   = 30000u;

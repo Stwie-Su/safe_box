@@ -1,9 +1,12 @@
 /**
  * @file mqtt_stub.c
- * MQTT 空实现：构建期没找到 paho-mqtt3a 或显式关闭 SAFE_FEATURE_MQTT 时编译本文件。
+ * MQTT 空实现：构建期 cJSON 缺失或显式关闭 SAFE_FEATURE_MQTT 时编译本文件。
  *
- * 目的：远程通道是可选特性，缺库时系统仍要能完整跑起来，
+ * 目的：远程通道是可选特性，缺依赖时系统仍要能完整跑起来，
  * 只是不再对外发消息、也不接受指令。调用方代码不需要写 #ifdef。
+ *
+ * ★ 铁律：本文件必须与 mqtt_client.c **签名完全一致**（含 R9 T04 新增的 4 个），
+ *   否则真实现换 stub 时链接直接失败 —— 本项目踩过「stub 与真实现不一致」的坑。
  */
 
 #include "core/remote/mqtt_client.h"
@@ -13,7 +16,7 @@
 int mqtt_start(const char * host, int port, const char * client_id, mqtt_msg_cb_t cb)
 {
     (void)host; (void)port; (void)client_id; (void)cb;
-    printf("[mqtt] 特性未启用（缺少 paho-mqtt3a 或已关闭 SAFE_FEATURE_MQTT），远程通道停用\n");
+    printf("[mqtt] 特性未启用（缺少 cJSON 或已关闭 SAFE_FEATURE_MQTT），远程通道停用\n");
     return -1;
 }
 
@@ -50,5 +53,30 @@ bool mqtt_is_authenticated(void)
 int mqtt_take(char * topic, size_t tcap, char * payload, size_t pcap)
 {
     (void)topic; (void)tcap; (void)payload; (void)pcap;
+    return 0;
+}
+
+/* ---- R9 T04 新增：与 mqtt_client.c 同步实现，保持签名一致 ---- */
+
+void mqtt_set_will(const char * topic, const char * payload, int qos, bool retain)
+{
+    (void)topic; (void)payload; (void)qos; (void)retain;
+}
+
+const char * mqtt_state_str(void)
+{
+    return "idle";
+}
+
+void mqtt_stats(uint32_t * connects, uint32_t * reconnects, uint32_t * dropped, uint32_t * queue_full)
+{
+    if (connects)    *connects    = 0;
+    if (reconnects)  *reconnects  = 0;
+    if (dropped)     *dropped     = 0;
+    if (queue_full)  *queue_full  = 0;
+}
+
+size_t mqtt_queued(void)
+{
     return 0;
 }

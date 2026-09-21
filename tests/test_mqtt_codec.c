@@ -66,8 +66,13 @@ static void t_connect(void)
     /* 可变头里应能看到协议名 MQTT 与级别 4 */
     CHECK(memcmp(v.payload + 2, "MQTT", 4) == 0);
     CHECK(v.payload[6]  == 0x04);
-    /* 带 will + user + pass + clean session → 标志位 0xC6 */
-    CHECK(v.payload[7]  == (uint8_t)0xC6);
+    /* 带 will + user + pass + clean session → 标志位 0xEE
+     *   bit1 clean(0x02) | bit2 will(0x04) | bit3 will QoS=1(0x08)
+     *   | bit5 will retain(0x20) | bit7 user(0x80) | bit6 pass(0x40)
+     * ★ R9 T04 起 will 固定为 QoS1 + retain：LWT 的唯一用途是「设备异常掉线时
+     *   让 broker 代发离线通告」，QoS0 会丢、非 retain 让后上线的订阅者看不到
+     *   离线状态 —— 两者都让 LWT 失去意义。这里锁死这两位防回退。 */
+    CHECK(v.payload[7]  == (uint8_t)0xEE);
 }
 
 /* ---------- 3. PUBLISH round-trip（QoS0 / QoS1） ---------- */

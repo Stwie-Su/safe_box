@@ -19,7 +19,7 @@ else()
     set(_tests_default ON)
 endif()
 
-option(SAFE_FEATURE_MQTT "MQTT 远程通道（需要 paho-mqtt3a + cJSON）" ${_mqtt_default})
+option(SAFE_FEATURE_MQTT "MQTT 远程通道（自研实现，需要 cJSON）" ${_mqtt_default})
 option(SAFE_FEATURE_JSON "JSON 存储后端（需要 cJSON）" ON)
 option(SAFE_BUILD_TESTS  "构建单元测试" ${_tests_default})
 option(SAFE_DEBUG_HOOKS "板子构建也编译调试钩子(切页/截图/开弹窗)，仅验证固件用" OFF)
@@ -50,32 +50,17 @@ else()
     set(SAFE_HAVE_CJSON FALSE)
 endif()
 
-# Paho MQTT C
-if(SAFE_FEATURE_MQTT)
-    find_path(SAFE_PAHO_INCLUDE_DIR NAMES MQTTClient.h)
-    find_library(SAFE_PAHO_LIBRARY NAMES paho-mqtt3a)
-    if(SAFE_PAHO_INCLUDE_DIR AND SAFE_PAHO_LIBRARY)
-        set(SAFE_HAVE_PAHO TRUE)
-        list(APPEND SAFE_EXTRA_LIBS ${SAFE_PAHO_LIBRARY})
-    else()
-        set(SAFE_HAVE_PAHO FALSE)
-        message(STATUS "[feature] paho-mqtt3a 未找到，MQTT 通道降级为空实现")
-    endif()
-else()
-    set(SAFE_HAVE_PAHO FALSE)
-endif()
-
-# MQTT 依赖 cJSON 做报文解析，缺一不可
+# ---------------- MQTT（R9 起自研，不再需要第三方 MQTT 库） ----------------
+# 旧实现依赖第三方 MQTT 库，而板子上没有可用的 ARM 版 —— 交叉构建会静默退化成
+# mqtt_stub.c，导致**板上远程通道永久断线**（这正是 R9 要解决的问题）。
+# 自研实现只依赖 libc + cJSON，故 MQTT 的前置条件从「第三方库 + cJSON」降为「只要
+# cJSON」；缺 cJSON 时才退化空实现。构建不再探测、也不再链接任何第三方 MQTT 库。
 if(SAFE_FEATURE_MQTT AND NOT SAFE_HAVE_CJSON)
-    message(STATUS "[feature] 缺少 cJSON，MQTT 通道一并降级为空实现")
-    set(SAFE_HAVE_PAHO FALSE)
+    message(STATUS "[feature] 缺少 cJSON，MQTT 通道降级为空实现")
 endif()
 
 # 依赖头文件目录汇总，供 app 目标使用
 set(SAFE_DEP_INCLUDE_DIRS "")
 if(SAFE_HAVE_CJSON)
     list(APPEND SAFE_DEP_INCLUDE_DIRS ${SAFE_CJSON_INCLUDE_DIR})
-endif()
-if(SAFE_HAVE_PAHO)
-    list(APPEND SAFE_DEP_INCLUDE_DIRS ${SAFE_PAHO_INCLUDE_DIR})
 endif()

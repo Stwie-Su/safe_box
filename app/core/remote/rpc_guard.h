@@ -3,9 +3,9 @@
  * 远程指令的「轻量访问控制」原语：req_id 去重、请求时效窗口、命令分级。
  *
  * 为什么独立成文件（而不是塞进 rpc.c）：
- *   rpc.c 直接依赖 paho-mqtt3a + cJSON，任何想覆盖它的单测都得拉起整个 MQTT 栈。
+ *   rpc.c 依赖 MQTT 栈 + cJSON，任何想覆盖它的单测都得拉起整个 MQTT 栈。
  *   把与网络无关的纯逻辑（定长环形去重表 + 时间窗判定 + 命令分级）下沉到本文件后，
- *   tests/test_rpc.c 可零依赖、确定性地直接驱动这些函数（不需要 broker / paho / 时钟）。
+ *   tests/test_rpc.c 可零依赖、确定性地直接驱动这些函数（不需要 broker / 时钟）。
  *   本模块**无全局状态**（缓存由调用方持有），可重入。
  *
  * 线程模型：调用方 rpc_poll() 在 LVGL 主线程串行访问同一份缓存，故本模块不加锁。
@@ -174,7 +174,7 @@ bool rpc_env_flag_on(const char *value);
  * 判定顺序：先时效后去重（两条相互独立，顺序仅为可读性）。
  *
  * 为什么把「分级」放进本函数而不是散在 dispatch：语义集中一处 → 单测可完整锁定
- * 「只读重复放行 / 敏感重复拒绝」这一对核心行为（无需拉起 paho/broker）。 */
+ * 「只读重复放行 / 敏感重复拒绝」这一对核心行为（无需拉起 MQTT / broker）。 */
 int rpc_guard_admit(rpc_req_cache_t *cache, const char *cmd, const char *req_id,
                     int64_t ts, int64_t now_sec, int window_sec);
 
