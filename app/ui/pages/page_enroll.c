@@ -341,7 +341,10 @@ static void face_box_update(void)
     if (s_box_obj == NULL) return;
     int16_t l = 0, t = 0, r = 0, b = 0;
     if (face_service_face_box(&l, &t, &r, &b) != 0 || (l | t | r | b) == 0) {
-        if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
+        if (s_box_visible) {
+            printf("[录入页-BOX] 隐藏：无框数据（ret/全零）\n");
+            lv_obj_set_hidden(s_box_obj, true); s_box_visible = false;
+        }
         return;
     }
     if (s_vid_w <= 0 || s_vid_h <= 0) {
@@ -360,12 +363,19 @@ static void face_box_update(void)
     const int32_t x2 = s_vid_x + (int32_t)(((int64_t)r + 1) * s_vid_w / 480);
     const int32_t y2 = s_vid_y + (int32_t)(((int64_t)b + 1) * s_vid_h / 640);
     if (x2 <= x1 || y2 <= y1 || x2 < 0 || y2 < 0 || x1 > s_canvas_w || y1 > s_canvas_h) {
-        if (s_box_visible) { lv_obj_set_hidden(s_box_obj, true); s_box_visible = false; }
+        if (s_box_visible) {
+            printf("[录入页-BOX] 隐藏：映射出界 x1=%d y1=%d x2=%d y2=%d\n", x1, y1, x2, y2);
+            lv_obj_set_hidden(s_box_obj, true); s_box_visible = false;
+        }
         return;
+    }
+    if (!s_box_visible) {
+        printf("[录入页-BOX] 显示：框(%d,%d,%d,%d) → 画布(%d,%d) %dx%d\n",
+               l, t, r, b, x1, y1, x2 - x1, y2 - y1);
+        lv_obj_set_hidden(s_box_obj, false); s_box_visible = true;
     }
     lv_obj_set_pos(s_box_obj, x1, y1);
     lv_obj_set_size(s_box_obj, x2 - x1, y2 - y1);
-    if (!s_box_visible) { lv_obj_set_hidden(s_box_obj, false); s_box_visible = true; }
 }
 
 /* ===== 状态定时器（500ms）：引导小字 + 状态文案 ===== */
