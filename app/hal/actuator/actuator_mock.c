@@ -9,6 +9,8 @@
  * 本文件与业务层都不受影响。
  */
 
+#include "platform/thread_util.h"      /* ★ 必须第一个 include：它要在 <pthread.h> 前定义 _GNU_SOURCE */
+
 #include "actuator_backend.h"
 
 #include <pthread.h>
@@ -23,6 +25,7 @@ static volatile bool s_thread_busy;
 static void * off_thread_fn(void * arg)
 {
     uint32_t ms = (uint32_t)(uintptr_t)arg;
+    safe_thread_setname("safe-act-off");
     usleep(ms * 1000u);
     printf("[ACTUATOR] pulse end after %u ms -> LOW\n", (unsigned)ms);
     hal_actuator_notify_low();

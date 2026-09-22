@@ -24,6 +24,8 @@
  *
  * 对外契约：mqtt_client.h 的既有 8 个签名一个字没改（rpc.c / ui.c 依赖）。
  */
+#include "platform/thread_util.h"      /* ★ 必须第一个 include：它要在 <pthread.h> 前定义 _GNU_SOURCE */
+
 #include "core/remote/mqtt_client.h"
 
 #include "core/remote/mqtt_codec.h"
@@ -599,6 +601,8 @@ static void * mqtt_net_thread(void *arg)
     size_t  rx_len = 0;
     mqtt_fsm_out_t out;
     uint32_t now_ms;
+
+    safe_thread_setname("safe-mqtt-net");
 
     (void)arg;
 

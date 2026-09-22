@@ -10,6 +10,8 @@
  *  全程仅需一个互斥锁 + 一个条件变量；
  *  所有的 done 回调函数均保证在调用 worker_poll() 的主线程中执行（确保 LVGL 等 UI 操作安全）。
  */
+#include "platform/thread_util.h"      /* ★ 必须第一个 include：它要在 <pthread.h> 前定义 _GNU_SOURCE */
+
 #include "core/support/worker.h"
 
 #include <pthread.h>
@@ -48,6 +50,7 @@ static bool    g_inited = false;
  */
 static void * worker_main(void * p)
 {
+    safe_thread_setname("safe-worker");
     (void)p;
     for (;;) {
         /* ================= 阶段 1：从 Pending 队列安全提取任务 ================= */

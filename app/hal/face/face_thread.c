@@ -29,6 +29,8 @@
  *   采集临界区与关 fd 的次序由 io 锁保证；双帧缓冲由 fb 锁保证。
  */
 
+#include "platform/thread_util.h"      /* ★ 必须第一个 include：它要在 <pthread.h> 前定义 _GNU_SOURCE */
+
 #include "hal/face/face_thread.h"
 
 #include <poll.h>
@@ -150,6 +152,7 @@ static void face_uart_drain(void)
 
 static void * face_thread_main(void * arg)
 {
+    safe_thread_setname("safe-face");
     (void)arg;
     s_running = true;
 
