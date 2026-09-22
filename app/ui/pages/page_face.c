@@ -356,7 +356,7 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
 
     /* 右：「开始识别」——单次触发识别会话（FR-27 拍板：其余时间模组静默低功耗） */
     s_btn_verify = lv_button_create(head);
-    lv_obj_set_size(s_btn_verify, SX(128), SY(38));
+    lv_obj_set_size(s_btn_verify, SX(128), SY(48));
     lv_obj_set_style_radius(s_btn_verify, SX(12), 0);
     lv_obj_set_style_bg_color(s_btn_verify, theme_color(TH_ACCENT), 0);
     lv_obj_set_style_bg_opa(s_btn_verify, LV_OPA_COVER, 0);
@@ -397,7 +397,7 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     for (int i = 0; i < 4; i++) {
         s_box_seg[i] = lv_obj_create(s_preview);
         lv_obj_remove_style_all(s_box_seg[i]);
-        lv_obj_set_style_bg_color(s_box_seg[i], lv_color_hex(0x2ECC71), 0);
+        lv_obj_set_style_bg_color(s_box_seg[i], theme_color(TH_OK), 0);
         lv_obj_set_style_bg_opa(s_box_seg[i], LV_OPA_COVER, 0);
         lv_obj_set_hidden(s_box_seg[i], true);
     }

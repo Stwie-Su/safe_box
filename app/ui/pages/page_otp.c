@@ -96,12 +96,12 @@ lv_obj_t * page_otp_create(lv_obj_t * parent)
         { "7", "8", "9" },
         { "退格", "0", "清空" },
     };
-    const int ROW_Y[4] = { SY(216), SY(272), SY(328), SY(384) };
+    const int ROW_Y[4] = { SY(216), SY(276), SY(336), SY(396) };
     const int KEY_X[3]  = { kx, kx + SX(100), kx + SX(200) };
     for (int r = 0; r < 4; r++) {
         for (int c = 0; c < 3; c++) {
             lv_obj_t * k = lv_button_create(root);
-            lv_obj_set_size(k, SX(93), SY(46));
+            lv_obj_set_size(k, SX(93), SY(52));
             lv_obj_set_pos(k, KEY_X[c], ROW_Y[r]);
             lv_obj_add_style(k, &st_panel2, 0);
             lv_obj_set_style_radius(k, SX(10), 0);
@@ -117,8 +117,8 @@ lv_obj_t * page_otp_create(lv_obj_t * parent)
 
     /* 返回 / 确认 */
     lv_obj_t * bk = lv_button_create(root);
-    lv_obj_set_size(bk, SX(145), SY(46));
-    lv_obj_set_pos(bk, kx, SY(440));
+    lv_obj_set_size(bk, SX(145), SY(52));
+    lv_obj_set_pos(bk, kx, SY(456));
     lv_obj_add_style(bk, &st_ghost_btn, 0);
     lv_obj_add_event_cb(bk, otp_back_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * bkl = lv_label_create(bk);
@@ -127,8 +127,8 @@ lv_obj_t * page_otp_create(lv_obj_t * parent)
     lv_obj_center(bkl);
 
     lv_obj_t * ok = lv_button_create(root);
-    lv_obj_set_size(ok, SX(145), SY(46));
-    lv_obj_set_pos(ok, kx + SX(155), SY(440));
+    lv_obj_set_size(ok, SX(145), SY(52));
+    lv_obj_set_pos(ok, kx + SX(155), SY(456));
     lv_obj_add_style(ok, &st_accent_btn, 0);
     lv_obj_add_style(ok, &st_accent_btn_pr, LV_STATE_PRESSED);
     lv_obj_add_event_cb(ok, otp_confirm_cb, LV_EVENT_CLICKED, NULL);

@@ -216,7 +216,7 @@ lv_obj_t * page_settings_create(lv_obj_t * parent)
     lv_obj_set_scrollable(rspacer, false);
 
     lv_obj_t * refresh = ui_icon_text_button(right, LV_SYMBOL_REFRESH, "刷新诊断数据",
-                                             lv_pct(100), SY(40), &st_ghost_btn,
+                                             lv_pct(100), SY(44), &st_ghost_btn,
                                              theme_color(TH_TEXT), refresh_btn_cb, NULL);
     (void)refresh;
 

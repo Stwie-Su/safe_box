@@ -60,7 +60,7 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
     lv_obj_set_flex_align(head, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     lv_obj_t * back = lv_button_create(head);
-    lv_obj_set_size(back, SX(72), SY(40));
+    lv_obj_set_size(back, SX(72), SY(44));
     lv_obj_add_style(back, &st_ghost_btn, 0);
     lv_obj_add_event_cb(back, go_back_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * bl = lv_label_create(back);
@@ -82,16 +82,23 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
 
     /* 主体：左可用 + 右已存 */
     lv_obj_t * body = lv_obj_create(root);
+    /* 宽度 = 父容器宽度，flex_grow 负责在 ROW 主轴上吃掉剩余空间
+     * （与 page_system.c 的 left/right 同一写法）。 */
+    lv_obj_set_width(body, lv_pct(100));
     lv_obj_set_flex_grow(body, 1);
-    lv_obj_set_size(body, lv_pct(100), lv_pct(100));
     lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(body, 0, 0);
+    lv_obj_set_scrollable(body, false);
     lv_obj_set_flex_flow(body, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_column(body, SX(16), 0);
 
     /* 左：可用网络 */
     lv_obj_t * avail = lv_obj_create(body);
     lv_obj_set_flex_grow(avail, 1);
+    /* ★ 关键：body 是 ROW flex，flex_grow 只管**主轴（宽度）**。
+     *   高度属交叉轴，必须显式给 —— 否则按内容高排，卡片塌成约 130px，
+     *   下方留一大片空白。对照 page_system.c 的 left/right 写法。 */
+    lv_obj_set_height(avail, lv_pct(100));
     lv_obj_add_style(avail, &st_panel, 0);
     lv_obj_set_flex_flow(avail, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(avail, 8, 0);
@@ -102,8 +109,9 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
     lv_obj_set_style_text_font(at, app_font_scaled(20), 0);
 
     s_avail_list = lv_obj_create(avail);
+    /* 父容器是 COLUMN flex，这里 flex_grow 管的是**高度**（主轴） */
+    lv_obj_set_width(s_avail_list, lv_pct(100));
     lv_obj_set_flex_grow(s_avail_list, 1);
-    lv_obj_set_size(s_avail_list, lv_pct(100), lv_pct(100));
     lv_obj_set_style_bg_opa(s_avail_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_avail_list, 0, 0);
     lv_obj_set_flex_flow(s_avail_list, LV_FLEX_FLOW_COLUMN);
@@ -132,6 +140,7 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
     /* 右：已存网络 */
     lv_obj_t * saved = lv_obj_create(body);
     lv_obj_set_flex_grow(saved, 1);
+    lv_obj_set_height(saved, lv_pct(100));   /* ★ 同上：交叉轴高度必须显式给 */
     lv_obj_add_style(saved, &st_panel, 0);
     lv_obj_set_flex_flow(saved, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(saved, 8, 0);
@@ -142,8 +151,9 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
     lv_obj_set_style_text_font(st, app_font_scaled(20), 0);
 
     s_saved_list = lv_obj_create(saved);
+    /* 父容器是 COLUMN flex，这里 flex_grow 管的是**高度**（主轴） */
+    lv_obj_set_width(s_saved_list, lv_pct(100));
     lv_obj_set_flex_grow(s_saved_list, 1);
-    lv_obj_set_size(s_saved_list, lv_pct(100), lv_pct(100));
     lv_obj_set_style_bg_opa(s_saved_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_saved_list, 0, 0);
     lv_obj_set_flex_flow(s_saved_list, LV_FLEX_FLOW_COLUMN);
@@ -377,6 +387,3 @@ static void net_add_done(int result)
         lv_label_set_text(s_msg, "保存失败");
     }
 }
-
-
-

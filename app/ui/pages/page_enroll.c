@@ -614,7 +614,7 @@ lv_obj_t * page_enroll_create(lv_obj_t * parent)
     for (int i = 0; i < 4; i++) {
         s_box_seg[i] = lv_obj_create(s_preview);
         lv_obj_remove_style_all(s_box_seg[i]);
-        lv_obj_set_style_bg_color(s_box_seg[i], lv_color_hex(0x2ECC71), 0);
+        lv_obj_set_style_bg_color(s_box_seg[i], theme_color(TH_OK), 0);
         lv_obj_set_style_bg_opa(s_box_seg[i], LV_OPA_COVER, 0);
         lv_obj_set_hidden(s_box_seg[i], true);
     }
@@ -656,7 +656,7 @@ lv_obj_t * page_enroll_create(lv_obj_t * parent)
     lv_obj_set_flex_grow(s_status, 1);
 
     lv_obj_t * cancel = lv_button_create(foot);
-    lv_obj_set_size(cancel, SX(128), SY(38));
+    lv_obj_set_size(cancel, SX(128), SY(48));
     lv_obj_set_style_radius(cancel, SX(12), 0);
     lv_obj_set_style_bg_opa(cancel, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(cancel, 1, 0);

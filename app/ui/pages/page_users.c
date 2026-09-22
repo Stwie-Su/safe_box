@@ -290,7 +290,7 @@ lv_obj_t * page_users_create(lv_obj_t * parent)
 
     /* 按钮挂载到 head 后由父对象持有，无需保存句柄（原写法留下未使用变量 back，D11） */
     ui_icon_text_button(head, LV_SYMBOL_LEFT, "返回",
-                        SX(78), SY(38), &st_ghost_btn,
+                        SX(78), SY(44), &st_ghost_btn,
                         theme_color(TH_TEXT), go_back_cb, NULL);
 
     lv_obj_t * title = lv_label_create(head);
@@ -306,7 +306,7 @@ lv_obj_t * page_users_create(lv_obj_t * parent)
     lv_obj_set_scrollable(spacer_h, false);
 
     lv_obj_t * add = s_add_btn = ui_icon_text_button(head, LV_SYMBOL_PLUS, "添加用户",
-                                          SX(120), SY(38), &st_accent_btn,
+                                          SX(120), SY(44), &st_accent_btn,
                                           theme_color(TH_ACCENT_INK), add_btn_cb, NULL);
     lv_obj_add_style(add, &st_accent_btn_pr, LV_STATE_PRESSED);
 
@@ -515,7 +515,7 @@ static lv_obj_t * row_op_btn(lv_obj_t * parent, ui_glyph_t glyph, const char * t
                              lv_event_cb_t cb, int uid)
 {
     lv_obj_t * b = lv_button_create(parent);
-    lv_obj_set_size(b, w, SY(34));
+    lv_obj_set_size(b, w, SY(44));
     lv_obj_add_style(b, style, 0);
     lv_obj_set_style_pad_hor(b, SX(6), 0);
     lv_obj_set_style_pad_ver(b, 0, 0);
@@ -643,7 +643,7 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
 
     /* --- 右侧操作组：修改信息 / 启停 / 人脸 / 删除 --- */
     lv_obj_t * ops = lv_obj_create(row);
-    lv_obj_set_size(ops, LV_SIZE_CONTENT, SY(34));
+    lv_obj_set_size(ops, LV_SIZE_CONTENT, SY(44));
     lv_obj_set_style_bg_opa(ops, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(ops, 0, 0);
     lv_obj_set_style_pad_all(ops, 0, 0);
@@ -823,8 +823,19 @@ static lv_obj_t * dlg_open(const char *title, int w, int h)
     lv_obj_set_scrollable(s_ov, false);
     lv_obj_add_event_cb(s_ov, dlg_cancel_cb, LV_EVENT_CLICKED, NULL);
 
+    /* ★ 布局优化（2026-09-21）：窗口高度改为【内容自适应】 ——
+     * 原先 h 由各调用方写死（添加用户 330 / 修改信息 470 / 提示 150），往表单里
+     * 加一个字段就要记得同步改数字，忘了就把内容裁掉（窗口不可滚动）。
+     * 现在按内容定高，上限仍是「键盘上方可用区」，保证永远完整落在键盘之上
+     *（键盘是后建子对象、绘制在窗口之上，越界部分点不到）。 */
+    const int32_t kb_h  = SY(220);
+    const int32_t scr_h = (int32_t)lv_obj_get_height(lv_screen_active());
+    const int32_t avail = scr_h - kb_h - SY(10) - SY(10);   /* 上边距10 + 与键盘间隙10 */
+
     s_win = lv_obj_create(s_ov);
-    lv_obj_set_size(s_win, w, h);
+    lv_obj_set_size(s_win, w, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_win, avail, 0);
+    (void)h;   /* 兼容既有调用方签名；高度已由内容决定 */
     lv_obj_add_style(s_win, &st_panel, 0);
     lv_obj_set_style_radius(s_win, 16, 0);
     /* 窗口同样关滚动：各弹窗内部一律用 flex 排布 + 定高，从不依赖滚动；
@@ -892,7 +903,7 @@ static lv_obj_t * dlg_textarea_ex(lv_obj_t * parent, const char *label, bool pas
 {
     if (idx >= 0 && idx < DLG_TA_MAX) s_dlg_tas[idx] = NULL;  /* 先清空，防 dialog 复用残留 */
     lv_obj_t * ta = lv_textarea_create(parent);
-    lv_obj_set_size(ta, w, SY(40));
+    lv_obj_set_size(ta, w, SY(44));
     lv_obj_add_style(ta, &st_panel2, 0);
     lv_obj_set_style_radius(ta, SX(6), 0);
     lv_textarea_set_one_line(ta, true);
@@ -971,7 +982,7 @@ static void add_btn_cb(lv_event_t * e)
 static void dlg_role_row(void)
 {
     lv_obj_t * row = lv_obj_create(s_win);
-    lv_obj_set_size(row, SX(300), SY(34));
+    lv_obj_set_size(row, SX(300), SY(44));
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_pad_all(row, 0, 0);
@@ -982,7 +993,7 @@ static void dlg_role_row(void)
 
     for (int i = 0; i < ROLE_SEL_CNT; i++) {
         lv_obj_t * b = lv_button_create(row);
-        lv_obj_set_size(b, SX(94), SY(32));
+        lv_obj_set_size(b, SX(94), SY(44));
         lv_obj_add_style(b, &st_ghost_btn, 0);
         lv_obj_add_style(b, &st_accent_btn, LV_STATE_CHECKED);
         lv_obj_set_style_pad_hor(b, SX(4), 0);
@@ -1003,7 +1014,7 @@ static void dlg_role_row(void)
 static void dlg_temp_row(void)
 {
     lv_obj_t * row = lv_obj_create(s_win);
-    lv_obj_set_size(row, SX(300), SY(40));
+    lv_obj_set_size(row, SX(300), SY(44));
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_pad_all(row, 0, 0);
