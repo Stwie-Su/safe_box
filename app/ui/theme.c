@@ -95,8 +95,8 @@ static void apply_theme(void)
     lv_style_set_pad_all(&st_panel, 16);
     /* 柔和投影： elevace 观感（浅蓝主题下更明显） */
     lv_style_set_shadow_color(&st_panel, lv_color_hex(0x16344C));
-    lv_style_set_shadow_width(&st_panel, 24);
-    lv_style_set_shadow_opa(&st_panel, 20);
+    lv_style_set_shadow_width(&st_panel, 16);
+    lv_style_set_shadow_opa(&st_panel, 16);
     lv_style_set_shadow_ofs_y(&st_panel, 4);
 
     lv_style_set_bg_color(&st_panel2, p->c[TH_PANEL2]);

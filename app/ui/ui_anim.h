@@ -54,12 +54,21 @@ extern "C" {
 #define UI_ANIM_PRESS_OUT_MS     180
 #define UI_ANIM_PRESS_SHRINK_W   (-6)    /* 按压态横向微缩（两侧合计 12px） */
 #define UI_ANIM_PRESS_SHRINK_H   (-3)    /* 按压态纵向微缩（两侧合计 6px） */
-#define UI_ANIM_PRESS_SHADOW_W   3       /* 按压态阴影宽度（收紧） */
-#define UI_ANIM_PRESS_SHADOW_Y   1       /* 按压态阴影纵向偏移（收紧） */
-#define UI_ANIM_PRESS_SHADOW_OPA 12      /* 按压态阴影不透明度 */
-#define UI_ANIM_IDLE_SHADOW_W    8       /* 常态阴影宽度 */
-#define UI_ANIM_IDLE_SHADOW_Y    3       /* 常态阴影纵向偏移 */
-#define UI_ANIM_IDLE_SHADOW_OPA  20      /* 常态阴影不透明度 */
+/* ★ 帧率 + 现代化（2026-09-22）：**按钮阴影全部取消**（宽度置 0）。
+ *   ① 帧率：users / system 页有 60+ 个按钮，每个都要额外画一层模糊阴影
+ *      （模糊半径 8px × 按钮周长），纯 CPU 软件渲染下是白扔的固定开销；
+ *   ② 现代化：当下主流是**扁平化** —— 控件不再靠投影表达层级，改由
+ *      「填充色 + 1px 边框 + 表面色差」承担。卡片（st_panel，16px 阴影）
+ *      仍保留投影，层级落在**大容器**上，而不是每个小按钮上；
+ *   ③ 按压反馈不丢失：st_btn_press 的微缩 transform 与配色仍在，
+ *      且比阴影更即时。
+ *   ⚠️ 要恢复只需把下面两行的 W 改回非零（Y / OPA 随之生效）。 */
+#define UI_ANIM_PRESS_SHADOW_W   0       /* 按压态阴影宽度（0 = 不画） */
+#define UI_ANIM_PRESS_SHADOW_Y   0
+#define UI_ANIM_PRESS_SHADOW_OPA 0
+#define UI_ANIM_IDLE_SHADOW_W    0       /* 常态阴影宽度（0 = 不画） */
+#define UI_ANIM_IDLE_SHADOW_Y    0
+#define UI_ANIM_IDLE_SHADOW_OPA  0
 
 /* ---------------- 导航高亮渐变（spec §3） ----------------
  * 左 rail 的图标 / 文字 / 页面切换共用：颜色 150ms 渐变。 */
@@ -73,4 +82,3 @@ extern "C" {
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif
-

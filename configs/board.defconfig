@@ -13,7 +13,14 @@ CONFIG_LV_OS_PTHREAD=y
 
 # --- 显示参数（与 PC 相同）---
 CONFIG_LV_COLOR_DEPTH_32=y          # /dev/fb0 实测 32bpp；与帧缓冲同色深，flush 变纯 memcpy，省去每帧 RGB565->RGB888 转换
-CONFIG_LV_DEF_REFR_PERIOD=16
+# ★ 帧率（2026-09-22）：16 -> 33。
+# 板端单核 A7 实测 UI 稳态约 21fps（渲染本身就要 ~23ms 以上），刷新周期定 16ms
+# 的结果是「上一帧刚画完就立刻画下一帧」= 主循环 100% 忙转，把 CPU 完全占死，
+# 摄像头拉帧 / MQTT 收发 / 人脸线程都拿不到时间片。
+# 定 33ms（≈30fps 上限）后：渲染仍是瓶颈所以 **fps 不会变**，但两帧之间留出空档，
+# 其它线程有呼吸空间，视频预览与 MQTT 响应变稳。
+# ⚠️ 这条**不提高** fps，只是停止空转；若将来渲染快于 33ms，它会反过来成为上限，届时需回退到 16。
+CONFIG_LV_DEF_REFR_PERIOD=33
 
 # --- 后端：板子用 FBDEV + EVDEV；PC 用 SDL（下面注释行即 PC 的，反过来在 pc.defconfig 里被注释）---
 CONFIG_LV_USE_LINUX_FBDEV=y
@@ -50,8 +57,3 @@ CONFIG_LV_DRAW_THREAD_STACK_SIZE=262144
 CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=1
 # 放大 FreeType 字形缓存：CJK 界面字形多，256 太小会反复光栅化导致卡顿
 CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=1024
-
-
-
-
-

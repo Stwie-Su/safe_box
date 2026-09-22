@@ -50,6 +50,9 @@ static lv_obj_t * s_mode_sw;        /* 人脸录入模式：单帧 / 五向 */
 static bool       s_mode_pending = false;   /* 待写入的目标值（管理员验证通过后才落盘） */
 static lv_obj_t * s_theme_btns[THEME_COUNT];
 static lv_obj_t * s_theme_cur;      /* 当前主题名（切换后刷新） */
+static lv_obj_t * s_adv_box = NULL; /* 「高级设置」折叠容器：低频开关收在这里 */
+static lv_obj_t * s_adv_lbl = NULL; /* 折叠标题（展开/收起文案） */
+static bool       s_adv_open = true;  /* 默认展开：低频项本来就少，折叠反而多一次点击 */
 
 static lv_obj_t * s_ov = NULL;
 static lv_obj_t * s_win = NULL;
@@ -69,8 +72,6 @@ static void factory_btn_cb(lv_event_t * e);
 static void refresh_policy(void);
 
 /* 虚位密码开关（FR-18）：落盘走后台线程，不在 UI 线程做文件 IO */
-static lv_obj_t * toggle_row(lv_obj_t * parent, const char * name, const char * hint,
-                             lv_obj_t ** sw_out, lv_event_cb_t cb);
 static void vpin_click_cb(lv_event_t * e);
 static void vpin_refresh(void);
 static void vpin_write_async(bool enable);
@@ -130,7 +131,9 @@ static char s_av_pin[16] = {0};
 static lv_obj_t * info_row(lv_obj_t * parent, const char * name, lv_obj_t ** val_out)
 {
     lv_obj_t * row = lv_obj_create(parent);
-    lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
+    /* ★ 显式行高（原 LV_SIZE_CONTENT）：让「展开态」在固定面板高度内可预算。
+     *   行内只有一个 14px 标签，内容高度必然包得住。 */
+    lv_obj_set_size(row, lv_pct(100), SY(22));
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_pad_all(row, 0, 0);
@@ -153,76 +156,88 @@ static lv_obj_t * info_row(lv_obj_t * parent, const char * name, lv_obj_t ** val
 }
 
 /**
- * @brief 可点开关行：左侧「主标签 + 次要说明」两行，右侧开关按钮。
+ * @brief 「高级设置」网格用的紧凑开关单元格：左主标签 + 右开关按钮，占半宽。
  *
- * FR-18 的虚位密码原本是一个只读 info_row（只显示「已启用/已停用」），管理员
- * 没有任何入口改它 —— 这里换成真正的开关。
- *
- * 为什么用 lv_button + CHECKED 而不是 lv_switch：
- *   - CHECKED 直接挂 st_ghost_btn / st_accent_btn 两套已有主题样式，换主题自动
- *     跟随，不需要额外注册刷新回调，也不会像 lv_switch 那样引入新的绘制部件；
- *   - 无阴影、无大圆角（圆角只有高度的一半，属按钮常规形态），符合板端帧率要求。
- *
- * @param name    主标签（功能名）
- * @param hint    次要说明（可选，NULL 不显示）
- * @param sw_out  回传开关按钮句柄（可为 NULL）
+ * 与 toggle_row（已随本次改造删除）相比：不带 hint（单行），半宽，供 2×2 网格排布。
+ * 展开「高级设置」后共有 4 项，纵向排会超出左栏可视高度，2×2 恰好放下。
  */
-static lv_obj_t * toggle_row(lv_obj_t * parent, const char * name, const char * hint,
-                             lv_obj_t ** sw_out, lv_event_cb_t cb)
+static lv_obj_t * toggle_cell(lv_obj_t * parent, const char * name,
+                              lv_obj_t ** sw_out, lv_event_cb_t cb)
 {
-    lv_obj_t * row = lv_obj_create(parent);
-    lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_set_style_pad_all(row, 0, 0);
-    lv_obj_set_scrollable(row, false);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+    lv_obj_t * cell = lv_obj_create(parent);
+    lv_obj_set_size(cell, lv_pct(48), SY(38));
+    lv_obj_set_style_bg_opa(cell, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cell, 0, 0);
+    lv_obj_set_style_pad_all(cell, 0, 0);
+    lv_obj_set_style_pad_right(cell, SX(10), 0);   /* 与右侧单元格留呼吸 */
+    lv_obj_set_scrollable(cell, false);
+    lv_obj_set_flex_flow(cell, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(cell, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
-    /* 左：主标签 + 说明（信息层次：功能名用正文色，说明用次要色、字号更小） */
-    lv_obj_t * col = lv_obj_create(row);
-    lv_obj_set_flex_grow(col, 1);
-    lv_obj_set_height(col, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(col, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(col, 0, 0);
-    lv_obj_set_style_pad_all(col, 0, 0);
-    lv_obj_set_style_pad_row(col, SY(1), 0);
-    lv_obj_set_scrollable(col, false);
-    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-
-    lv_obj_t * k = lv_label_create(col);
+    lv_obj_t * k = lv_label_create(cell);
     lv_label_set_text(k, name);
     lv_obj_add_style(k, &st_text, 0);
     lv_obj_set_style_text_font(k, app_font_scaled(14), 0);
 
-    if (hint) {
-        lv_obj_t * h = lv_label_create(col);
-        lv_label_set_text(h, hint);
-        lv_obj_add_style(h, &st_text_mut, 0);
-        lv_obj_set_style_text_font(h, app_font_scaled(11), 0);
-    }
-
-    /* 右：开关按钮。文字由各自的 refresh 按真实策略值刷新。
-     * 回调由调用方传入 —— 原先写死 vpin_click_cb，第二个使用者（录入模式）
-     * 点了不会走自己的逻辑（编译期就是 unused-function 警告，正是它暴露的）。 */
-    lv_obj_t * sw = lv_button_create(row);
-    lv_obj_set_size(sw, SX(92), SY(30));
+    lv_obj_t * sw = lv_button_create(cell);
+    lv_obj_set_size(sw, SX(76), SY(32));
     lv_obj_add_style(sw, &st_ghost_btn, 0);
     lv_obj_add_style(sw, &st_accent_btn, LV_STATE_CHECKED);
-    lv_obj_set_style_pad_hor(sw, SX(6), 0);
+    lv_obj_set_style_pad_hor(sw, SX(4), 0);
     lv_obj_set_style_pad_ver(sw, 0, 0);
     lv_obj_set_style_radius(sw, SX(8), 0);
     lv_obj_add_event_cb(sw, cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t * sl = lv_label_create(sw);
     lv_label_set_text(sl, "已关闭");
-    lv_obj_set_style_text_font(sl, app_font_scaled(13), 0);
+    lv_obj_set_style_text_font(sl, app_font_scaled(12), 0);
     lv_obj_center(sl);
 
     if (sw_out) *sw_out = sw;
-    return row;
+    return cell;
+}
+
+/** 「高级设置」网格用的紧凑只读单元格：左名 + 右值，占半宽。 */
+static lv_obj_t * info_cell(lv_obj_t * parent, const char * name, lv_obj_t ** val_out)
+{
+    lv_obj_t * cell = lv_obj_create(parent);
+    lv_obj_set_size(cell, lv_pct(48), SY(38));
+    lv_obj_set_style_bg_opa(cell, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cell, 0, 0);
+    lv_obj_set_style_pad_all(cell, 0, 0);
+    lv_obj_set_style_pad_right(cell, SX(10), 0);   /* 与右侧单元格留呼吸 */
+    lv_obj_set_scrollable(cell, false);
+    lv_obj_set_flex_flow(cell, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(cell, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t * k = lv_label_create(cell);
+    lv_label_set_text(k, name);
+    lv_obj_add_style(k, &st_text_mut, 0);
+    lv_obj_set_style_text_font(k, app_font_scaled(14), 0);
+
+    lv_obj_t * v = lv_label_create(cell);
+    lv_label_set_text(v, "--");
+    lv_obj_add_style(v, &st_text, 0);
+    lv_obj_set_style_text_font(v, app_font_scaled(14), 0);
+    if (val_out) *val_out = v;
+    return cell;
+}
+
+/** 建一行 2 列网格容器（占满宽，行内两格各自 50%）。 */
+static lv_obj_t * adv_grid_row(lv_obj_t * parent)
+{
+    lv_obj_t * r = lv_obj_create(parent);
+    lv_obj_set_size(r, lv_pct(100), SY(38));
+    lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(r, 0, 0);
+    lv_obj_set_style_pad_all(r, 0, 0);
+    lv_obj_set_scrollable(r, false);
+    lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(r, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    return r;
 }
 
 /* 策略步进行：label + [-] 值 [+]；which=0 失败次数，1 锁定时长 */
@@ -230,7 +245,7 @@ static lv_obj_t * stepper_row(lv_obj_t * parent, const char *name, lv_obj_t **va
                               lv_event_cb_t dec_cb, lv_event_cb_t inc_cb, int which)
 {
     lv_obj_t * row = lv_obj_create(parent);
-    lv_obj_set_size(row, lv_pct(100), 56);
+    lv_obj_set_size(row, lv_pct(100), SY(56));
     lv_obj_add_style(row, &st_panel2, 0);
     lv_obj_set_style_radius(row, 10, 0);
     lv_obj_set_scrollable(row, false);
@@ -245,7 +260,7 @@ static lv_obj_t * stepper_row(lv_obj_t * parent, const char *name, lv_obj_t **va
     lv_obj_set_style_pad_left(nm, 12, 0);
 
     lv_obj_t * dec = lv_button_create(row);
-    lv_obj_set_size(dec, 40, 34);
+    lv_obj_set_size(dec, SX(48), SY(44));
     lv_obj_add_style(dec, &st_ghost_btn, 0);
     lv_obj_add_event_cb(dec, dec_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)which);
     lv_obj_t * decl = lv_label_create(dec);
@@ -261,7 +276,7 @@ static lv_obj_t * stepper_row(lv_obj_t * parent, const char *name, lv_obj_t **va
     lv_obj_set_style_pad_right(*val_lbl, 12, 0);
 
     lv_obj_t * inc = lv_button_create(row);
-    lv_obj_set_size(inc, 40, 34);
+    lv_obj_set_size(inc, SX(48), SY(44));
     lv_obj_add_style(inc, &st_ghost_btn, 0);
     lv_obj_add_event_cb(inc, inc_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)which);
     lv_obj_t * incl = lv_label_create(inc);
@@ -277,7 +292,7 @@ static lv_obj_t * stepper_row(lv_obj_t * parent, const char *name, lv_obj_t **va
 static lv_obj_t * theme_item(lv_obj_t * parent, int idx)
 {
     lv_obj_t * b = lv_button_create(parent);
-    lv_obj_set_size(b, lv_pct(100), 42);
+    lv_obj_set_size(b, lv_pct(100), SY(48));
     lv_obj_add_style(b, &st_panel2, 0);
     lv_obj_set_style_radius(b, 10, 0);
     lv_obj_add_style(b, &st_accent_btn, LV_STATE_CHECKED);
@@ -288,7 +303,7 @@ static lv_obj_t * theme_item(lv_obj_t * parent, int idx)
 
     /* 色块：左半为该主题的强调色，右半为面板色 —— 一眼看出"这套主题长什么样" */
     lv_obj_t * sw = lv_obj_create(b);
-    lv_obj_set_size(sw, 34, 24);
+    lv_obj_set_size(sw, SX(44), SY(30));
     lv_obj_set_style_radius(sw, 6, 0);
     lv_obj_set_style_border_width(sw, 0, 0);
     lv_obj_set_style_pad_all(sw, 0, 0);
@@ -301,6 +316,35 @@ static lv_obj_t * theme_item(lv_obj_t * parent, int idx)
     lv_obj_set_style_text_font(lb, app_font_scaled(15), 0);
     lv_obj_set_style_pad_left(lb, 10, 0);
     return b;
+}
+
+/** 危险区上方的虚线分隔：用一排小色块拼出虚线（不依赖 line 部件的虚线样式）。 */
+static void danger_dash_sep(lv_obj_t * parent)
+{
+    lv_obj_t * row = lv_obj_create(parent);
+    lv_obj_set_size(row, lv_pct(100), SY(2));
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_scrollable(row, false);
+    /* ★ 帧率（2026-09-22）：原实现用 30 个 12×2 小色块拼出虚线。
+     *   代价是 30 个对象 = 30 次绘制任务 + 30 次样式解析，而它承担的
+     *   职责只是「危险区上方的一条分隔线」。改成单个实线对象（1 个绘制任务）。
+     *   接受什么：失去「虚线」纹理。分隔语义仍在（danger 色细线），
+     *   且此处与上方安全区本就有卡片边界，不靠虚线也能区分。 */
+    lv_obj_set_style_bg_color(row, theme_color(TH_DANGER), 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_60, 0);
+    lv_obj_set_style_radius(row, 0, 0);
+}
+
+/** 「高级设置」折叠：低频项默认展开（内容已排成 2×2 网格放得下），仍可收起。 */
+static void adv_toggle_cb(lv_event_t * e)
+{
+    (void)e;
+    if (!s_adv_box) return;
+    s_adv_open = !s_adv_open;
+    lv_obj_set_hidden(s_adv_box, !s_adv_open);
+    if (s_adv_lbl) lv_label_set_text(s_adv_lbl,
+                                     s_adv_open ? "高级设置：收起" : "高级设置：展开");
 }
 
 /* ---------------- 页面 ---------------- */
@@ -366,6 +410,15 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     lv_obj_add_style(s_clock_lbl, &st_text_mut, 0);
     lv_obj_set_style_text_font(s_clock_lbl, app_font_scaled(14), 0);
 
+    /* ★ 布局优化（2026-09-21）：「保存策略」放在标题行右端，而不是左栏卡底。
+     * 左栏是「固定内容 vs 固定高度」的零和空间：面板不可滚动，一旦展开
+     * 「高级设置」内容变高，卡底的保存键就会被挤出可视区（首版已复现）。
+     * 移到标题行后它永远可见可点，与「页面级操作」的语义也一致。 */
+    lv_obj_t * save = ui_icon_text_button(head, LV_SYMBOL_SAVE, "保存策略",
+                                          SX(140), SY(44), &st_accent_btn,
+                                          theme_color(TH_ACCENT_INK), save_policy_cb, NULL);
+    lv_obj_add_style(save, &st_accent_btn_pr, LV_STATE_PRESSED);
+
     /* ---------- ② 双栏 ---------- */
     lv_obj_t * body = lv_obj_create(root);
     lv_obj_set_width(body, lv_pct(100));
@@ -382,9 +435,21 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     lv_obj_set_flex_grow(left, 1);
     lv_obj_set_height(left, lv_pct(100));
     lv_obj_add_style(left, &st_panel, 0);
-    lv_obj_set_scrollable(left, false);   /* ★ 面板不自滚动 */
+    /* ★ 现在允许左栏滚动：原先禁滚动是为了保住卡底的「保存策略」，
+     *   该按钮已移到标题行，滚动不再会把任何操作挤出可视区；
+     *   放开滚动后展开「高级设置」也不会裁掉内容。 */
+    lv_obj_set_scrollable(left, true);
+    /* ★ 关键：LVGL 默认带 SCROLL_ON_FOCUS —— 任一子控件获得焦点（触摸/键盘）
+     *   都会把容器滚到它身上。展开后内容高于面板，点一次开关就把「安全策略」
+     *   标题滚出视区，看起来像面板被裁了。这里显式关掉，滚动只由用户手势驱动。 */
+    lv_obj_set_scroll_on_focus(left, false);
+    /* 滚动条做宽一点：面板要滚动这件事必须可见，否则用户以为内容就这么多 */
+    lv_obj_set_style_width(left, SX(6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(left, LV_OPA_40, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(left, theme_color(TH_TEXT_MUT), LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(left, SX(3), LV_PART_SCROLLBAR);
     lv_obj_set_flex_flow(left, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(left, 8, 0);
+    lv_obj_set_style_pad_row(left, 6, 0);
 
     lv_obj_t * lt = lv_label_create(left);
     lv_label_set_text(lt, "安全策略");
@@ -406,39 +471,49 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     /* 虚位密码（FR-18）：可点开关。改它属「策略修改」= 敏感操作（FR-7），
      * 点击后先验管理员 PIN，通过才在后台线程落盘。 */
     /* 说明里的长度上限取自统一常量，避免策略改了界面还在说旧数字（v1.9：20→12） */
-    char vpin_hint[64];
-    snprintf(vpin_hint, sizeof(vpin_hint),
-             "开启后 PIN 前后可加干扰位（最长 %d 位）", SAFE_VIRTUAL_PIN_MAX_INPUT);
-    toggle_row(left, "虚位密码", vpin_hint, &s_vpin_sw, vpin_click_cb);
+    /* ★ 布局优化（2026-09-21）：低频开关收进可折叠的「高级设置」，
+     * 首屏只保留最高频的策略项，避免一屏过载。 */
+    lv_obj_t * adv_head = lv_button_create(left);
+    lv_obj_set_size(adv_head, lv_pct(100), SY(44));
+    lv_obj_add_style(adv_head, &st_ghost_btn, 0);
+    lv_obj_set_style_pad_left(adv_head, SX(12), 0);
+    lv_obj_set_flex_flow(adv_head, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(adv_head, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_event_cb(adv_head, adv_toggle_cb, LV_EVENT_CLICKED, NULL);
+    s_adv_lbl = lv_label_create(adv_head);
+    lv_label_set_text(s_adv_lbl, "高级设置：收起");
+    lv_obj_add_style(s_adv_lbl, &st_text, 0);
+    lv_obj_set_style_text_font(s_adv_lbl, app_font_scaled(15), 0);
 
-    /* 人脸录入模式：单帧 / 五向。
-     * 放这里（与其它人脸策略同卡）而不是「开发者选项」—— 后者定位是只读诊断。 */
-    toggle_row(left, "人脸录入模式",
-               "五向＝一次录入内依次采集 正/左/右/上/下；单帧＝只采一次",
-               &s_mode_sw, mode_click_cb);
+    s_adv_box = lv_obj_create(left);
+    lv_obj_set_size(s_adv_box, lv_pct(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(s_adv_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_adv_box, 0, 0);
+    lv_obj_set_style_pad_all(s_adv_box, 0, 0);
+    lv_obj_set_style_pad_row(s_adv_box, SY(6), 0);
+    lv_obj_set_scrollable(s_adv_box, false);
+    lv_obj_set_flex_flow(s_adv_box, LV_FLEX_FLOW_COLUMN);
+
+    /* ★ 4 项排成 2×2 网格：纵向排需要约 200px，而面板只剩约 130px，
+     *   展开态必然溢出。两行两列后只需约 80px，默认展开也放得下。
+     *   开关行与只读行各自成对，语义上也更整齐（左列两个开关、右列两条信息）。 */
+    lv_obj_t * gr = adv_grid_row(s_adv_box);
+    toggle_cell(gr, "虚位密码", &s_vpin_sw, vpin_click_cb);
+    toggle_cell(gr, "人脸录入模式", &s_mode_sw, mode_click_cb);
+
+    lv_obj_t * gr2 = adv_grid_row(s_adv_box);
     lv_obj_t * verify_t = NULL;
-    info_row(left, "人脸验证超时（秒）", &verify_t);
+    info_cell(gr2, "人脸超时（秒）", &verify_t);
     if (verify_t) {
         char b[16];
         snprintf(b, sizeof(b), "%d", pol->face_verify_timeout_s);
         lv_label_set_text(verify_t, b);
     }
     lv_obj_t * fw = NULL;
-    info_row(left, "固件版本", &fw);
+    info_cell(gr2, "固件版本", &fw);
     if (fw) lv_label_set_text(fw, SAFE_VERSION_STRING);
 
-    /* 中间弹性占位：把保存按钮压到卡底（面板不自滚动，故不会被裁） */
-    lv_obj_t * lspacer = lv_obj_create(left);
-    lv_obj_set_width(lspacer, lv_pct(100));
-    lv_obj_set_flex_grow(lspacer, 1);
-    lv_obj_set_style_bg_opa(lspacer, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(lspacer, 0, 0);
-    lv_obj_set_scrollable(lspacer, false);
-
-    lv_obj_t * save = ui_icon_text_button(left, LV_SYMBOL_SAVE, "保存策略",
-                                          lv_pct(100), SY(42), &st_accent_btn,
-                                          theme_color(TH_ACCENT_INK), save_policy_cb, NULL);
-    lv_obj_add_style(save, &st_accent_btn_pr, LV_STATE_PRESSED);
 
     /* --- 右：主题 --- */
     lv_obj_t * right = lv_obj_create(body);
@@ -480,6 +555,9 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     lv_obj_add_style(s_theme_cur, &st_text_mut, 0);
     lv_obj_set_style_text_font(s_theme_cur, app_font_scaled(12), 0);
 
+    /* 危险区上方的虚线分隔：把它与上方的安全设置**结构性**分开，降低误触概率 */
+    danger_dash_sep(root);
+
     /* ---------- ③ 危险区：独立卡片，不参与任何滚动滚动 ---------- */
     lv_obj_t * danger = lv_obj_create(root);
     lv_obj_set_size(danger, lv_pct(100), LV_SIZE_CONTENT);
@@ -511,7 +589,7 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     lv_obj_set_style_text_font(dd, app_font_scaled(12), 0);
 
     lv_obj_t * fr = ui_icon_text_button(danger, LV_SYMBOL_TRASH, "恢复出厂设置",
-                                        SX(190), SY(40), &st_danger_btn,
+                                        SX(190), SY(44), &st_danger_btn,
                                         lv_color_white(), factory_btn_cb, NULL);
     (void)fr;
 
@@ -520,7 +598,7 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
      * 「清 app 数据」意外清掉模组。它的作用是：模组被外部工具单独写过之后，
      * 本地与模组长期不一致（uid 编号空间被两方共用），这条是唯一的「拉回一致」手段。 */
     lv_obj_t * cf = ui_icon_text_button(danger, LV_SYMBOL_TRASH, "清空模组人脸",
-                                        SX(190), SY(40), &st_danger_btn,
+                                        SX(190), SY(44), &st_danger_btn,
                                         lv_color_white(), clear_face_btn_cb, NULL);
     (void)cf;
 
@@ -1048,7 +1126,7 @@ static void admin_verify_open(admin_action_t act)
     for (int r = 0; r < 4; r++) {
         for (int c = 0; c < 3; c++) {
             lv_obj_t * k = lv_button_create(s_av_win);
-            lv_obj_set_size(k, 88, 40);
+            lv_obj_set_size(k, 88, 44);
             lv_obj_set_pos(k, KEY_X[c], ROW_Y[r]);
             lv_obj_add_style(k, &st_panel2, 0);
             lv_obj_set_style_radius(k, 8, 0);
@@ -1063,7 +1141,7 @@ static void admin_verify_open(admin_action_t act)
     }
 
     lv_obj_t * cancel = lv_button_create(s_av_win);
-    lv_obj_set_size(cancel, 136, 40);
+    lv_obj_set_size(cancel, 136, 44);
     lv_obj_set_pos(cancel, 50, 360);
     lv_obj_add_style(cancel, &st_ghost_btn, 0);
     lv_obj_add_event_cb(cancel, admin_verify_cancel_cb, LV_EVENT_CLICKED, NULL);
@@ -1073,7 +1151,7 @@ static void admin_verify_open(admin_action_t act)
     lv_obj_center(cl);
 
     lv_obj_t * ok = lv_button_create(s_av_win);
-    lv_obj_set_size(ok, 136, 40);
+    lv_obj_set_size(ok, 136, 44);
     lv_obj_set_pos(ok, 194, 360);
     lv_obj_add_style(ok, &st_accent_btn, 0);
     lv_obj_add_style(ok, &st_accent_btn_pr, LV_STATE_PRESSED);

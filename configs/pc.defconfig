@@ -44,6 +44,10 @@ CONFIG_LV_FONT_MONTSERRAT_48=y
 
 # --- FreeType：PC 从系统 Noto CJK 动态渲染中文，彻底避免嵌入位图缺字（DESIGN.md §4）---
 CONFIG_LV_USE_FREETYPE=y
+# 与板端 board.defconfig 对齐（板端已是 1024）：CJK 界面字形多，缓存太小会反复光栅化。
+# PC 不缺算力，这里设同值是为了**验证保真**——让 PC 的字形缓存行为与板端一致，
+# 避免「PC 不卡、板端卡」的假象。本身不是性能收益。
+CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=1024
 # FreeType 2.8.1 的 FT_Load_Glyph 轮廓路径栈占用大，32KB 会栈溢出（实测崩溃点 rsp 距栈顶仅 ~31KB）
 CONFIG_LV_DRAW_THREAD_STACK_SIZE=262144
 
@@ -56,5 +60,3 @@ CONFIG_LV_SDL_RENDER_MODE_PARTIAL=y
 
 # --- 启用 snapshot API（PC 测试用：用于 SAFE_TEST_SHOT 模式截图）---
 CONFIG_LV_USE_SNAPSHOT=y
-
-
