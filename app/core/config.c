@@ -71,6 +71,23 @@ safe_err_t app_config_init(void)
     env_str("SAFE_MQTT_USER", s_cfg.mqtt_user, sizeof(s_cfg.mqtt_user), "");
     env_str("SAFE_MQTT_PASS", s_cfg.mqtt_pass, sizeof(s_cfg.mqtt_pass), "");
 
+    /* R9 T06：TLS。SAFE_MQTT_TLS=1 启用；证书路径缺省为空。
+     * ★ 校验开关默认跟 TLS 一起开（tls=1 且未显式关 → verify=1）：自签 CA 场景下
+     *   「开了 TLS 却不校验」等于没防中间人，故默认取安全侧；仅在连通性测试期
+     *   显式设 SAFE_MQTT_TLS_VERIFY=0 放行。 */
+    {
+        const char * t = getenv("SAFE_MQTT_TLS");
+        s_cfg.mqtt_tls = (t != NULL && *t != '\0' && strcmp(t, "0") != 0);
+    }
+    env_str("SAFE_MQTT_CAFILE", s_cfg.mqtt_ca_file,   sizeof(s_cfg.mqtt_ca_file),   "");
+    env_str("SAFE_MQTT_CERT",   s_cfg.mqtt_cert_file, sizeof(s_cfg.mqtt_cert_file), "");
+    env_str("SAFE_MQTT_KEY",    s_cfg.mqtt_key_file,  sizeof(s_cfg.mqtt_key_file),  "");
+    {
+        const char * v = getenv("SAFE_MQTT_TLS_VERIFY");
+        s_cfg.mqtt_tls_verify = (v == NULL || *v == '\0') ? s_cfg.mqtt_tls
+                                                          : (strcmp(v, "0") != 0);
+    }
+
     const char * off = getenv("SAFE_MQTT_OFF");
     s_cfg.mqtt_enabled = (off == NULL || *off == '\0' || strcmp(off, "0") == 0);
 

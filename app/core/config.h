@@ -19,6 +19,7 @@ extern "C" {
 #define APP_CFG_MQTT_HOST_MAX   64
 #define APP_CFG_MQTT_USER_MAX   64
 #define APP_CFG_MQTT_PASS_MAX   64
+#define APP_CFG_MQTT_PATH_MAX   256   /* R9 T06：CA/证书/私钥文件路径 */
 #define APP_CFG_DATA_DIR_MAX    256
 
 /* 日志滚动保留条数的唯一默认值。
@@ -50,6 +51,17 @@ typedef struct {
      * 此时只有鉴权连接可执行敏感远程指令（判据在 rpc.c）。 */
     char mqtt_user[APP_CFG_MQTT_USER_MAX];
     char mqtt_pass[APP_CFG_MQTT_PASS_MAX];
+
+    /* MQTT over TLS（R9 T06）：来源 SAFE_MQTT_TLS / SAFE_MQTT_CAFILE /
+     * SAFE_MQTT_CERT / SAFE_MQTT_KEY / SAFE_MQTT_TLS_VERIFY，默认关闭（明文）。
+     * ★ 失败闭合：mqtt_tls=1 但构建未开 SAFE_FEATURE_MQTT_TLS 时，
+     *   tls_stream_new() 直接返回 NULL（绝不静默退化成明文），表现为远程通道连不上。
+     *   这是有意的设计 —— 「以为在加密其实在明文」比「连不上」危险得多。 */
+    bool mqtt_tls;               /* true = 走 TLS（端口通常 8883） */
+    bool mqtt_tls_verify;        /* true = 强制校验服务端证书（需要 CA） */
+    char mqtt_ca_file[APP_CFG_MQTT_PATH_MAX];
+    char mqtt_cert_file[APP_CFG_MQTT_PATH_MAX];  /* 双向 TLS 才用；空串 = 不带客户端证书 */
+    char mqtt_key_file[APP_CFG_MQTT_PATH_MAX];
 
     /* 人脸（FR-1 通道之一） */
     const char * face_backend;

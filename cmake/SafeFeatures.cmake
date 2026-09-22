@@ -50,6 +50,33 @@ else()
     set(SAFE_HAVE_CJSON FALSE)
 endif()
 
+# ---------------- MQTT over TLS（R9 T06：mbedTLS） ----------------
+# 传输层抽象（tls_stream）已按双后端写好：
+#   后端 A = 明文 TCP（默认）；后端 B = mbedTLS（由本开关启用）。
+# ★ 找不到 mbedTLS 时**直接 FATAL_ERROR**，绝不静默退化成明文 ——
+#   「以为在加密其实是明文」比直接报错危险得多。
+option(SAFE_FEATURE_MQTT_TLS "MQTT over TLS（需要 mbedTLS）" OFF)
+
+set(SAFE_MBEDTLS_LIBS "")
+if(SAFE_FEATURE_MQTT_TLS)
+    find_path(SAFE_MBEDTLS_INCLUDE_DIR NAMES mbedtls/ssl.h)
+    find_library(SAFE_MBEDTLS_LIBRARY    NAMES mbedtls)
+    find_library(SAFE_MBEDX509_LIBRARY   NAMES mbedx509)
+    find_library(SAFE_MBEDCRYPTO_LIBRARY NAMES mbedcrypto)
+    if(NOT (SAFE_MBEDTLS_INCLUDE_DIR AND SAFE_MBEDTLS_LIBRARY AND
+            SAFE_MBEDX509_LIBRARY AND SAFE_MBEDCRYPTO_LIBRARY))
+        message(FATAL_ERROR
+            "[feature] SAFE_FEATURE_MQTT_TLS=ON 但未找到 mbedTLS。"
+            " PC: sudo apt install libmbedtls-dev；"
+            " ARM: 需先交叉编译 mbedTLS 并指向其路径。")
+    endif()
+    set(SAFE_MBEDTLS_LIBS
+        ${SAFE_MBEDTLS_LIBRARY} ${SAFE_MBEDX509_LIBRARY} ${SAFE_MBEDCRYPTO_LIBRARY})
+    include_directories(${SAFE_MBEDTLS_INCLUDE_DIR})
+    add_compile_definitions(SAFE_FEATURE_TLS)
+    message(STATUS "[feature] mbedTLS 已启用: ${SAFE_MBEDTLS_LIBRARY}")
+endif()
+
 # ---------------- MQTT（R9 起自研，不再需要第三方 MQTT 库） ----------------
 # 旧实现依赖第三方 MQTT 库，而板子上没有可用的 ARM 版 —— 交叉构建会静默退化成
 # mqtt_stub.c，导致**板上远程通道永久断线**（这正是 R9 要解决的问题）。

@@ -45,6 +45,18 @@ bool mqtt_credentials_configured(void)
     return false;   /* 无 MQTT 特性 → 不存在鉴权通道 */
 }
 
+/* ---- R9 T06 新增：与 mqtt_client.c 同步实现，保持签名一致 ---- */
+void mqtt_set_tls(bool enable, const char *ca_file, const char *cert_file,
+                  const char *key_file, bool verify_peer)
+{
+    (void)enable; (void)ca_file; (void)cert_file; (void)key_file; (void)verify_peer;
+}
+
+bool mqtt_is_tls(void)
+{
+    return false;
+}
+
 bool mqtt_is_authenticated(void)
 {
     return false;

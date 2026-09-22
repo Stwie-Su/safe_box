@@ -115,6 +115,14 @@ static int  g_wake_rd = -1;                  /* self-pipe 读端（进 poll） *
 static int  g_wake_wr = -1;                  /* self-pipe 写端（任何线程唤醒 net 线程） */
 static int  g_sock = -1;                     /* 底层 fd，取自 tls_stream_fd() */
 static tls_stream_t * g_ts = NULL;           /* 传输层句柄（明文/TLS 由它封装） */
+/* R9 T06：TLS 配置，由 rpc_init 从 app_config 注入（需在 mqtt_start 之前）。
+ * g_tls_conf 的指针指向下面三个静态缓冲，避免持有调用方的栈/临时内存。 */
+static bool       g_tls_enable = false;
+static tls_conf_t g_tls_conf;
+static char       g_tls_ca[256];
+static char       g_tls_cert[256];
+static char       g_tls_key[256];
+static bool       g_tls_err_logged = false;
 static int  g_connecting = 0;                /* 非阻塞 connect 进行中 */
 
 static mqtt_fsm_t       g_fsm;
@@ -242,7 +250,22 @@ static void do_open(uint32_t now_ms)
 {
     mqtt_fsm_out_t o;
     do_close();
-    if (g_ts == NULL) g_ts = tls_stream_new(NULL);   /* NULL = 恒等后端（明文 TCP），T06 可传 TLS 配置 */
+    if (g_ts == NULL) {
+        /* NULL = 恒等后端（明文 TCP）；&g_tls_conf = mbedTLS。 */
+        g_ts = tls_stream_new(g_tls_enable ? &g_tls_conf : NULL);
+        if (g_ts == NULL) {
+            /* 唯一失败路径：要求 TLS，但（a）构建未开 SAFE_FEATURE_MQTT_TLS，
+             * 或（b）CA/证书解析失败。★ 失败闭合 —— 绝不退化成明文。 */
+            if (!g_tls_err_logged) {
+                g_tls_err_logged = true;
+                printf("[MQTT] TLS 通道创建失败：构建未启用 mbedTLS 或证书无效，远程通道停用\n");
+            }
+            g_sock = -1;
+            mqtt_fsm_on_event(&g_fsm, MQTT_EV_SOCK_FAILED, NULL, now_ms, &o);
+            act_all(now_ms, &o);
+            return;
+        }
+    }
     int fd = tls_stream_connect(g_ts, g_host[0] ? g_host : "127.0.0.1",
                                 g_port > 0 ? g_port : 1883);
     if (fd < 0) {
@@ -628,17 +651,30 @@ static void * mqtt_net_thread(void *arg)
             continue;
         }
 
-        /* 6) 非阻塞 connect 进度 */
-        if (g_connecting && g_sock >= 0 && (fds[0].revents & POLLOUT)) {
+        /* 6) 非阻塞 connect / TLS 握手进度
+         * ★ T06 实测踩到：原实现（a）就绪判据只认 POLLOUT，（b）拿到 connect_poll
+         *   的「进行中」返回值 1 后**无条件** g_connecting = 0。
+         *   明文 TCP 下 connect_poll 第一次就返回 0（TCP 就绪即完成），所以从没暴露；
+         *   TLS 下第一次必然返回 1（握手刚起步、还停在 ClientHello 之后），于是
+         *   g_connecting 被清零 → 第 6 步再也不执行 → 握手永远没有第二轮。
+         *   现象极隐蔽：TCP 连上了，broker 日志只留 "Client <unknown> closed"，
+         *   始终收不到 MQTT CONNECT，也没有任何报错。
+         * 修法：r == 1 时保持 g_connecting = 1 等下一轮；且就绪判据必须同时受理
+         *   POLLIN —— 握手期多数时候是「想读」（等 ServerHello），只有
+         *   tls_stream_want_write() 置位时才需要 POLLOUT。 */
+        if (g_connecting && g_sock >= 0 &&
+            (fds[0].revents & (POLLIN | POLLOUT | POLLERR | POLLHUP))) {
             int r = tls_stream_connect_poll(g_ts, 0);
-            g_connecting = 0;
-            if (r == 0) {
-                mqtt_fsm_on_event(&g_fsm, MQTT_EV_SOCK_CONNECTED, NULL, now_ms, &out);
-            } else if (r < 0) {
-                mqtt_fsm_on_event(&g_fsm, MQTT_EV_SOCK_FAILED, NULL, now_ms, &out);
+            if (r != 1) {
+                g_connecting = 0;
+                mqtt_fsm_on_event(&g_fsm,
+                                  (r == 0) ? MQTT_EV_SOCK_CONNECTED : MQTT_EV_SOCK_FAILED,
+                                  NULL, now_ms, &out);
+                act_all(now_ms, &out);
+                if (r < 0) continue;
             }
-            act_all(now_ms, &out);
-            if (r < 0) continue;
+            /* r == 1：仍在进行 —— 保持 g_connecting=1，下一轮 poll 的掩码由
+             * tls_stream_want_write() 决定后继续推进握手。 */
         }
 
         /* 7) 可写：flush 待发残留 */
@@ -801,6 +837,40 @@ void mqtt_set_credentials(const char *username, const char *password)
 bool mqtt_credentials_configured(void)
 {
     return (g_user[0] != '\0') || (g_pass[0] != '\0');
+}
+
+/* ---- R9 T06：TLS 配置 ---- */
+void mqtt_set_tls(bool enable, const char *ca_file, const char *cert_file,
+                  const char *key_file, bool verify_peer)
+{
+    /* %.255s：定长缓冲 + snprintf 必须让编译器能证明不会截断，
+     * 否则 -Wformat-truncation 会在 -Werror 下直接断构建（本项目踩过）。 */
+    snprintf(g_tls_ca,   sizeof(g_tls_ca),   "%.255s", ca_file   ? ca_file   : "");
+    snprintf(g_tls_cert, sizeof(g_tls_cert), "%.255s", cert_file ? cert_file : "");
+    snprintf(g_tls_key,  sizeof(g_tls_key),  "%.255s", key_file  ? key_file  : "");
+
+    g_tls_conf.enable               = enable;
+    g_tls_conf.verify_peer          = verify_peer;
+    g_tls_conf.handshake_timeout_ms = 10000;
+    g_tls_conf.ca_file              = g_tls_ca[0]   ? g_tls_ca   : NULL;
+    g_tls_conf.cert_file            = g_tls_cert[0] ? g_tls_cert : NULL;
+    g_tls_conf.key_file             = g_tls_key[0]  ? g_tls_key  : NULL;
+    g_tls_enable                    = enable;
+    g_tls_err_logged                = false;
+
+    if (enable) {
+        printf("[MQTT] TLS 已启用：CA=%s 客户端证书=%s 校验对端=%d\n",
+               g_tls_conf.ca_file ? g_tls_conf.ca_file : "(无)",
+               g_tls_conf.cert_file ? "是" : "否", (int)verify_peer);
+        if (verify_peer && g_tls_conf.ca_file == NULL) {
+            printf("[MQTT] 警告：要求校验对端却未配置 CA，握手必然失败\n");
+        }
+    }
+}
+
+bool mqtt_is_tls(void)
+{
+    return g_tls_enable && mqtt_is_connected();
 }
 
 bool mqtt_is_authenticated(void)

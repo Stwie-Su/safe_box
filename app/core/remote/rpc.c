@@ -46,6 +46,16 @@ void rpc_init(const char *host, int port)
         const app_config_t *cfg = app_config();
         mqtt_set_credentials(cfg ? cfg->mqtt_user : NULL,
                              cfg ? cfg->mqtt_pass : NULL);
+
+        /* R9 T06：MQTT over TLS（默认关闭 = 明文，保持既有 PC 验证路径）。
+         * 必须在 mqtt_start 之前设置。 */
+        if (cfg != NULL && cfg->mqtt_tls) {
+            mqtt_set_tls(true,
+                         cfg->mqtt_ca_file,
+                         cfg->mqtt_cert_file[0] ? cfg->mqtt_cert_file : NULL,
+                         cfg->mqtt_key_file[0]  ? cfg->mqtt_key_file  : NULL,
+                         cfg->mqtt_tls_verify);
+        }
     }
 
     char cid[48];

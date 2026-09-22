@@ -55,6 +55,18 @@ bool mqtt_credentials_configured(void);
 /* 当前连接是否以鉴权身份建立（已配置凭据且已连上 broker）。 */
 bool mqtt_is_authenticated(void);
 
+/* ---------------- R9 T06 新增：MQTT over TLS ---------------- */
+
+/* 设置 TLS。需在 mqtt_start 之前调用，重复调用以最后一次为准。
+ *   enable=false（默认）→ 明文 TCP，保持既有验证路径；
+ *   ca_file 为空 = 不校验对端；cert/key 仅双向 TLS 需要。
+ * ★ 若 enable=true 而构建未开 SAFE_FEATURE_MQTT_TLS，连接将**失败**而非退回明文。 */
+void mqtt_set_tls(bool enable, const char *ca_file, const char *cert_file,
+                  const char *key_file, bool verify_peer);
+
+/* 当前连接是否建立在 TLS 之上（已启用 TLS 且已连上）。 */
+bool mqtt_is_tls(void);
+
 /* 主线程取走一条入队消息（rpc_poll 调用）。返回 1 表示取到。 */
 int  mqtt_take(char *topic, size_t tcap, char *payload, size_t pcap);
 
