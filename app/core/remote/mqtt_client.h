@@ -87,6 +87,27 @@ void mqtt_stats(uint32_t *connects, uint32_t *reconnects, uint32_t *dropped, uin
  * 让 broker 重投 —— 安全设备绝不静默丢指令）。 */
 size_t mqtt_queued(void);
 
+/* ---------------- 可观测性补齐（C2 / C4） ---------------- */
+
+/* mqtt_stats() 未覆盖的那几个计数器。任何指针都可传 NULL 表示不关心。
+ * 为什么单独开一个而不是改 mqtt_stats() 签名：既有 8 个函数的签名一个字都不能改
+ * （rpc.c / ui.c 依赖），只新增 —— 这是本头文件顶部写死的对外契约。 */
+void mqtt_stats_ex(uint32_t *ping_timeout, uint32_t *retransmit, uint32_t *qos0_fallback,
+                   uint32_t *rx_publish, uint32_t *reject_oversize, uint32_t *reject_malformed);
+
+/* 上行队列积压条数（与 mqtt_queued() 的下行成对，用于区分哪个方向在丢）。 */
+size_t mqtt_tx_queued(void);
+
+/* 当前 inflight（QoS1 未确认报文）条数。 */
+size_t mqtt_inflight_count_now(void);
+
+/* 当前退避时长（ms）；不在退避中则为 0。
+ * ★ 退避曲线的最小可用暴露 —— 有了它才谈得上"实测退避序列"。 */
+uint32_t mqtt_backoff_ms(void);
+
+/* 当前连续重连次数（状态机 retry_count 的镜像）。 */
+uint8_t mqtt_retry_count(void);
+
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif

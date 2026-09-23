@@ -92,3 +92,36 @@ size_t mqtt_queued(void)
 {
     return 0;
 }
+
+/* ---- 可观测性补齐：与 mqtt_client.c 同步实现，保持签名一致 ---- */
+
+void mqtt_stats_ex(uint32_t *ping_timeout, uint32_t *retransmit, uint32_t *qos0_fallback,
+                   uint32_t *rx_publish, uint32_t *reject_oversize, uint32_t *reject_malformed)
+{
+    if (ping_timeout)     *ping_timeout     = 0;
+    if (retransmit)       *retransmit       = 0;
+    if (qos0_fallback)    *qos0_fallback    = 0;
+    if (rx_publish)       *rx_publish       = 0;
+    if (reject_oversize)  *reject_oversize  = 0;
+    if (reject_malformed) *reject_malformed = 0;
+}
+
+size_t mqtt_tx_queued(void)
+{
+    return 0;
+}
+
+size_t mqtt_inflight_count_now(void)
+{
+    return 0;
+}
+
+uint32_t mqtt_backoff_ms(void)
+{
+    return 0;
+}
+
+uint8_t mqtt_retry_count(void)
+{
+    return 0;
+}

@@ -288,6 +288,15 @@ int mqtt_parse_publish(const mqtt_pkt_view_t *v, char *topic, size_t topic_cap,
     if (dup)    *dup    = (v->flags & 0x08) != 0;
     if (retain) *retain = (v->flags & 0x01) != 0;
     uint8_t q = (uint8_t)((v->flags >> 1) & 0x03);
+
+    /* ★ 入站零信任：组包侧（mqtt_pack_publish）拒绝 qos>1，解析侧也必须拒绝，
+     * 否则 QoS2 的 PUBLISH 会被当成 QoS1 处理并回 PUBACK —— 对端会以为我们
+     * 收下了 QoS2，实际我们根本不支持（非对称 = 静默错误处理）。
+     * q==3 是 MQTT 3.1.1 §3.3.1 明令的保留/非法值，收到必须关闭连接。
+     * 本客户端不支持 QoS2（理由见《查漏补缺报告》A1：业务层 req_id 去重已幂等），
+     * 但「不支持」必须表现为**显式拒绝**，而不是错误地降级处理。 */
+    if (q > 1) return MQTT_ERR_MALFORMED;
+
     if (qos)    *qos    = q;
 
     size_t off = 0;

@@ -63,6 +63,12 @@
  * 套接字缓冲里留半个报文，对端收到一条残缺的 PUBLISH。超时就放弃 join。 */
 #define MQTT_STOP_JOIN_MS   1000
 
+/* 优雅退出时把 DISCONNECT 字节真正推到套接字的补写窗口。
+ * 为什么需要：tx_send() 只 flush 一次，若当时对端窗口满（返回 2 = 一个字节都没写），
+ * 字节会留在 g_tx 里 —— 而我们紧接着就要 do_close()，等于「说了再见却没发出去」，
+ * broker 仍然会按异常断开发布 LWT。给一个短窗口补写，代价是退出多花 ≤100ms。 */
+#define MQTT_STOP_FLUSH_MS  100
+
 /* 订阅的主题与 QoS（clean_session=1，每次建连都要重发 SUBSCRIBE） */
 #define MQTT_SUB_TOPIC      "safe/cmd"
 #define MQTT_SUB_QOS        1
@@ -94,6 +100,11 @@ typedef struct {
     volatile uint32_t queue_full;
     volatile uint32_t qos0_fallback;
     volatile uint32_t rx_publish;
+    /* 入站拒绝计数（net 线程侧统计，不来自状态机）。
+     * 为什么要单独记：以前只有「协议错 → io_err」一条路，无法区分是
+     * 「报文装不下」还是「报文非法」，而这两者的修法与严重度完全不同。 */
+    volatile uint32_t reject_oversize;    /* 声明长度 > RX_CAP，永远装不下 */
+    volatile uint32_t reject_malformed;   /* 结构非法（含入站 QoS2 / 保留位 3） */
 } mqtt_counters_t;
 
 /* ---------------- 全局状态 ---------------- */
@@ -109,9 +120,19 @@ static char g_pass[CRED_MAX];
 static pthread_t        g_thread;
 static volatile int     g_running = 0;
 static volatile int     g_stop = 0;
+/* 优雅退出标志：由 mqtt_stop() 置位，net 线程在退出 while 循环后据此补发 DISCONNECT。
+ * 为什么不直接在 mqtt_stop() 里调 mqtt_fsm_on_event()：g_fsm 是 **net 线程独占**的
+ * 状态（主线程只能读 g_state / g_stat 镜像），跨线程直接 on_event 会破坏
+ * 「状态机单线程持有」这个不变式，也是本项目能被确定性单测的前提。
+ * 所以主线程只置标志，动作留给 net 线程自己执行 —— 与 self-pipe 同构。 */
+static volatile int     g_graceful = 0;
 static volatile int     g_thread_exited = 0;
 static volatile int     g_conn = 0;          /* 已连上（CONNACK=0） */
 static volatile int     g_state = 0;         /* mqtt_fsm_state_t 的镜像（供 mqtt_state_str） */
+/* 退避的可观测镜像（供 mqtt_backoff_ms / mqtt_retry_count）：
+ * 与 g_state 同一手法 —— 主线程只**读镜像**，绝不直接摸状态机内部。 */
+static volatile uint32_t g_backoff_ms = 0;
+static volatile uint8_t  g_retry_count = 0;
 
 static int  g_wake_rd = -1;                  /* self-pipe 读端（进 poll） */
 static int  g_wake_wr = -1;                  /* self-pipe 写端（任何线程唤醒 net 线程） */
@@ -403,6 +424,8 @@ static void do_deliver(void)
 static void do_notify(void)
 {
     g_state = (int)g_fsm.state;
+    g_backoff_ms  = g_fsm.backoff_ms;    /* 退避时长镜像：无它则退避曲线不可观测 */
+    g_retry_count = g_fsm.retry_count;
     g_stat.connects     = g_fsm.stat_connects;
     g_stat.reconnects   = g_fsm.stat_reconnects;
     g_stat.ping_timeout = g_fsm.stat_ping_timeout;
@@ -575,7 +598,11 @@ static void cmdq_drain(uint32_t now_ms, mqtt_fsm_out_t *out)
 
 /* ---------------- 收包 ---------------- */
 
-static void capture_pending(const mqtt_pkt_view_t *v)
+/* 返回 true = 报文合法且已拷进 g_pending；false = 报文非法（调用方应断链重连）。
+ * 为什么改成有返回值：以前解析失败是**静默 return**，报文照样会喂给状态机并被
+ * 回 PUBACK —— 对端以为我们收下了，实际我们根本没处理。安全设备的下行是**指令**，
+ * 「假装收到」比「明确拒绝」危险得多。 */
+static bool capture_pending(const mqtt_pkt_view_t *v)
 {
     const uint8_t *pl = NULL;
     size_t pln = 0;
@@ -584,13 +611,14 @@ static void capture_pending(const mqtt_pkt_view_t *v)
     uint8_t qos = 0;
     memset(&g_pending, 0, sizeof(g_pending));
     if (mqtt_parse_publish(v, g_pending.topic, sizeof(g_pending.topic),
-                           &pl, &pln, &pid, &dup, &qos, &ret) != MQTT_OK) return;
+                           &pl, &pln, &pid, &dup, &qos, &ret) != MQTT_OK) return false;
     size_t n = pln;
     if (n > MSG_PAYLOAD_MAX - 1) n = MSG_PAYLOAD_MAX - 1;
     if (pl != NULL && n > 0) memcpy(g_pending.payload, pl, n);
     g_pending.payload[n] = '\0';
     g_pending.pkt_id = pid;
     g_pending.qos    = qos;
+    return true;
 }
 
 /* ---------------- net 线程 ---------------- */
@@ -711,9 +739,49 @@ static void * mqtt_net_thread(void *arg)
                 mqtt_pkt_view_t v;
                 size_t used = 0;
                 int pr = mqtt_parse(rx + off, rx_len - off, &v, &used);
-                if (pr == MQTT_ERR_TRUNCATED) break;          /* 半包：继续收 */
+                if (pr == MQTT_ERR_TRUNCATED) {
+                    /* 半包：先分清是「还没收够」还是「永远装不下」。
+                     *
+                     * ★ 这里修掉一个会**永久卡死**的缺陷（B2）：
+                     *   原逻辑是「rx 满(1024)→停止读」+「TRUNCATED→退出解析」+
+                     *   「off==0→不腾空缓冲」，三者合起来形成死循环：一个声明
+                     *   remaining=1500 的 PUBLISH 到达后，rx_len 恒为 1024，
+                     *   poll 恒报 POLLIN，读循环立刻 break、解析立刻 TRUNCATED，
+                     *   → **CPU 100% 忙循环 + 收包通道永久失效**，且因为读循环被
+                     *   「缓冲满」挡住，连对端的 FIN 都读不到，无法自愈。
+                     *   触发条件极低：任何能连上 broker 的人发一条 >1KB 的消息即可
+                     *   （mosquitto 默认不限制消息长度）—— 这是可被外部触发的可用性故障。
+                     *
+                     * 修法：TRUNCATED 时偷看声明的 remaining，若整包长度超过缓冲
+                     * 容量 RX_CAP，则它**永远不可能**被收全 → 判非法并断链重连自愈。
+                     * 为什么选「拒绝 + 重连」而不是「按 remaining 动态 malloc」：
+                     * 本文件头约定 net 线程内不申请堆内存；且合法下行指令恒 <512B
+                     * （MSG_PAYLOAD_MAX），超大消息 100% 是攻击或配置错误 ——
+                     * 对安全设备而言**拒绝比接纳更安全**。 */
+                    size_t avail = rx_len - off;
+                    if (avail >= 2) {
+                        uint32_t rem = 0;
+                        size_t   rn  = 0;
+                        if (mqtt_remaining_decode(rx + off + 1, avail - 1, &rem, &rn) == MQTT_OK &&
+                            ((size_t)1 + rn + (size_t)rem) > sizeof(rx)) {
+                            g_stat.reject_oversize++;
+                            printf("[MQTT] 报文声明长度 %u 超过收包缓冲 %u，判非法并断链重连\n",
+                                   (unsigned)rem, (unsigned)sizeof(rx));
+                            io_err = 1;
+                        }
+                    }
+                    break;                                    /* 半包：继续收 */
+                }
                 if (pr != MQTT_OK) { io_err = 1; break; }     /* 协议错：不可自愈 */
-                if (v.type == MQTT_PKT_PUBLISH) capture_pending(&v);
+                if (v.type == MQTT_PKT_PUBLISH) {
+                    /* 下行 PUBLISH 解析失败 = 对端违反了协议（如 QoS2 / 保留位 3）。
+                     * 与「装不下」区分计数，但处置一致：断链重连，绝不假装收到。 */
+                    if (!capture_pending(&v)) {
+                        g_stat.reject_malformed++;
+                        io_err = 1;
+                        break;
+                    }
+                }
                 (void)mqtt_fsm_on_packet(&g_fsm, &v, now_ms, &out);
                 act_all(now_ms, &out);
                 off += used;
@@ -725,8 +793,40 @@ static void * mqtt_net_thread(void *arg)
             if (io_err) {
                 mqtt_fsm_on_event(&g_fsm, MQTT_EV_IO_ERROR, NULL, now_ms, &out);
                 act_all(now_ms, &out);
+                /* ★ 断链后必须清空收包缓冲：rx 是 net 线程的局部变量，
+                 * 原先在 io_err 后残留着半个报文的字节，重连后会被当成新连接
+                 * 的前几字节继续攒 —— 于是新连接的第一个报文永远解析失败，
+                 * 表现为「重连后立刻又断」，极难定位。断链即重置，是最省心的不变式。 */
+                rx_len = 0;
             }
         }
+    }
+
+    /* ★ 优雅退出：把 DISCONNECT 真正发出去再关链路（修 B1）。
+     *
+     * 缺陷原状：mqtt_fsm.c 的 MQTT_EV_STOP 分支（会 push MQTT_ACT_SEND_DISCONNECT）
+     * 早已实现，但本文件**从来没有发出过 MQTT_EV_STOP** —— 那条分支是死代码。
+     * 而 mqtt_stop() 的注释却写着「优雅退出已发 DISCONNECT → broker 不发 LWT」。
+     * 结果：每次正常退出都走的是「拔网线」路径，broker 照发 LWT；
+     * 于是「正常退出」与「异常掉线」在 broker 侧表现完全一样，
+     * LWT 演示失去区分度，DISCONNECT 的协议语义也没被真正实现。
+     *
+     * 为什么必须放在这里（net 线程内）而不是 mqtt_stop() 里：g_fsm 是 net 线程
+     * 独占的状态，主线程只应置标志（g_graceful），动作交给持有者执行。 */
+    if (g_graceful) {
+        now_ms = hal_time_ms();
+        mqtt_fsm_on_event(&g_fsm, MQTT_EV_STOP, NULL, now_ms, &out);
+        act_all(now_ms, &out);
+
+        /* DISCONNECT 的字节可能没一次写完（对端窗口满），补写一小会儿。 */
+        uint32_t t0 = hal_time_ms();
+        while (g_tx_len > g_tx_sent &&
+               (uint32_t)(hal_time_ms() - t0) < (uint32_t)MQTT_STOP_FLUSH_MS) {
+            int r = tx_flush();
+            if (r == 0 || r < 0) break;
+            usleep(1000);
+        }
+        g_graceful = 0;
     }
 
     /* 退出前关链路（管道由 mqtt_stop 决定是否回收） */
@@ -748,6 +848,7 @@ int mqtt_start(const char *host, int port, const char *client_id, mqtt_msg_cb_t 
              (client_id && client_id[0]) ? client_id : "safe");
     memset(&g_stat, 0, sizeof(g_stat));
     g_stop = 0;
+    g_graceful = 0;
     g_thread_exited = 0;
     g_conn = 0;
     g_state = (int)MQTT_ST_IDLE;
@@ -787,6 +888,9 @@ void mqtt_stop(void)
 {
     if (!g_running) return;
     g_stop = 1;
+    /* 请求优雅退出：net 线程退出循环后会补发 DISCONNECT 再关链路。
+     * 这样 broker 才**不会**为我们发布 LWT —— 「正常退出」与「异常掉线」由此可区分。 */
+    g_graceful = 1;
     wake();
 
     /* ★ join 必须带超时：net 线程可能在等 PUBACK（inflight 非空）或正阻塞在
@@ -803,8 +907,11 @@ void mqtt_stop(void)
     if (g_thread_exited) { pthread_join(g_thread, NULL); joined = 1; }
     else                 { pthread_detach(g_thread); }
 
-    /* 优雅退出已发 DISCONNECT → broker **不发** LWT（只有异常断开才发），
-     * 这是 T05 验收里最容易误判的一条。 */
+    /* 到这一步 DISCONNECT 已由 net 线程发出（g_graceful），broker **不发** LWT
+     * （只有异常断开才发）—— 这是 T05 验收里最容易误判的一条。
+     * ⚠ 本注释在修 B1 之前是**错的**（那时从未发过 DISCONNECT，正常退出也触发 LWT）。
+     * 保留它是因为它描述的是**应有的**语义；如果你在 broker 侧仍看到退出即 LWT，
+     * 请检查 g_graceful 路径是否被走到，而不是改注释。 */
     do_close();
     if (joined) {
         if (g_wake_rd >= 0) close(g_wake_rd);
@@ -933,4 +1040,49 @@ size_t mqtt_queued(void)
     n = (size_t)g_msgq_count;
     pthread_mutex_unlock(&g_msgq_m);
     return n;
+}
+
+/* ---- 可观测性补齐（C2 / C4）：让"我说我实现了什么"变成"我能拿出数据" ----
+ *
+ * 为什么需要：mqtt_stats() 只暴露了 8 个计数器里的 4 个，且状态机算出的
+ * backoff_ms 完全不出门。于是「我实现了指数退避 + 抖动」这句话**不可证伪** ——
+ * 面试官问"抖动到底抖了多少、封顶真的是 30s 吗"，只能答"看代码是这样"。
+ * 下面这组 getter 的成本是几十行，收益是把不可观测的运行时变成可粘贴的表格。 */
+
+void mqtt_stats_ex(uint32_t *ping_timeout, uint32_t *retransmit, uint32_t *qos0_fallback,
+                   uint32_t *rx_publish, uint32_t *reject_oversize, uint32_t *reject_malformed)
+{
+    if (ping_timeout)    *ping_timeout    = (uint32_t)g_stat.ping_timeout;
+    if (retransmit)      *retransmit      = (uint32_t)g_stat.retransmit;
+    if (qos0_fallback)   *qos0_fallback   = (uint32_t)g_stat.qos0_fallback;
+    if (rx_publish)      *rx_publish      = (uint32_t)g_stat.rx_publish;
+    if (reject_oversize) *reject_oversize = (uint32_t)g_stat.reject_oversize;
+    if (reject_malformed)*reject_malformed= (uint32_t)g_stat.reject_malformed;
+}
+
+/* 上行积压（以前 cmdq_pending() 是 static，主线程拿不到）。
+ * 与 mqtt_queued()（下行）成对，用于区分"哪个方向在丢" ——
+ * 以前 tx/rx 的队列满共用一个 queue_full 计数器，根本分不清。 */
+size_t mqtt_tx_queued(void)
+{
+    return (size_t)cmdq_pending();
+}
+
+/* inflight 水位：QoS1 未确认报文的实时条数。重传是否积压，看这个数。 */
+size_t mqtt_inflight_count_now(void)
+{
+    return mqtt_inflight_count(&g_inflight);
+}
+
+/* 当前退避时长（ms）。★ 退避曲线的最小可用暴露 —— 有了它才能实测
+ * "500/1000/2000/4000/8000/16000" 这条序列，而不是靠读代码推断。
+ * 读的是 do_notify() 做的镜像（与 g_state 同手法），不在主线程直接摸状态机内部。 */
+uint32_t mqtt_backoff_ms(void)
+{
+    return (uint32_t)g_backoff_ms;
+}
+
+uint8_t mqtt_retry_count(void)
+{
+    return (uint8_t)g_retry_count;
 }
