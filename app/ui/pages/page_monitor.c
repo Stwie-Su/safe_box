@@ -8,8 +8,11 @@
  *
  * 布局（内容区 = 屏宽 − rail 104，屏高 − 顶栏 56）：
  *   1) hero 卡（h 120）：左侧 64px 圆角状态徽标（锁图标，色随锁状态）+
- *      中间两行（状态主标题 / 最后开启 + 开锁方式）+ 右侧两只按钮
- *      （一键开锁=accent 实心 / 密码开锁=ghost 描边，PIN 通道必须可达）
+ *      中间两行（状态主标题 / 最后开启 + 开锁方式）+ 右侧两只按钮：
+ *      主按钮（accent 实心，文案随 face_count 动态「刷脸开锁/密码开锁」，
+ *      智能路由）+「密码开锁」ghost 描边按钮（无条件直达 PIN 键盘页）。
+ *      为什么要两只按钮：见 build_hero() 的高度预算注释与 keypad_cb()——
+ *      PIN / 虚位密码通道必须恒定可达，不能被智能路由吞掉。
  *   2) 4 统计卡（h 108）：注册用户 / 今日事件 / 人脸识别 / 存储占用
  *   3) 最近事件面板（占满剩余高度）：图标按 ok/warn/danger 着色 +
  *      主文案 + 灰色次文案 + 时间
@@ -68,9 +71,12 @@ static lv_obj_t * s_hero_iconbox;   /* 64px 状态徽标盒 */
 static lv_obj_t * s_hero_icon;      /* 锁图标（图标字体 label） */
 static lv_obj_t * s_status_label;
 static lv_obj_t * s_sub_label;
-static lv_obj_t * s_btn_unlock;       /* 开锁（智能路由：有人脸→人脸页，否则 PIN 键盘） */
+static lv_obj_t * s_btn_unlock;       /* 开锁主按钮（智能路由：有人脸→人脸页，否则 PIN 键盘） */
 static lv_obj_t * s_btn_unlock_icon;
 static lv_obj_t * s_btn_unlock_label;
+static lv_obj_t * s_btn_keypad;       /* 「密码开锁」ghost：PIN 键盘页的无条件直达入口 */
+static lv_obj_t * s_btn_keypad_icon;
+static lv_obj_t * s_btn_keypad_label;
 /* 4 统计卡 */
 static lv_obj_t * s_stat_card[4];
 static lv_obj_t * s_stat_box[4];
@@ -123,6 +129,8 @@ static void fmt_when(const char * ts, char * out, size_t cap);
 static void fmt_ev_time(const char * ts, char * out, size_t cap);
 static void describe_event(const log_entry_t * e, ev_view_t * v);
 static void unlock_cb(lv_event_t * e);
+static void keypad_cb(lv_event_t * e);
+static void refresh_unlock_buttons(void);
 
 /**
  * @brief 创建监控主页面（由 UI 框架调用）
@@ -197,7 +205,7 @@ static lv_obj_t * make_icon_box(lv_obj_t * parent, int32_t size, int32_t radius)
     return box;
 }
 
-/* 按钮：primary=accent 实心（一键开锁）/ 否则 ghost 描边（密码开锁） */
+/* 按钮：primary=accent 实心（开锁主按钮）/ 否则 ghost 描边（密码开锁次按钮） */
 static lv_obj_t * make_button(lv_obj_t * parent, ui_glyph_t g, const char * text,
                               bool primary, lv_event_cb_t cb,
                               lv_obj_t ** out_icon, lv_obj_t ** out_label)
@@ -274,7 +282,22 @@ static void build_hero(lv_obj_t * parent)
     lv_obj_add_style(s_sub_label, &st_text_mut, 0);
     lv_obj_set_style_text_font(s_sub_label, app_font_scaled(13), 0);
 
-    /* 右：一键开锁（accent 实心）+ 密码开锁（ghost 描边） */
+    /* 右：开锁主按钮（accent 实心）+「密码开锁」ghost 描边按钮。
+     *
+     * 【hero 高度预算核算，动这里前先算一遍】
+     *   make_panel(SY(120)) − pad_top SY(12) − pad_bottom SY(12) = 内容可用高 SY(96)；
+     *   主按钮 SY(46) + pad_row SY(8) + 次按钮 SY(36) = SY(90) ≤ 96，只剩 SY(6) 余量。
+     *   这也是次按钮保持 SY(36)、不跟 2026-09-21 触控目标统一（44px）的原因：
+     *   若提到 44，46+8+44 = 98 > 96，必然溢出/裁切，除非把 hero 加高到 SY(128)
+     *   或压缩主按钮——两者都动整页高度分配，代价大于收益；次按钮宽 SX(152)
+     *   已是很宽的横向目标，且是低频次要路径，误触风险可控（既有 ghost 规格）。
+     *
+     * 【为什么必须是两只按钮（回归史）】
+     *   2026-09-15 验收曾把两按钮合并成一只「智能路由」按钮：有人脸录入→人脸页，
+     *   否则→PIN 键盘。问题是只要有一名用户录入人脸，face_count>0 恒真，PIN
+     *   键盘页从首页再也进不去——虚位密码（FR-18，见 keypad_cb 注释）在首页
+     *   彻底消失。结论：智能路由可以做「优先级」，但不能做「唯一性」，次要
+     *   通道必须保留自己的常驻入口。 */
     lv_obj_t * acts = lv_obj_create(s_hero_card);
     lv_obj_set_size(acts, SX(152), LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(acts, LV_OPA_TRANSP, 0);
@@ -286,11 +309,17 @@ static void build_hero(lv_obj_t * parent)
     lv_obj_set_flex_align(acts, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     pm_no_scroll(acts);
 
-    /* 单一「开锁」入口（用户验收 2026-09-15：原「一键开锁/密码开锁」两按钮功能
-     * 重叠——都只是页面路由）。智能路由：有人脸录入→人脸页（模组随前台 duty-cycle
-     * 唤醒）；否则→PIN 键盘（PIN 通道始终可达）。 */
-    s_btn_unlock = make_button(acts, UI_GLYPH_FINGER, "开锁", true, unlock_cb,
+    /* 主按钮：智能路由 + 文案/图标随 face_count 动态（见 refresh_unlock_buttons）。
+     * 初值用「密码开锁」：s_stats 由 worker 异步填充，首帧 face_count 必为 0。 */
+    s_btn_unlock = make_button(acts, UI_GLYPH_PIN, "密码开锁", true, unlock_cb,
                                &s_btn_unlock_icon, &s_btn_unlock_label);
+    /* 次按钮：无条件直达 PIN 键盘页，face_count>0 时才显示（否则与主按钮重复）。
+     * 图标不用 UI_ICON_KEYPAD——那是 ui_icon_kind_t（矢量拼装接口），与按钮工厂
+     * make_button 走的图标字体 ui_glyph_t 通道不同型；选语义等价的
+     * UI_GLYPH_PIN（0xE0BC，dialpad 九宫格点阵）替代。 */
+    s_btn_keypad = make_button(acts, UI_GLYPH_PIN, "密码开锁", false, keypad_cb,
+                               &s_btn_keypad_icon, &s_btn_keypad_label);
+    refresh_unlock_buttons();   /* 按 s_stats.face_count 定初值（首帧 0 → 藏次按钮） */
 }
 
 /* ---------------------------------------------------------------------------
@@ -439,6 +468,10 @@ static void apply_local_colors(void)
     if (s_btn_unlock)       lv_obj_set_style_bg_color(s_btn_unlock, theme_color(TH_ACCENT), 0);
     if (s_btn_unlock_icon)  lv_obj_set_style_text_color(s_btn_unlock_icon, theme_color(TH_ACCENT_INK), 0);
     if (s_btn_unlock_label) lv_obj_set_style_text_color(s_btn_unlock_label, theme_color(TH_ACCENT_INK), 0);
+    /* ghost 按钮的描边/前景没有主题托管样式（st_*），切主题必须在这里手动跟刷 */
+    if (s_btn_keypad)       lv_obj_set_style_border_color(s_btn_keypad, theme_color(TH_BORDER), 0);
+    if (s_btn_keypad_icon)  lv_obj_set_style_text_color(s_btn_keypad_icon, theme_color(TH_TEXT), 0);
+    if (s_btn_keypad_label) lv_obj_set_style_text_color(s_btn_keypad_label, theme_color(TH_TEXT), 0);
 
     for (int i = 0; i < 4; i++) {
         if (s_stat_card[i])  lv_obj_set_style_border_color(s_stat_card[i], theme_color(TH_BORDER), 0);
@@ -674,6 +707,11 @@ static void stats_done(void * p)
        彻底消除「worker 写 job 缓冲 / UI 线程读 s_stats」的跨线程竞态。 */
     s_stats = *a;
 
+    /* face_count 是异步回填的：首帧构建时恒为 0，真实值在这里才到位。
+     * 主按钮文案与次按钮显隐必须跟着刷一次，否则有人脸时首帧文案错、
+     * 无人脸时首帧会多出一只冗余的「密码开锁」ghost 按钮。 */
+    refresh_unlock_buttons();
+
     char buf[32];
 
     snprintf(buf, sizeof(buf), "%d", a->user_count);
@@ -745,10 +783,45 @@ static void monitor_refresh_theme(int idx)
     }
 }
 
-/* 开锁：优先走无感的人脸通道；无人录入人脸时退回 PIN 键盘（PIN 通道始终可达） */
+/* 开锁主按钮：优先走无感的人脸通道；无人录入人脸时退回 PIN 键盘
+ * （此时次按钮已被 refresh_unlock_buttons 隐藏，两个入口不会指向同一页面）。 */
 static void unlock_cb(lv_event_t * e)
 {
     (void)e;
     ui_switch_page(s_stats.face_count > 0 ? PAGE_FACE : PAGE_KEYPAD);
+}
+
+/* 「密码开锁」次按钮：无条件直达 PIN 键盘页。
+ *
+ * 为什么 PIN 通道必须有一个不受 face_count 影响的常驻入口——
+ * 虚位密码（FR-18）不是一种独立的开锁方式，而是 PIN 输入的一个属性：在正确
+ * PIN 的前后任意插入干扰位，只要输入串中存在连续子串等于真实 PIN 即通过
+ * （unlock_backend.c: pin_match_virtual()，经 backend_verify_pin_ex 按用户
+ * virtual_pin_enable 策略生效）。它只存在于 PIN 键盘页；若首页唯一的开锁
+ * 入口按 face_count 智能路由，则只要有一名用户录入过人脸，PIN 键盘页就永远
+ * 不可达——后端实现得再完整，UI 不可达就等于功能不存在。安全上这也站得住：
+ * 人脸识别失败 / 模组故障 / 光线不佳时，用户永远有一条可预期的物理退路。 */
+static void keypad_cb(lv_event_t * e)
+{
+    (void)e;
+    ui_switch_page(PAGE_KEYPAD);
+}
+
+/* 主按钮文案/图标 + 次按钮显隐，随 face_count 刷新。
+ * 调用点：build_hero()（构建定初值）与 stats_done()（异步统计回填后纠正）。
+ * 只在 build_hero 里设一次是不够的：s_stats 由 worker 线程异步填充，
+ * 构建时 face_count 尚为 0，真实值回来后 UI 若不跟刷就会停在错误状态。 */
+static void refresh_unlock_buttons(void)
+{
+    bool has_face = s_stats.face_count > 0;
+
+    if (s_btn_unlock_label)
+        lv_label_set_text(s_btn_unlock_label, has_face ? "刷脸开锁" : "密码开锁");
+    if (s_btn_unlock_icon)
+        icon_label_set_glyph(s_btn_unlock_icon, has_face ? UI_GLYPH_FACE : UI_GLYPH_PIN);
+
+    /* face_count==0 时主按钮本身就是「密码开锁」，次按钮再露出来只是同一
+     * 目标页的重复入口 → 隐藏（LVGL 对 hidden 对象自动忽略点击）。 */
+    if (s_btn_keypad) lv_obj_set_hidden(s_btn_keypad, !has_face);
 }
 
