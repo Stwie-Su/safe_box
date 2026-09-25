@@ -887,10 +887,19 @@ int mqtt_start(const char *host, int port, const char *client_id, mqtt_msg_cb_t 
 void mqtt_stop(void)
 {
     if (!g_running) return;
-    g_stop = 1;
-    /* 请求优雅退出：net 线程退出循环后会补发 DISCONNECT 再关链路。
-     * 这样 broker 才**不会**为我们发布 LWT —— 「正常退出」与「异常掉线」由此可区分。 */
+    /* ★ 先置 g_graceful，再置 g_stop —— 这个顺序不能反。
+     *
+     * 为什么：net 线程是 `while (!g_stop)`，退出循环之后紧接着
+     * `if (g_graceful)` 补发 DISCONNECT。若先写 g_stop，线程完全可能在这两条
+     * 语句之间被调度到、观察到 g_stop==1 就退出循环，而此时 g_graceful 还是 0
+     * → **DISCONNECT 不发** → 上一轮刚修好的 B1 静默失效 → broker 照发 LWT，
+     * 「正常退出」与「异常掉线」在 broker 侧又变得无法区分。
+     *
+     * 这是一道**顺序正确性**题，不是「概率极小的竞态」：两个标志是一次跨线程
+     * 的两步握手，语义上必须先说清「怎么退」，再说「该退了」。反过来写就是把
+     * 正确性押在调度时序上。代价为零，所以没有理由不按正确顺序写。 */
     g_graceful = 1;
+    g_stop = 1;
     wake();
 
     /* ★ join 必须带超时：net 线程可能在等 PUBACK（inflight 非空）或正阻塞在
