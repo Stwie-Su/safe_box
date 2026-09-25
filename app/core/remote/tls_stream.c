@@ -55,6 +55,11 @@ struct tls_stream {
     int  handshaking;     /* TLS 握手仍在进行 */
     bool want_write;      /* 当前想写（供外层决定 poll 掩码） */
     bool tls;             /* 本句柄是否启用 TLS（后端 B） */
+    /* ★ ssl 上下文是否已被使用过（**发起过**握手就算，不论成败）。
+     * 用途：区分「首次建连」与「重连」—— 重连必须先 mbedtls_ssl_session_reset()
+     * 才能再次握手（见 tls_stream_connect）。为什么用「发起过」而不是「成功过」：
+     * 握手失败的上下文同样停在半途状态，也是脏的，下次一样必须复位。 */
+    bool ssl_used;
 #if defined(SAFE_FEATURE_TLS)
     bool                     ctx_ready;
     mbedtls_ssl_context      ssl;
@@ -243,10 +248,44 @@ int tls_stream_connect(tls_stream_t *s, const char *host, int port)
 
 #if defined(SAFE_FEATURE_TLS)
     if (s->tls) {
-        /* 把 fd 交给 mbedTLS 做 BIO。注意：mbedtls_net_send/recv 的第一个参数是
-         * **指向 fd 的指针**，且握手期间 fd 不能变（重连要重新 set_bio）。 */
+        /* ★ TLS 重连必须先复位 SSL 会话（修「第二次握手必失败」这个 P0 缺陷）。
+         *
+         * 根因：mbedTLS 的 mbedtls_ssl_context **不允许**握手完成后直接再握手。
+         * 头文件写得很清楚（ssl.h:4195）：必须 "call mbedtls_ssl_session_reset()
+         * on it before re-using it"。本项目的两处复用让它必然踩到：
+         *   · mbedtls 上下文只在 tls_stream_new() 里初始化一次（tls_ctx_init）；
+         *   · 传输层句柄在 mqtt_client.c 里按 `if (g_ts == NULL)` 复用，重连不重建。
+         * 于是重连只重新 set_bio 就调 handshake() —— 上下文仍停在 HANDSHAKE_OVER，
+         * 握手函数会「什么都不做直接返回 0」，被误判成握手成功，随后用**陈旧的
+         * 会话密钥**加密 CONNECT；对端解出乱码 → 断链 → 重连 → 死循环。
+         *
+         * 为什么一直没暴露：明文分支整个被 `if (s->tls)` 跳过，默认构建是明文，
+         * 这条路径从未被执行过 —— 与进度文档「步骤 4 致命坑：TLS 握手永不推进」
+         * 是同一个模式，它复发了一次。
+         *
+         * 为什么在 connect 里做而不是 close 里做：复位是「为了下一次使用」而做的
+         * 准备动作，放在重建链路的入口最贴近语义；且 close 会在握手失败/正常退出
+         * 等路径被反复调用，放那里容易复位一个马上要释放的上下文。 */
+        if (s->ssl_used) {
+            int r = mbedtls_ssl_session_reset(&s->ssl);
+            if (r != 0) {
+                /* 复位失败 = 这个 ssl 上下文不能再用了。★ 不吞返回值：如实上报，
+                 * 让上层退避重连；绝不带着脏上下文继续握手 —— 那只会换来一条
+                 * 「看起来连上了、实际一个字节都对不上」的假连接，在安全设备上
+                 * 比连不上更危险。 */
+                char ebuf[160];
+                mbedtls_strerror(r, ebuf, sizeof(ebuf));
+                fprintf(stderr, "[TLS] 会话复位失败 ret=-0x%X (%s)\n", (unsigned)(-r), ebuf);
+                tls_stream_close(s);
+                return -1;
+            }
+        }
+        /* 复位后上下文回到「未握手」态。BIO 仍要重新绑：session_reset 保留应用
+         * 设置的回调与数据，但**每次重连的 fd 都是新的**，重新 set_bio 最省心
+         * （也是 mbedTLS 官方 ssl_client1 重试循环的写法）。 */
         mbedtls_ssl_set_bio(&s->ssl, &s->fd, mbedtls_net_send, mbedtls_net_recv, NULL);
         s->handshaking = 1;
+        s->ssl_used    = true;
     }
 #endif
     return fd;
