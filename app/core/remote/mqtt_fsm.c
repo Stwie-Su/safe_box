@@ -296,6 +296,32 @@ void mqtt_fsm_tick(mqtt_fsm_t *f, uint32_t now_ms, mqtt_fsm_out_t *out)
             f->retry_at_ms = 0;
             f->state       = MQTT_ST_CONNECTING;
             f->last_tx_ms  = now_ms;
+            /* ★ 重连必须重新订阅（修「重连后永久失聪」这个 P0 缺陷）。
+             *
+             * 缺陷原状：pending_subscribe 只在 mqtt_fsm_init() 与 MQTT_EV_START
+             * 置 true，而 MQTT_EV_START **全进程只发一次**（net 线程启动时）。
+             * CONNACK 后发完 SUBSCRIBE 就被置 false，于是**此后的每一次重连
+             * 都不会再发 SUBSCRIBE**。
+             *
+             * 为什么改这一处就够了（已逐一核对）：全文件只有两处把 state 置成
+             * MQTT_ST_CONNECTING —— 本处（WAIT_RETRY 退避到期）与 MQTT_EV_START
+             * （后者已置位）。而所有断链路径（SOCK_FAILED / IO_ERROR / CONNACK
+             * 超时 / PING 超时）都先收敛到 WAIT_RETRY 再回到这里，所以本处是
+             * **唯一的重连入口**，在这里置位即覆盖全部重连场景。
+             *
+             * 为什么它是致命的：本项目 clean_session=1（:390 的注释就是这么写的），
+             * broker 在连接断开时会**丢掉订阅关系**。所以重连后设备虽然
+             * CONNACK 成功、状态显示「已连接」、safe/status 照常上行，
+             * 但**从此再也收不到任何下行指令** —— 对保险柜来说就是
+             *「界面显示在线，远程开锁却永远不响应」，而且没有任何报错。
+             * 触发条件极低：一次网络抖动 / broker 重启 / PING 超时都够。
+             *
+             * 判据（已实测复现，见提交说明）：连上 → 注入一条 >1024B 的下行报文
+             * 触发设备侧断链重连 → 重连后再下发 query_status →
+             *   修复前：safe/log **没有任何回执**（但 safe/status 上行照常，
+             *           界面显示"在线"，且零报错）；
+             *   修复后：safe/log 出现回执。 */
+            f->pending_subscribe = true;
             act_push(f, MQTT_ACT_OPEN_SOCKET, 0);
             act_push(f, MQTT_ACT_NOTIFY_STATE, 0);
         }

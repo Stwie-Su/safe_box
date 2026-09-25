@@ -12,6 +12,8 @@
  *   6. 重传：入队一条 inflight → 推进 retry_timeout → RETRANSMIT；
  *      三次后 → DROP_INFLIGHT + stat_dropped == 1
  *   7. 重连后 mqtt_inflight_count == 0（clean_session=1，旧 pkt_id 无意义）
+ *      ★ 且重连后**必须再发一次 SUBSCRIBE**（P0 回归：重连不重订阅 =
+ *        设备从此收不到任何下行指令，且零报错）
  *   8. on_packet 分派（CONNACK / PUBLISH / PUBACK / PINGRESP）与不支持类型
  *   9. 背压：下行入队失败 → cancel_puback 后不再产出 SEND_PUBACK
  *  10. NULL / 非法入参不崩
@@ -322,13 +324,26 @@ int main(void)
         mqtt_fsm_t f;
         mqtt_inflight_t q;
         mqtt_fsm_out_t out;
+        mqtt_fsm_action_t acts[8];
         mqtt_connack_t ca;
+        mqtt_suback_t sa;
         uint8_t pkt[256];
         size_t plen;
+        size_t n;
         uint32_t now;
 
         mqtt_inflight_init(&q);
         bring_up(&f, &q);
+        /* ★ 必须先把第一次订阅**走完**（收到 SUBACK → 清 pending_subscribe）。
+         * 这不是走过场：缺陷恰恰是「订阅成功过一次之后就再也不重订阅」——
+         * 若跳过 SUBACK，pending_subscribe 恒为 true，下面的断言会平凡通过，
+         * 变成一条永远抓不到缺陷的空测试（本项目踩过的「只见通过」陷阱）。 */
+        memset(&sa, 0, sizeof(sa));
+        sa.pkt_id = 1;
+        mqtt_fsm_on_event(&f, MQTT_EV_RECV_SUBACK, &sa, T0, &out);
+        drain(&f, T0, &out, NULL, 0);
+        CHECK(f.pending_subscribe == false);
+
         plen = make_publish(pkt, sizeof(pkt), 11);
         CHECK(mqtt_fsm_publish_begin(&f, pkt, plen, T0, &out) != 0);
         CHECK(mqtt_inflight_count(&q) == 1);
@@ -341,11 +356,17 @@ int main(void)
         mqtt_fsm_tick(&f, now, &out);
         CHECK(out.act == MQTT_ACT_OPEN_SOCKET);
         drain(&f, now, &out, NULL, 0);
+        /* ★ P0 回归断言：进入重连的那一刻就要把「待订阅」重新置位 ——
+         * 否则 CONNACK 后不会再发 SUBSCRIBE（clean_session=1 时 broker 已丢
+         * 订阅关系），设备从此收不到任何下行指令且没有任何报错。 */
+        CHECK(f.pending_subscribe == true);
         mqtt_fsm_on_event(&f, MQTT_EV_SOCK_CONNECTED, NULL, now, &out);
         drain(&f, now, &out, NULL, 0);
         memset(&ca, 0, sizeof(ca));
         mqtt_fsm_on_event(&f, MQTT_EV_RECV_CONNACK, &ca, now, &out);
-        drain(&f, now, &out, NULL, 0);
+        n = drain(&f, now, &out, acts, 8);
+        CHECK(n == 2);
+        CHECK(acts[0] == MQTT_ACT_SEND_SUBSCRIBE);   /* ★ 第二次连接也要订阅 */
 
         CHECK(f.state == MQTT_ST_CONNECTED);
         /* clean_session=1：旧 pkt_id 无意义 → 必须清空 */
