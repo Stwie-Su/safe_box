@@ -503,10 +503,31 @@ void mqtt_fsm_on_event(mqtt_fsm_t *f, mqtt_fsm_ev_t ev, const void *arg,
             if (f->inflight != NULL) mqtt_inflight_init(f->inflight);
             if (f->pending_subscribe) act_push(f, MQTT_ACT_SEND_SUBSCRIBE, 0);
             act_push(f, MQTT_ACT_NOTIFY_STATE, 0);
+        } else if (code == 0x03u) {
+            /* 0x03（Server unavailable）是**瞬时**故障：broker 正在重启或过载，
+             * 过一会儿再来大概率就成功了 —— 值得重试。
+             * 处置与其它连接失败一致：关链路 → 退避重连。 */
+            act_push(f, MQTT_ACT_CLOSE_SOCKET, 0);
+            fsm_enter_retry(f, now_ms);
+            act_push(f, MQTT_ACT_NOTIFY_STATE, 0);
         } else {
-            /* ★ 协议性拒绝（如 0x05 未授权）**不进退避重连** —— 重连只会拿到
-             * 同一个拒绝码，白白打 broker。停在 IDLE，交给上层决定
-             * （记日志 / 提示凭据错误）。这是「区分错误类型」的考点。 */
+            /* ★ 其余返回码都是**永久性**失败，重试只会拿到同一个拒绝码：
+             *   0x01 协议版本不支持 / 0x02 client id 被拒 —— 设备侧配置问题；
+             *   0x04 用户名密码错 / 0x05 未授权 —— 凭据问题。
+             * 原实现把它们和 0x03 混为一谈（统一停在 IDLE 不重试），方向碰巧
+             * 对了一半；这里显式区分，并把「不重试」的理由写清楚。
+             *
+             * 上报通道：connack_code 随 NOTIFY_STATE 出门（见 do_notify 打印的
+             * "disconnected (connack=N)"），上层据此提示「凭据错误」而不是
+             * 让用户对着一个沉默的离线设备猜。
+             * 恢复路径：改完配置后由上层重新发 MQTT_EV_START —— 永久错误不该
+             * 由状态机自动重试，这是「区分错误类型」的考点。
+             *
+             * 为什么停在这里、而不新增一个 FATAL 状态或 f->fatal 标志：
+             * 「已停止、需人工介入」与 IDLE 的语义（未启动/已停止）本就是同一件事，
+             * 区分「从未启动」与「因永久错误停止」所需的信息已经由 f->connack_code
+             * 承载（非 0 即后者）。新增状态要同步改 state_name / next_wake_ms 等
+             * 多处分支，多一处状态就多一类漏改的迁移 —— 收益为零，风险不为零。 */
             f->state        = MQTT_ST_IDLE;
             f->retry_at_ms  = 0;
             f->pending_ping = false;

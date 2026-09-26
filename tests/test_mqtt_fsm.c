@@ -6,6 +6,7 @@
  *   1. 启动序列 IDLE→START→OPEN_SOCKET→SOCK_CONNECTED→SEND_CONNECT
  *   2. CONNACK(0) → CONNECTED + SEND_SUBSCRIBE + NOTIFY_STATE
  *   3. CONNACK(5) → IDLE + NOTIFY_STATE(5)，且**不产生** OPEN_SOCKET（不重连）
+ *  3b. CONNACK 分类：0x03（瞬时）→ 退避重连；0x01/0x02/0x04/0x05（永久）→ 停止
  *   4. keepalive 到期 → SEND_PINGREQ；不喂 PINGRESP → 再推进 ping_timeout
  *      → CLOSE_SOCKET + WAIT_RETRY + stat_ping_timeout == 1
  *   5. 退避序列：连续失败 8 次，断言落在 [0.75b, b] 且封顶 30s；同种子两次结果一致
@@ -172,6 +173,60 @@ int main(void)
         CHECK(f.state == MQTT_ST_IDLE);
     }
 
+    /* ---- 3b. CONNACK 分类：0x03 瞬时 → 退避重连；1/2/4/5 永久 → 停止并上报 ---- */
+    {
+        mqtt_fsm_t f;
+        mqtt_inflight_t q;
+        mqtt_fsm_out_t out;
+        mqtt_fsm_action_t acts[8];
+        mqtt_connack_t ca;
+        size_t n;
+
+        /* 0x03 Server unavailable：**瞬时**故障（broker 重启/过载），必须退避重连。
+         * 分类错了的后果很实在：若把它当永久错误停在 IDLE，一次 broker 重启就能
+         * 让设备永久离线，而且没有任何报错。 */
+        mqtt_inflight_init(&q);
+        fsm_setup(&f, &q);
+        mqtt_fsm_on_event(&f, MQTT_EV_START, NULL, T0, &out);
+        drain(&f, T0, &out, NULL, 0);
+        mqtt_fsm_on_event(&f, MQTT_EV_SOCK_CONNECTED, NULL, T0, &out);
+        drain(&f, T0, &out, NULL, 0);
+        memset(&ca, 0, sizeof(ca));
+        ca.ret_code = 3;
+        mqtt_fsm_on_event(&f, MQTT_EV_RECV_CONNACK, &ca, T0, &out);
+        n = drain(&f, T0, &out, acts, 8);
+        CHECK(n == 2);
+        CHECK(acts[0] == MQTT_ACT_CLOSE_SOCKET);
+        CHECK(acts[1] == MQTT_ACT_NOTIFY_STATE);
+        CHECK(f.state == MQTT_ST_WAIT_RETRY);     /* ★ 瞬时故障：退避重连 */
+        CHECK(f.retry_at_ms > T0);
+        CHECK(out.connack_code == 3);
+
+        /* 1/2（协议版本不支持 / client id 被拒）与 4/5（用户名密码错 / 未授权）：
+         * 都是**永久性**失败 —— 配置不改，重连一万次也只会拿到同一个拒绝码。 */
+        const uint8_t perm[4] = { 1, 2, 4, 5 };
+        for (int i = 0; i < 4; i++) {
+            mqtt_inflight_init(&q);
+            fsm_setup(&f, &q);
+            mqtt_fsm_on_event(&f, MQTT_EV_START, NULL, T0, &out);
+            drain(&f, T0, &out, NULL, 0);
+            mqtt_fsm_on_event(&f, MQTT_EV_SOCK_CONNECTED, NULL, T0, &out);
+            drain(&f, T0, &out, NULL, 0);
+            memset(&ca, 0, sizeof(ca));
+            ca.ret_code = perm[i];
+            mqtt_fsm_on_event(&f, MQTT_EV_RECV_CONNACK, &ca, T0, &out);
+            n = drain(&f, T0, &out, acts, 8);
+            CHECK(n == 1);
+            CHECK(acts[0] == MQTT_ACT_NOTIFY_STATE);
+            CHECK(f.state == MQTT_ST_IDLE);
+            CHECK(f.retry_at_ms == 0);            /* ★ 不排任何重试定时器 */
+            CHECK(out.connack_code == (int)perm[i]);
+            /* 推进两分钟也不该有任何动作 —— 证明没有退避定时器在跑 */
+            mqtt_fsm_tick(&f, T0 + 120000u, &out);
+            CHECK(out.act == MQTT_ACT_NONE);
+            CHECK(f.state == MQTT_ST_IDLE);
+        }
+    }
     /* ---- 4. keepalive → PINGREQ；PING 超时 → CLOSE_SOCKET + WAIT_RETRY ---- */
     {
         mqtt_fsm_t f;
