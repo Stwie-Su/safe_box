@@ -10,7 +10,8 @@
  *  3b. CONNACK 分类：0x03（瞬时）→ 退避重连；0x01/0x02/0x04/0x05（永久）→ 停止
  *   4. keepalive 到期 → SEND_PINGREQ；不喂 PINGRESP → 再推进 ping_timeout
  *      → CLOSE_SOCKET + WAIT_RETRY + stat_ping_timeout == 1
- *   5. 退避序列：连续失败 8 次，断言落在 [0.75b, b] 且封顶 30s；同种子两次结果一致
+ *   5. 退避序列：连续失败 8 次，断言落在 [0.75b, b]，且第 7 次起**真的钉在封顶
+ *      30s**（期望语义写死 cap，不照抄实现的位移封顶）；同种子两次结果一致
  *   6. 重传：入队一条 inflight → 推进 retry_timeout → RETRANSMIT；
  *      三次后 → DROP_INFLIGHT + stat_dropped == 1
  *   7. 重连后 mqtt_inflight_count == 0（clean_session=1，旧 pkt_id 无意义）
@@ -360,7 +361,11 @@ int main(void)
                 drain(&f, now, &out, NULL, 0);
                 CHECK(f.state == MQTT_ST_WAIT_RETRY);
 
-                uint32_t b = base << ((i > 5) ? 5 : i);
+                /* 期望语义：**指数增长直到超过封顶，然后钉在封顶值**。
+                 * ★ 这里绝不能照抄实现里的位移封顶（`(i > 6) ? 6 : i`）—— 那样
+                 *   断言会退化成"实现说什么就是什么"的同义反复，第 6 项那个
+                 *   "封顶 30s 实际只有 16s"的 bug 就是被这种写法放过去的。 */
+                uint32_t b = base << i;
                 if (b == 0u || b > cap) b = cap;
                 uint32_t d = f.retry_at_ms - now;
                 CHECK(d >= b - b / 4u);          /* ≥ 0.75b */
@@ -378,8 +383,14 @@ int main(void)
             }
         }
         for (int i = 0; i < 8; i++) CHECK(seq_a[i] == seq_b[i]);   /* 同种子 → 同序列 */
-        CHECK(seq_a[6] <= cap);                                    /* 封顶生效 */
+        /* ★ 封顶真正生效：第 7、8 次的间隔必须落在 [0.75cap, cap]。
+         * 修复前位移封顶是 5 → 500<<5 = 16000 < cap=30000，断言只会验到 16000
+         * 这一档，30s 封顶形同虚设（而且没人看得出来）。所以这里写死 cap。 */
+        CHECK(seq_a[6] >= cap - cap / 4u);                         /* 封顶生效 */
+        CHECK(seq_a[6] <= cap);
+        CHECK(seq_a[7] >= cap - cap / 4u);
         CHECK(seq_a[7] <= cap);
+        CHECK(seq_a[5] <  cap - cap / 4u);                         /* 前一次还没到顶 */
         CHECK(seq_a[0] <= 500u);
         CHECK(seq_a[1] >  seq_a[0]);                               /* 指数增长可见 */
         CHECK(seq_a[2] >  seq_a[1]);

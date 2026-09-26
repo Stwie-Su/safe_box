@@ -92,9 +92,21 @@ static uint32_t fsm_backoff_next(mqtt_fsm_t *f)
 {
     uint32_t base = f->cfg.backoff_base_ms ? f->cfg.backoff_base_ms : FSM_DEF_BACKOFF_BASE_MS;
     uint32_t max  = f->cfg.backoff_max_ms  ? f->cfg.backoff_max_ms  : FSM_DEF_BACKOFF_MAX_MS;
-    uint8_t  sh   = (f->retry_count > 5) ? (uint8_t)5 : f->retry_count;
+    /* 位移封顶 6（原为 5）。★ 为什么必须是 6：
+     * base=500 时 500<<5 = 16000 < 默认封顶 30000（见 cfg_default），位移先到顶、
+     * 封顶后到 —— 结果 backoff_max_ms=30s 这条配置**一次都不生效**，实际封顶
+     * 停在 16s，而 cfg_default 里关于「30s 而非 8s」的论证全部落空。
+     * 改成 6：500<<6 = 32000 > 30000 → 命中封顶，与注释一致。
+     *
+     * 代价（写下来，别到时候忘了是自己选的）：第 7 次及以后的重连间隔从 16s
+     * 变成 30s，broker 恢复后设备的"感知延迟"变长。可接受 —— 半开连接本来就有
+     * LWT 兜底，UI 侧还有 5s 一次的状态快照，用户不会看到"离线但界面假在线"。
+     *
+     * 已知约束：若把 backoff_max_ms 调到 >32s，这里的位移封顶 6 也要跟着调大，
+     * 否则又会退化成"位移先封顶、封顶不生效"。默认配置下 30s < 32s，安全。 */
+    uint8_t  sh   = (f->retry_count > 6) ? (uint8_t)6 : f->retry_count;
 
-    uint32_t b = base << sh;                    /* 指数增长，最多 <<5（32 倍） */
+    uint32_t b = base << sh;                    /* 指数增长，最多 <<6（64 倍） */
     if (b == 0u || b > max) b = max;            /* 溢出或超封顶 → 钉在封顶值 */
 
     /* 抖动：delay ∈ [0.75b, b]。
