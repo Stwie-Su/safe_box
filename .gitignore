@@ -2,6 +2,7 @@
 build/
 build_pc/
 build_board/
+build_tls/
 .build_bak/
 .cache/
 compile_commands.json
