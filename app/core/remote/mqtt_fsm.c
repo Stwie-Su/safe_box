@@ -141,6 +141,9 @@ void mqtt_fsm_init(mqtt_fsm_t *f, const mqtt_fsm_cfg_t *cfg, mqtt_inflight_t *q)
     f->rng = f->cfg.rng_seed;
     /* clean_session=1：每次建连都要重新 SUBSCRIBE，故初始即置位。 */
     f->pending_subscribe = true;
+    /* 0xFF = 尚未收到过合法 SUBACK。★ 不能用 0 表示"未定"：0 本身就是一个
+     * 合法的授予 QoS（broker 把我们的 QoS1 降到 QoS0 时就是 0）。 */
+    f->granted_qos = 0xFFu;
     f->inflight = q;
     f->state = MQTT_ST_IDLE;
 }
@@ -536,10 +539,38 @@ void mqtt_fsm_on_event(mqtt_fsm_t *f, mqtt_fsm_ev_t ev, const void *arg,
         break;
     }
 
-    case MQTT_EV_RECV_SUBACK:
-        (void)arg;
+    case MQTT_EV_RECV_SUBACK: {
+        const mqtt_suback_t *sa = (const mqtt_suback_t *)arg;
+        /* arg 缺失按**最坏情况**（订阅被拒）处理：失败方向落在安全的一侧 ——
+         * 「以为订阅成功了」比「以为订阅失败了」危险得多。 */
+        uint8_t rc = (sa != NULL) ? sa->ret_code : (uint8_t)0x80u;
+
         f->pending_subscribe = false;
+
+        if (rc == 0x80u || rc > 2u) {
+            /* 0x80 = broker 拒绝订阅；>2 不是合法 QoS（合法值只有 0/1/2）。
+             *
+             * ★ 为什么必须当失败处理（原实现是 `(void)arg;` 直接丢掉返回码）：
+             *   这与「重连不重订阅」是**同一个失效模式、不同路径** —— 设备以为
+             *   自己已订阅 safe/cmd，实际 broker 一条下行都不会推，界面照样显示
+             *   "在线"，而且**零报错**。对保险柜就是「远程开锁永远不响应」。
+             *
+             * 处置与协议错误一致：断链重连。重连会重发 SUBSCRIBE（WAIT_RETRY
+             * →CONNECTING 处已经置了 pending_subscribe），所以这条路径能自愈，
+             * 而不是永久陷在「已连接但失聪」的状态里。 */
+            f->stat_suback_reject++;
+            act_push(f, MQTT_ACT_CLOSE_SOCKET, 0);
+            fsm_enter_retry(f, now_ms);
+            act_push(f, MQTT_ACT_NOTIFY_STATE, 0);
+        } else {
+            /* rc ∈ {0,1,2} = broker 授予的 QoS。它可能**低于**本端申请的 QoS1
+             * （MQTT_SUB_QOS，见 mqtt_client.c）—— 降级是协议允许的、可接受，
+             * 但必须**记下来**：否则「申请 QoS1 实际只拿到 QoS0」在排障时完全
+             * 不可见。本层不能打印（文件头三条铁律），故落成字段供上层/单测读。 */
+            f->granted_qos = rc;
+        }
         break;
+    }
 
     case MQTT_EV_RECV_PUBLISH: {
         const mqtt_publish_rx_t *rx = (const mqtt_publish_rx_t *)arg;

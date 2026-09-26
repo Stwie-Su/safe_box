@@ -128,11 +128,19 @@ typedef struct {
     bool     pending_subscribe;
     bool     session_present;
     uint8_t  connack_code;
+    /* SUBACK 授予的 QoS（0/1/2；0xFF = 尚未收到过合法 SUBACK）。
+     * 为什么单列一个字段：broker 有权把授予的 QoS **降**到低于申请的 QoS1，
+     * 这是协议允许的、可接受，但必须可查 —— 否则「申请 QoS1 实际只拿到 QoS0」
+     * 在排障时完全不可见（症状只是偶尔丢指令，极难定位）。 */
+    uint8_t  granted_qos;
     /* ---- 关联（不持有，由 T04 注入实体） ---- */
     mqtt_inflight_t * inflight;  /* T02 的未确认队列；可为 NULL（QoS0 场景） */
     /* ---- 统计（供 mqtt_stats() 与单测断言） ---- */
     uint32_t stat_connects, stat_reconnects, stat_ping_timeout,
              stat_retransmit, stat_dropped, stat_rx_publish;
+    /* SUBACK 被拒的次数（0x80 或非法 QoS）。与「重连不重订阅」是同一失效模式
+     * 的另一条路径，单独计数才能把「连上了但收不到指令」归因到具体环节。 */
+    uint32_t stat_suback_reject;
     mqtt_fsm_cfg_t cfg;
 
     /* ---- 以下为实现细节（单测不直接读，但可见以便断言） ----

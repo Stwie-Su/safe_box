@@ -6,6 +6,7 @@
  *   1. 启动序列 IDLE→START→OPEN_SOCKET→SOCK_CONNECTED→SEND_CONNECT
  *   2. CONNACK(0) → CONNECTED + SEND_SUBSCRIBE + NOTIFY_STATE
  *   3. CONNACK(5) → IDLE + NOTIFY_STATE(5)，且**不产生** OPEN_SOCKET（不重连）
+ *  2b. SUBACK 校验：0x80 / 非法 QoS → 断链重连自愈；0/1/2 → 记录授予 QoS
  *  3b. CONNACK 分类：0x03（瞬时）→ 退避重连；0x01/0x02/0x04/0x05（永久）→ 停止
  *   4. keepalive 到期 → SEND_PINGREQ；不喂 PINGRESP → 再推进 ping_timeout
  *      → CLOSE_SOCKET + WAIT_RETRY + stat_ping_timeout == 1
@@ -140,6 +141,63 @@ int main(void)
             CHECK(out.act == MQTT_ACT_NONE);
         }
         CHECK(f.pending_subscribe == false);
+    }
+
+    /* ---- 2b. SUBACK 校验：0x80 / 非法 QoS → 断链重连；0/1/2 → 记录授予 QoS ---- */
+    {
+        mqtt_fsm_t f;
+        mqtt_inflight_t q;
+        mqtt_fsm_out_t out;
+        mqtt_fsm_action_t acts[8];
+        mqtt_suback_t sa;
+        size_t n;
+        int i;
+
+        /* 非法返回码（0x80 订阅被拒 / 3 不是合法 QoS）：若当成成功，设备会以为
+         * 自己已订阅 safe/cmd，实际一条下行都收不到且零报错 —— 必须断链自愈。 */
+        const uint8_t bad[2] = { 0x80, 3 };
+        for (i = 0; i < 2; i++) {
+            mqtt_inflight_init(&q);
+            bring_up(&f, &q);
+            memset(&sa, 0, sizeof(sa));
+            sa.pkt_id   = 1;
+            sa.ret_code = bad[i];
+            mqtt_fsm_on_event(&f, MQTT_EV_RECV_SUBACK, &sa, T0, &out);
+            n = drain(&f, T0, &out, acts, 8);
+            CHECK(n == 2);
+            CHECK(acts[0] == MQTT_ACT_CLOSE_SOCKET);
+            CHECK(acts[1] == MQTT_ACT_NOTIFY_STATE);
+            CHECK(f.state == MQTT_ST_WAIT_RETRY);   /* ★ 重连自愈，而非"已连但失聪" */
+            CHECK(f.stat_suback_reject == 1);
+            CHECK(f.pending_subscribe == false);
+            CHECK(f.granted_qos == 0xFF);           /* 未收到过合法 SUBACK */
+        }
+
+        /* arg 缺失必须按最坏情况处理：宁可误判失败，也不能误判成功 */
+        mqtt_inflight_init(&q);
+        bring_up(&f, &q);
+        mqtt_fsm_on_event(&f, MQTT_EV_RECV_SUBACK, NULL, T0, &out);
+        n = drain(&f, T0, &out, acts, 8);
+        CHECK(n == 2);
+        CHECK(acts[0] == MQTT_ACT_CLOSE_SOCKET);
+        CHECK(f.state == MQTT_ST_WAIT_RETRY);
+        CHECK(f.stat_suback_reject == 1);
+
+        /* 合法授予 QoS：降级（低于申请的 QoS1）可接受，但必须被记录下来 */
+        const uint8_t ok[3] = { 0, 1, 2 };
+        for (i = 0; i < 3; i++) {
+            mqtt_inflight_init(&q);
+            bring_up(&f, &q);
+            memset(&sa, 0, sizeof(sa));
+            sa.pkt_id   = 1;
+            sa.ret_code = ok[i];
+            mqtt_fsm_on_event(&f, MQTT_EV_RECV_SUBACK, &sa, T0, &out);
+            CHECK(out.act == MQTT_ACT_NONE);
+            CHECK(f.state == MQTT_ST_CONNECTED);
+            CHECK(f.granted_qos == ok[i]);
+            CHECK(f.pending_subscribe == false);
+            CHECK(f.stat_suback_reject == 0);
+        }
     }
 
     /* ---- 3. CONNACK(5) → IDLE + NOTIFY_STATE(5)，**不重连** ---- */
