@@ -703,7 +703,19 @@ static void * mqtt_net_thread(void *arg)
 
         /* 4) poll 超时 = min(状态机定时器；有上行指令 / 有待发残留则 0) */
         int timeout = (int)mqtt_fsm_next_wake_ms(&g_fsm, now_ms);
-        if (cmdq_pending() > 0) timeout = 0;
+        /* ★ 只有**能真正把上行发出去**时才要求立刻醒（timeout = 0）。
+         *
+         * 原写法是 `if (cmdq_pending() > 0) timeout = 0;`。而 cmdq_drain() 在未连上
+         * 时是**故意不消费**队列的（上行留着等重连后发，权威记录在本地 safe.log）。
+         * 两者叠起来：未连上时队列**永远非空** → timeout 恒为 0 → poll 退化成忙
+         * 轮询 → net 线程 100% CPU。这是「CONNACK 永久错误」场景下空转的**第二条
+         * 路径**（第一条是 #10：永久错误不关 fd，靠对端 EOF 让 poll 永久就绪）。
+         * 只修 #10 不够 —— 实测：关了 fd 之后稳态 CPU 仍是 100%。
+         *
+         * 判据：只有 CONNECTED 时队列才会被 cmdq_drain 消费，也只有这时"立刻醒"
+         * 才有意义；其余状态（IDLE / CONNECTING / WAIT_RETRY / DISCONNECTING）
+         * 一律交回状态机的定时器，poll 该睡就睡。 */
+        if (cmdq_pending() > 0 && g_fsm.state == MQTT_ST_CONNECTED) timeout = 0;
         if (g_tx_len > g_tx_sent) timeout = 0;
         if (timeout < 0) timeout = 0;
 
