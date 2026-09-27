@@ -139,6 +139,11 @@ static volatile int     g_conn = 0;          /* 已连上（CONNACK=0） */
 static volatile int     g_state = 0;         /* mqtt_fsm_state_t 的镜像（供 mqtt_state_str） */
 /* 上一次**已打印过**的 CONNACK 码（#15：按"码变了"打印，避免刷屏也避免漏打） */
 static volatile int     g_last_connack = 0;
+/* 上一次**已打印过**的订阅失败计数。与 g_last_connack 同一手法：
+ * 只在**数字变化**时打一行 —— 重连风暴本身就密集，每次都打会让日志变成新的
+ * 性能问题；而完全不打则订阅链路全程沉默（#15 只覆盖了 CONNACK，没覆盖它）。 */
+static volatile uint32_t g_last_suback_reject  = 0;
+static volatile uint32_t g_last_suback_timeout = 0;
 /* 退避的可观测镜像（供 mqtt_backoff_ms / mqtt_retry_count）：
  * 与 g_state 同一手法 —— 主线程只**读镜像**，绝不直接摸状态机内部。 */
 static volatile uint32_t g_backoff_ms = 0;
@@ -467,6 +472,29 @@ static void do_notify(void)
         g_conn = connected;
         printf("[MQTT] %s (connack=%d)\n", connected ? "connected" : "disconnected",
                (int)g_fsm.connack_code);
+    }
+
+    /* ★ 订阅链路也必须出声（#15 只覆盖了 CONNACK，这条路径当时还是全程沉默）。
+     *
+     * 为什么必须出声：SUBACK 被拒 / 超时与「重连不重订阅」是**同一个失效模式**
+     * —— 设备 CONNACK 成功、界面显示"在线"、safe/status 上行照常，但 broker
+     * 一条下行都不推。而实测（--no-suback 与 --suback-rc 128）里日志**只有
+     * connected / disconnected**，连一个"订阅失败"的字都没有 —— 用户只能靠猜。
+     * 对保险柜就是「远程开锁永远不响应」，且没有任何线索指向订阅环节。
+     *
+     * 为什么只在**数字变化**时打：重连风暴本身就是密集事件，每次都打会把日志
+     * 变成新的性能问题（这与 do_notify 里 CONNACK 那条的处理保持一致）。 */
+    if (g_last_suback_reject != (uint32_t)g_fsm.stat_suback_reject) {
+        g_last_suback_reject = (uint32_t)g_fsm.stat_suback_reject;
+        printf("[MQTT] 订阅被 broker 拒绝（SUBACK 返回码非 0/1/2，多为 ACL 未授权）："
+               "累计 %u 次；已断链，将按独立退避重连（ACL 修好后自动恢复，无需重启）\n",
+               g_last_suback_reject);
+    }
+    if (g_last_suback_timeout != (uint32_t)g_fsm.stat_suback_timeout) {
+        g_last_suback_timeout = (uint32_t)g_fsm.stat_suback_timeout;
+        printf("[MQTT] 等 SUBACK 超时（发出 SUBSCRIBE 后 %ums 未收到订阅确认）："
+               "累计 %u 次；已断链重连并重发 SUBSCRIBE\n",
+               (unsigned)g_fsm.cfg.suback_timeout_ms, g_last_suback_timeout);
     }
 
     /* ★ #15：CONNACK 非 0 单独打一条。上面那行只在"连接状态翻转"时打，而
@@ -906,6 +934,8 @@ int mqtt_start(const char *host, int port, const char *client_id, mqtt_msg_cb_t 
     memset(&g_stat, 0, sizeof(g_stat));
     g_stat.granted_qos = -1;   /* 0 = 合法 QoS，不能兼作"尚未收到 SUBACK" */
     g_last_connack     = 0;
+    g_last_suback_reject  = 0;
+    g_last_suback_timeout = 0;
     g_stop = 0;
     g_graceful = 0;
     g_thread_exited = 0;
