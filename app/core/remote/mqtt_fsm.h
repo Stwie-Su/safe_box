@@ -84,6 +84,14 @@ typedef struct {
     uint32_t retry_timeout_ms;   /* QoS1 未确认重传超时，建议 5000 */
     uint32_t backoff_base_ms;    /* 退避基数，建议 500 */
     uint32_t backoff_max_ms;     /* 退避封顶，建议 30000 */
+    /* 发出 SUBSCRIBE 后等 SUBACK 的超时，建议 5000。
+     * 为什么必须有（缺陷 #12）：没有它，broker 因任何原因不回 SUBACK 时，
+     * 设备会永远停在 CONNECTED（pending_subscribe 已经清掉了）——
+     * 「界面显示在线、永远收不到下行、零报错」，而且是**永久性**的。
+     * 取 5s 的理由：与 retry_timeout_ms（QoS1 未确认重传）同一量级，语义也
+     * 同族（"发出去的控制报文没被确认"）；再短会在 busy broker 上误判断链，
+     * 再长会让"失聪"窗口过长。超时后的处置只是重连，代价可控。 */
+    uint32_t suback_timeout_ms;
     uint32_t rng_seed;           /* 抖动 PRNG 种子（单测固定 → 结果确定） */
 } mqtt_fsm_cfg_t;
 
@@ -118,14 +126,23 @@ typedef struct {
     /* ---- 定时器 ---- */
     uint32_t last_tx_ms;     /* 最后一次**发送**报文的时刻（keepalive 判据） */
     uint32_t ping_sent_ms;   /* PINGREQ 发出时刻；0 = 未发 */
+    uint32_t sub_sent_ms;    /* SUBSCRIBE 发出时刻；0 = 未发（SUBACK 超时判据） */
     uint32_t retry_at_ms;    /* WAIT_RETRY 的到期时刻 */
     /* ---- 退避 ---- */
     uint32_t backoff_ms;     /* 当前退避时长 */
     uint8_t  retry_count;    /* 连续失败次数 */
+    /* ★ 连续**订阅**失败次数（SUBACK 被拒 0x80 / SUBACK 超时）。
+     * 为什么必须独立于 retry_count（缺陷 #11）：CONNACK(0) 成功时 retry_count
+     * 会被清零（这是对的 —— 链路层面的失败已经自愈了），而 SUBACK 是唯一一条
+     * 「必经 CONNACK 成功之后**才**失败」的路径，于是每次重连都从 500ms 起步，
+     * 退避值恒等于最小值 → 固定周期重连风暴（实测 30s 内 69 次）。
+     * 单独计数后：CONNACK 成功不再把它清零，退避能独立爬到封顶。 */
+    uint8_t  suback_reject_streak;
     uint32_t rng;            /* xorshift32 私有状态（★ 不用 rand()） */
     /* ---- 标志 ---- */
     bool     pending_ping;
     bool     pending_subscribe;
+    bool     pending_suback;  /* 已发 SUBSCRIBE，正在等 SUBACK */
     bool     session_present;
     uint8_t  connack_code;
     /* SUBACK 授予的 QoS（0/1/2；0xFF = 尚未收到过合法 SUBACK）。
@@ -141,6 +158,9 @@ typedef struct {
     /* SUBACK 被拒的次数（0x80 或非法 QoS）。与「重连不重订阅」是同一失效模式
      * 的另一条路径，单独计数才能把「连上了但收不到指令」归因到具体环节。 */
     uint32_t stat_suback_reject;
+    /* SUBACK 超时次数（#12）。与被拒分开记：被拒是 broker **明确拒绝**，
+     * 超时是**根本没回**，两者的排查方向完全不同（ACL vs 链路/ broker 过载）。 */
+    uint32_t stat_suback_timeout;
     mqtt_fsm_cfg_t cfg;
 
     /* ---- 以下为实现细节（单测不直接读，但可见以便断言） ----

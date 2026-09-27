@@ -5,9 +5,13 @@
  * 覆盖设计文档 §2.9 列的 9 条，外加背压（入队失败不回 PUBACK）一条：
  *   1. 启动序列 IDLE→START→OPEN_SOCKET→SOCK_CONNECTED→SEND_CONNECT
  *   2. CONNACK(0) → CONNECTED + SEND_SUBSCRIBE + NOTIFY_STATE
- *   3. CONNACK(5) → IDLE + NOTIFY_STATE(5)，且**不产生** OPEN_SOCKET（不重连）
+ *   3. CONNACK(5) → IDLE + CLOSE_SOCKET + NOTIFY_STATE(5)，且**不产生**
+ *      OPEN_SOCKET（不重连）
  *  2b. SUBACK 校验：0x80 / 非法 QoS → 断链重连自愈；0/1/2 → 记录授予 QoS
  *  3b. CONNACK 分类：0x03（瞬时）→ 退避重连；0x01/0x02/0x04/0x05（永久）→ 停止
+ *  2c. 连续 SUBACK 被拒：退避走**独立**阶梯，不被 CONNACK(0) 归零（#11）
+ *  2d. SUBACK 超时：broker 不回 SUBACK → 断链重连自愈，且定时器已登记进
+ *      next_wake_ms（#12）
  *   4. keepalive 到期 → SEND_PINGREQ；不喂 PINGRESP → 再推进 ping_timeout
  *      → CLOSE_SOCKET + WAIT_RETRY + stat_ping_timeout == 1
  *   5. 退避序列：连续失败 8 次，断言落在 [0.75b, b]，且第 7 次起**真的钉在封顶
@@ -53,8 +57,12 @@ static void fsm_setup(mqtt_fsm_t *f, mqtt_inflight_t *q)
     mqtt_fsm_init(f, &cfg, q);
 }
 
-/* 走完 START → SOCK_CONNECTED → CONNACK(0)，停在 CONNECTED 且动作已排空 */
-static void bring_up(mqtt_fsm_t *f, mqtt_inflight_t *q)
+/* 走完 START → SOCK_CONNECTED → CONNACK(0)，停在 CONNECTED 且动作已排空。
+ * ★ 注意：此时**还没回 SUBACK**，pending_suback 为真 —— 这是"已连但订阅未确认"
+ * 的中间态。加了 #12 的 SUBACK 超时之后，这个状态最多活 5s 就会被判订阅失败并
+ * 断链自愈；所以凡是测"稳定在线"行为的用例都必须用下面的 bring_up()，而不是它。
+ * 留着它是为了给 SUBACK 校验（2b）与 SUBACK 超时（2d）提供精确的入口状态。 */
+static void bring_up_pending_sub(mqtt_fsm_t *f, mqtt_inflight_t *q)
 {
     mqtt_fsm_out_t out;
     mqtt_connack_t ca;
@@ -65,6 +73,22 @@ static void bring_up(mqtt_fsm_t *f, mqtt_inflight_t *q)
     drain(f, T0, &out, NULL, 0);
     memset(&ca, 0, sizeof(ca));
     mqtt_fsm_on_event(f, MQTT_EV_RECV_CONNACK, &ca, T0, &out);
+    drain(f, T0, &out, NULL, 0);
+}
+
+/* 完整建连：连上 **且** 订阅被确认（SUBACK rc=1 = 授予 QoS1，与申请一致）。
+ * 绝大多数用例要的是这个 —— 否则状态机正处在"等 SUBACK"的 5s 窗口里，一推进
+ * 时间就先撞上 SUBACK 超时，测到的就不是想测的东西了（#12 引入后实测踩到：
+ * keepalive / 重传 / 重连这几组用例会因此全线 FAIL）。 */
+static void bring_up(mqtt_fsm_t *f, mqtt_inflight_t *q)
+{
+    mqtt_fsm_out_t out;
+    mqtt_suback_t sa;
+    bring_up_pending_sub(f, q);
+    memset(&sa, 0, sizeof(sa));
+    sa.pkt_id   = 1;
+    sa.ret_code = 1;
+    mqtt_fsm_on_event(f, MQTT_EV_RECV_SUBACK, &sa, T0, &out);
     drain(f, T0, &out, NULL, 0);
 }
 
@@ -159,7 +183,7 @@ int main(void)
         const uint8_t bad[2] = { 0x80, 3 };
         for (i = 0; i < 2; i++) {
             mqtt_inflight_init(&q);
-            bring_up(&f, &q);
+            bring_up_pending_sub(&f, &q);
             memset(&sa, 0, sizeof(sa));
             sa.pkt_id   = 1;
             sa.ret_code = bad[i];
@@ -176,7 +200,7 @@ int main(void)
 
         /* arg 缺失必须按最坏情况处理：宁可误判失败，也不能误判成功 */
         mqtt_inflight_init(&q);
-        bring_up(&f, &q);
+        bring_up_pending_sub(&f, &q);
         mqtt_fsm_on_event(&f, MQTT_EV_RECV_SUBACK, NULL, T0, &out);
         n = drain(&f, T0, &out, acts, 8);
         CHECK(n == 2);
@@ -188,7 +212,7 @@ int main(void)
         const uint8_t ok[3] = { 0, 1, 2 };
         for (i = 0; i < 3; i++) {
             mqtt_inflight_init(&q);
-            bring_up(&f, &q);
+            bring_up_pending_sub(&f, &q);
             memset(&sa, 0, sizeof(sa));
             sa.pkt_id   = 1;
             sa.ret_code = ok[i];
@@ -198,6 +222,119 @@ int main(void)
             CHECK(f.granted_qos == ok[i]);
             CHECK(f.pending_subscribe == false);
             CHECK(f.stat_suback_reject == 0);
+        }
+    }
+
+    /* ---- 2c. 连续 SUBACK 被拒：退避走独立阶梯，不被 CONNACK(0) 归零（#11） ---- */
+    {
+        mqtt_fsm_t f;
+        mqtt_inflight_t q;
+        mqtt_fsm_out_t out;
+        mqtt_fsm_action_t acts[8];
+        mqtt_connack_t ca;
+        mqtt_suback_t sa;
+        uint32_t now = T0;
+        const uint32_t base = 500u, cap = 30000u;
+        int i;
+
+        mqtt_inflight_init(&q);
+        fsm_setup(&f, &q);
+        mqtt_fsm_on_event(&f, MQTT_EV_START, NULL, now, &out);
+        drain(&f, now, &out, NULL, 0);
+
+        for (i = 0; i < 8; i++) {
+            /* 链路层是好的：CONNACK(0) 成功 → 发 SUBSCRIBE、起 SUBACK 定时器 */
+            mqtt_fsm_on_event(&f, MQTT_EV_SOCK_CONNECTED, NULL, now, &out);
+            drain(&f, now, &out, NULL, 0);
+            memset(&ca, 0, sizeof(ca));
+            ca.ret_code = 0;
+            mqtt_fsm_on_event(&f, MQTT_EV_RECV_CONNACK, &ca, now, &out);
+            drain(&f, now, &out, acts, 8);
+            CHECK(f.state == MQTT_ST_CONNECTED);
+            CHECK(f.pending_suback == true);        /* #12 的定时器起来了 */
+            CHECK(f.retry_count == 0);              /* ★ 链路阶梯被 CONNACK 清零是正常的 */
+
+            /* 但订阅被 broker 拒绝 */
+            memset(&sa, 0, sizeof(sa));
+            sa.pkt_id   = 1;
+            sa.ret_code = 0x80;
+            mqtt_fsm_on_event(&f, MQTT_EV_RECV_SUBACK, &sa, now, &out);
+            drain(&f, now, &out, acts, 8);
+            CHECK(f.state == MQTT_ST_WAIT_RETRY);
+            /* ★ 关键：订阅阶梯必须自己涨，不受 CONNACK 影响 */
+            CHECK(f.suback_reject_streak == (uint8_t)(i + 1));
+
+            /* 期望语义写死（不照抄实现）：第 n 次连续失败 → base << (n-1)，封顶 30s。
+             * 修复前退避被 CONNACK(0) 每次归零 → d 恒落在 500 那一档，
+             * 下面这两条从第 2 轮起就会 FAIL（实测表现：30s 内 69 次重连）。 */
+            uint32_t b = base << i;
+            if (b == 0u || b > cap) b = cap;
+            uint32_t d = f.retry_at_ms - now;
+            CHECK(d >= b - b / 4u);
+            CHECK(d <= b);
+
+            now = f.retry_at_ms;
+            mqtt_fsm_tick(&f, now, &out);
+            CHECK(out.act == MQTT_ACT_OPEN_SOCKET);
+            drain(&f, now, &out, NULL, 0);
+            CHECK(f.state == MQTT_ST_CONNECTING);
+        }
+        CHECK(f.suback_reject_streak == 8);
+    }
+
+    /* ---- 2d. SUBACK 超时（#12）：不回 SUBACK 也要自愈，且定时器已登记 ---- */
+    {
+        mqtt_fsm_t f;
+        mqtt_inflight_t q;
+        mqtt_fsm_out_t out;
+        mqtt_fsm_action_t acts[8];
+        mqtt_connack_t ca;
+        uint32_t st;
+        size_t n;
+
+        mqtt_inflight_init(&q);
+        fsm_setup(&f, &q);
+        mqtt_fsm_on_event(&f, MQTT_EV_START, NULL, T0, &out);
+        drain(&f, T0, &out, NULL, 0);
+        mqtt_fsm_on_event(&f, MQTT_EV_SOCK_CONNECTED, NULL, T0, &out);
+        drain(&f, T0, &out, NULL, 0);
+        memset(&ca, 0, sizeof(ca));
+        ca.ret_code = 0;
+        mqtt_fsm_on_event(&f, MQTT_EV_RECV_CONNACK, &ca, T0, &out);
+        drain(&f, T0, &out, NULL, 0);
+        CHECK(f.state == MQTT_ST_CONNECTED);
+        CHECK(f.pending_suback == true);
+
+        st = f.cfg.suback_timeout_ms;
+        CHECK(st > 0u);
+        /* ★ 定时器必须登记进 next_wake_ms：它是 net 线程 poll 超时的唯一来源，
+         * 不登记就等于这个超时不存在（状态机只在别的事情唤醒它时顺带检查）。 */
+        CHECK(mqtt_fsm_next_wake_ms(&f, T0) <= st);
+        CHECK(mqtt_fsm_next_wake_ms(&f, T0) >  0u);
+
+        /* 还没到点：不该有任何动作 —— 否则 busy broker 会被误判断链 */
+        mqtt_fsm_tick(&f, T0 + st - 1u, &out);
+        CHECK(out.act == MQTT_ACT_NONE);
+        CHECK(f.state == MQTT_ST_CONNECTED);
+
+        /* 到点：按订阅失败处理 → 断链重连（而不是"在线但永远失聪"） */
+        mqtt_fsm_tick(&f, T0 + st, &out);
+        n = drain(&f, T0 + st, &out, acts, 8);
+        CHECK(n == 2);
+        CHECK(acts[0] == MQTT_ACT_CLOSE_SOCKET);
+        CHECK(acts[1] == MQTT_ACT_NOTIFY_STATE);
+        CHECK(f.state == MQTT_ST_WAIT_RETRY);
+        CHECK(f.stat_suback_timeout == 1);
+        CHECK(f.pending_suback == false);
+        CHECK(f.suback_reject_streak == 1);      /* 超时也走同一条独立退避阶梯 */
+
+        /* 重连后必须重发 SUBSCRIBE —— 超时过一次不代表放弃订阅 */
+        {
+            uint32_t t2 = f.retry_at_ms;
+            mqtt_fsm_tick(&f, t2, &out);
+            drain(&f, t2, &out, NULL, 0);
+            CHECK(f.state == MQTT_ST_CONNECTING);
+            CHECK(f.pending_subscribe == true);
         }
     }
 
@@ -221,8 +358,12 @@ int main(void)
         mqtt_fsm_on_event(&f, MQTT_EV_RECV_CONNACK, &ca, T0, &out);
         CHECK(f.state == MQTT_ST_IDLE);
         n = drain(&f, T0, &out, acts, 8);
-        CHECK(n == 1);
-        CHECK(acts[0] == MQTT_ACT_NOTIFY_STATE);
+        /* ★ #10：永久错误**必须**产出 CLOSE_SOCKET —— 状态迁移必须闭合资源。
+         * 少了它，g_sock 还在，对端 EOF 会让 poll 永久就绪，而 IO_ERROR 在 IDLE
+         * 下两个分支都不成立 → net 线程空转打满一个核（实测 99.7% CPU）。 */
+        CHECK(n == 2);
+        CHECK(acts[0] == MQTT_ACT_CLOSE_SOCKET);
+        CHECK(acts[1] == MQTT_ACT_NOTIFY_STATE);
         CHECK(out.connack_code == 5);
         CHECK(f.stat_connects == 0);           /* 未算作一次成功连接 */
         /* ★ 关键：不进 WAIT_RETRY，也不产出 OPEN_SOCKET —— 重连只会拿到同一个拒绝码 */
@@ -275,8 +416,10 @@ int main(void)
             ca.ret_code = perm[i];
             mqtt_fsm_on_event(&f, MQTT_EV_RECV_CONNACK, &ca, T0, &out);
             n = drain(&f, T0, &out, acts, 8);
-            CHECK(n == 1);
-            CHECK(acts[0] == MQTT_ACT_NOTIFY_STATE);
+            /* ★ #10：1/2/4/5 每个永久码都要关链路，不能只 NOTIFY 不收资源 */
+            CHECK(n == 2);
+            CHECK(acts[0] == MQTT_ACT_CLOSE_SOCKET);
+            CHECK(acts[1] == MQTT_ACT_NOTIFY_STATE);
             CHECK(f.state == MQTT_ST_IDLE);
             CHECK(f.retry_at_ms == 0);            /* ★ 不排任何重试定时器 */
             CHECK(out.connack_code == (int)perm[i]);
@@ -527,6 +670,17 @@ int main(void)
             CHECK(n == 2);
             CHECK(acts[0] == MQTT_ACT_SEND_SUBSCRIBE);
             CHECK(acts[1] == MQTT_ACT_NOTIFY_STATE);
+        }
+        /* SUBACK 字节：0x90 0x03 <pid 0x0001> <rc=1>
+         * ★ 必须把它喂进去：加 #12 之后"已发 SUBSCRIBE 但未确认"最多活 5s 就会被
+         *   判订阅失败并断链自愈。本用例后面要推进 20s 去看 PINGREQ，不先确认订阅
+         *   的话会先撞上 SUBACK 超时，测到的就不是分派逻辑了。 */
+        {
+            const uint8_t b[5] = { 0x90, 0x03, 0x00, 0x01, 0x01 };
+            CHECK(mqtt_parse(b, sizeof(b), &v, &used) == MQTT_OK);
+            CHECK(mqtt_fsm_on_packet(&f, &v, T0, &out) == MQTT_OK);
+            CHECK(f.pending_suback == false);
+            CHECK(f.granted_qos == 1);
         }
         /* PINGRESP：0xD0 0x00 */
         {
