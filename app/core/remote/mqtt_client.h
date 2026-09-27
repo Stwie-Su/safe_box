@@ -91,9 +91,16 @@ size_t mqtt_queued(void);
 
 /* mqtt_stats() 未覆盖的那几个计数器。任何指针都可传 NULL 表示不关心。
  * 为什么单独开一个而不是改 mqtt_stats() 签名：既有 8 个函数的签名一个字都不能改
- * （rpc.c / ui.c 依赖），只新增 —— 这是本头文件顶部写死的对外契约。 */
+ * （rpc.c / ui.c 依赖），只新增 —— 这是本头文件顶部写死的对外契约。
+ *
+ * granted_qos 出口是 int：-1 = 尚未收到过合法 SUBACK，0/1/2 = broker 授予的 QoS。
+ * ★ 用 -1 而不是 0xFF：出口是给"人"和 UI 看的，0 本身是合法 QoS，不能兼作"未定"。
+ *
+ * ★ 预期消费者见 mqtt_client.c 里 mqtt_stats_ex() 下面那段注释 —— 这一组 getter
+ *   目前还没有调用者，接线方案写在那儿（诊断页 / safe/diag 主题 / 变化日志）。 */
 void mqtt_stats_ex(uint32_t *ping_timeout, uint32_t *retransmit, uint32_t *qos0_fallback,
-                   uint32_t *rx_publish, uint32_t *reject_oversize, uint32_t *reject_malformed);
+                   uint32_t *rx_publish, uint32_t *reject_oversize, uint32_t *reject_malformed,
+                   uint32_t *suback_reject, uint32_t *suback_timeout, int *granted_qos);
 
 /* 上行队列积压条数（与 mqtt_queued() 的下行成对，用于区分哪个方向在丢）。 */
 size_t mqtt_tx_queued(void);

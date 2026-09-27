@@ -105,6 +105,14 @@ typedef struct {
      * 「报文装不下」还是「报文非法」，而这两者的修法与严重度完全不同。 */
     volatile uint32_t reject_oversize;    /* 声明长度 > RX_CAP，永远装不下 */
     volatile uint32_t reject_malformed;   /* 结构非法（含入站 QoS2 / 保留位 3） */
+    /* 订阅链路（#14）：这两个数**只**由状态机产生，且是"连上了但收不到指令"
+     * 这类故障的唯一归因依据。以前它们只写在 g_fsm 里、生产侧谁也读不到 ——
+     * 提交说明写着"必须可查"，实际只有单测能看到，可观测性的承诺没兑现。 */
+    volatile uint32_t suback_reject;      /* SUBACK 被拒（0x80 / 非法 QoS）次数 */
+    volatile uint32_t suback_timeout;     /* SUBACK 超时次数 */
+    /* broker 授予的 QoS（0/1/2）；-1 = 尚未收到过合法 SUBACK。
+     * 用 -1 而不是 0xFF：出口是给"人"看的，0 是合法 QoS，不能兼作"未定"。 */
+    volatile int      granted_qos;
 } mqtt_counters_t;
 
 /* ---------------- 全局状态 ---------------- */
@@ -129,6 +137,8 @@ static volatile int     g_graceful = 0;
 static volatile int     g_thread_exited = 0;
 static volatile int     g_conn = 0;          /* 已连上（CONNACK=0） */
 static volatile int     g_state = 0;         /* mqtt_fsm_state_t 的镜像（供 mqtt_state_str） */
+/* 上一次**已打印过**的 CONNACK 码（#15：按"码变了"打印，避免刷屏也避免漏打） */
+static volatile int     g_last_connack = 0;
 /* 退避的可观测镜像（供 mqtt_backoff_ms / mqtt_retry_count）：
  * 与 g_state 同一手法 —— 主线程只**读镜像**，绝不直接摸状态机内部。 */
 static volatile uint32_t g_backoff_ms = 0;
@@ -420,6 +430,21 @@ static void do_deliver(void)
     }
 }
 
+/* CONNACK 返回码的人类可读解释（#15：永久错误必须出声）。
+ * 没有它，凭据填错的用户只能看到一行 "[MQTT] will:"，然后设备静默停在 IDLE ——
+ * 「静默失败」是排障成本最高的一类缺陷：用户不知道要改什么，甚至不知道出事了。 */
+static const char * connack_reason(int code)
+{
+    switch (code) {
+    case 1: return "不支持的协议版本";
+    case 2: return "client id 被拒";
+    case 3: return "服务端不可用";
+    case 4: return "用户名或密码错误";
+    case 5: return "未授权（client id / 用户名口令无权限）";
+    }
+    return "未知返回码";
+}
+
 /* NOTIFY_STATE：把状态与统计镜像给主线程读（避免主线程直接读状态机内部） */
 static void do_notify(void)
 {
@@ -432,11 +457,31 @@ static void do_notify(void)
     g_stat.retransmit   = g_fsm.stat_retransmit;
     g_stat.dropped      = g_fsm.stat_dropped;
     g_stat.rx_publish   = g_fsm.stat_rx_publish;
+    /* ★ #14：订阅链路的计数与授予 QoS 必须跟着镜像出去，否则「连上了但收不到
+     * 指令」归因不到具体环节 —— 只有单测能看到的可观测性等于没有。 */
+    g_stat.suback_reject  = g_fsm.stat_suback_reject;
+    g_stat.suback_timeout = g_fsm.stat_suback_timeout;
+    g_stat.granted_qos    = (g_fsm.granted_qos == 0xFFu) ? -1 : (int)g_fsm.granted_qos;
     const int connected = (g_fsm.state == MQTT_ST_CONNECTED);
     if (g_conn != connected) {
         g_conn = connected;
         printf("[MQTT] %s (connack=%d)\n", connected ? "connected" : "disconnected",
                (int)g_fsm.connack_code);
+    }
+
+    /* ★ #15：CONNACK 非 0 单独打一条。上面那行只在"连接状态翻转"时打，而
+     * 0x03（瞬时）之后状态一直在 connected/disconnected 之间横跳、刷屏；
+     * 凭据错（1/2/4/5）则**状态根本不翻转**（一直在 IDLE）→ 一行都不打。
+     * 所以这里按"返回码变化"打，并明确告诉用户下一步该干什么。 */
+    if (g_last_connack != (int)g_fsm.connack_code) {
+        g_last_connack = (int)g_fsm.connack_code;
+        if (g_last_connack != 0) {
+            const int permanent = (g_last_connack != 3);   /* 0x03 是唯一的瞬时码 */
+            printf("[MQTT] 连接被 broker 拒绝：CONNACK=%d（%s）。%s\n",
+                   g_last_connack, connack_reason(g_last_connack),
+                   permanent ? "这是永久性错误：不会自动重连，请修正 MQTT 配置后重启设备"
+                             : "这是瞬时故障：将按指数退避自动重连");
+        }
     }
 }
 
@@ -847,6 +892,8 @@ int mqtt_start(const char *host, int port, const char *client_id, mqtt_msg_cb_t 
     snprintf(g_client_id, sizeof(g_client_id), "%s",
              (client_id && client_id[0]) ? client_id : "safe");
     memset(&g_stat, 0, sizeof(g_stat));
+    g_stat.granted_qos = -1;   /* 0 = 合法 QoS，不能兼作"尚未收到 SUBACK" */
+    g_last_connack     = 0;
     g_stop = 0;
     g_graceful = 0;
     g_thread_exited = 0;
@@ -1059,7 +1106,8 @@ size_t mqtt_queued(void)
  * 下面这组 getter 的成本是几十行，收益是把不可观测的运行时变成可粘贴的表格。 */
 
 void mqtt_stats_ex(uint32_t *ping_timeout, uint32_t *retransmit, uint32_t *qos0_fallback,
-                   uint32_t *rx_publish, uint32_t *reject_oversize, uint32_t *reject_malformed)
+                   uint32_t *rx_publish, uint32_t *reject_oversize, uint32_t *reject_malformed,
+                   uint32_t *suback_reject, uint32_t *suback_timeout, int *granted_qos)
 {
     if (ping_timeout)    *ping_timeout    = (uint32_t)g_stat.ping_timeout;
     if (retransmit)      *retransmit      = (uint32_t)g_stat.retransmit;
@@ -1067,7 +1115,31 @@ void mqtt_stats_ex(uint32_t *ping_timeout, uint32_t *retransmit, uint32_t *qos0_
     if (rx_publish)      *rx_publish      = (uint32_t)g_stat.rx_publish;
     if (reject_oversize) *reject_oversize = (uint32_t)g_stat.reject_oversize;
     if (reject_malformed)*reject_malformed= (uint32_t)g_stat.reject_malformed;
+    if (suback_reject)   *suback_reject   = (uint32_t)g_stat.suback_reject;
+    if (suback_timeout)  *suback_timeout  = (uint32_t)g_stat.suback_timeout;
+    if (granted_qos)     *granted_qos     = (int)g_stat.granted_qos;
 }
+
+/* ==========================================================================
+ * ★ 这一组 getter 的**预期消费者**（写下来，避免再造一批死代码）
+ *
+ * 现状（#14 复查时实测）：mqtt_stats_ex() / mqtt_tx_queued() /
+ * mqtt_inflight_count_now() / mqtt_backoff_ms() / mqtt_retry_count() 全仓
+ * **没有任何调用者** —— 只有声明、定义、stub 三处。也就是说 b4ff3d0 那次
+ * "可观测性补齐"只完成了"把数据暴露出来"，没完成"让谁去读"。
+ *
+ * 建议的接法（按性价比排序，都不需要改状态机）：
+ *   1. 系统/诊断页一行状态条（最该做）：把 mqtt_state_str() + mqtt_backoff_ms()
+ *      + mqtt_retry_count() + suback_reject/granted_qos 拼成一行常驻文本。
+ *      用户价值最大 —— 「显示在线但远程开锁没反应」这个最难排查的现象，
+ *      只要页面上有一行 "suback_reject=37 granted=-1" 就当场定位。
+ *   2. 诊断主题 safe/diag：由 UI 手动触发或 5 分钟一次，把这一组数打成 JSON
+ *      上行。好处是**远端**也能看到，不用跑到设备前。
+ *   3. 状态变化时的单行日志：复用 do_notify()，只在数字**变化**时打（避免刷屏）。
+ *
+ * 为什么不建议做成"每次故障都打日志"：本项目日志走 stdout，而 net 线程的重连
+ * 风暴本身就可能很密集，日志反过来会变成新的性能问题。按需拉取比主动推送合适。
+ * ========================================================================== */
 
 /* 上行积压（以前 cmdq_pending() 是 static，主线程拿不到）。
  * 与 mqtt_queued()（下行）成对，用于区分"哪个方向在丢" ——

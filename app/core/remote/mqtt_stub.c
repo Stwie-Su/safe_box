@@ -95,8 +95,12 @@ size_t mqtt_queued(void)
 
 /* ---- 可观测性补齐：与 mqtt_client.c 同步实现，保持签名一致 ---- */
 
+/* 签名与 mqtt_client.c 保持一致（新增的三个出口是订阅链路的可观测性，见 #14）。
+ * stub 侧一律给 0；granted_qos 给 -1 —— 没有连接就没有"授予的 QoS"，
+ * 用 0 会让人误以为曾拿到 QoS0。 */
 void mqtt_stats_ex(uint32_t *ping_timeout, uint32_t *retransmit, uint32_t *qos0_fallback,
-                   uint32_t *rx_publish, uint32_t *reject_oversize, uint32_t *reject_malformed)
+                   uint32_t *rx_publish, uint32_t *reject_oversize, uint32_t *reject_malformed,
+                   uint32_t *suback_reject, uint32_t *suback_timeout, int *granted_qos)
 {
     if (ping_timeout)     *ping_timeout     = 0;
     if (retransmit)       *retransmit       = 0;
@@ -104,6 +108,9 @@ void mqtt_stats_ex(uint32_t *ping_timeout, uint32_t *retransmit, uint32_t *qos0_
     if (rx_publish)       *rx_publish       = 0;
     if (reject_oversize)  *reject_oversize  = 0;
     if (reject_malformed) *reject_malformed = 0;
+    if (suback_reject)    *suback_reject    = 0;
+    if (suback_timeout)   *suback_timeout   = 0;
+    if (granted_qos)      *granted_qos      = -1;
 }
 
 size_t mqtt_tx_queued(void)
