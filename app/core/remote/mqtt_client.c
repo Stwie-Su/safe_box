@@ -758,7 +758,20 @@ static void * mqtt_net_thread(void *arg)
          *
          * 判据：只有 CONNECTED 时队列才会被 cmdq_drain 消费，也只有这时"立刻醒"
          * 才有意义；其余状态（IDLE / CONNECTING / WAIT_RETRY / DISCONNECTING）
-         * 一律交回状态机的定时器，poll 该睡就睡。 */
+         * 一律交回状态机的定时器，poll 该睡就睡。
+         *
+         * ★★ CPU 判据的口径（QA 复现时按**进程级**采样，与我最初按**线程级**
+         * 采样的数字不同，这里统一，免得后面的人以为没修好）：
+         *   进程级（/proc/<pid>/stat，100Hz）：
+         *     修复前 115~119%   修复后 15~16%
+         *     基线：健康连接 18~19%，无 broker 12~15%
+         *     → 这台机用 llvmpipe 软件渲染，**UI 本身就要 8~19%**；修复后的
+         *       15~16% 就是 UI 基线，剩下的不是忙轮询。
+         *   线程级（只看 safe-mqtt-net）：修复前 100% → 修复后 0%。
+         * 统一表述：**忙轮询已消除 —— 进程级 CPU 从 115% 降到 UI 基线水平
+         * （16%，llvmpipe 软件渲染本身即占 8~19%）；net 线程单独看是 100% → 0%。**
+         * ★ 判据必须取**稳态**：只修 #10（关 fd）时"刚出错那几秒"是 19%，看起来
+         * 像好转，但稳态仍是 100% —— 取瞬时值会放过一个 100% 的忙循环。 */
         if (cmdq_pending() > 0 && g_fsm.state == MQTT_ST_CONNECTED) timeout = 0;
         if (g_tx_len > g_tx_sent) timeout = 0;
         if (timeout < 0) timeout = 0;
