@@ -450,8 +450,16 @@ static const char * connack_reason(int code)
     return "未知返回码";
 }
 
-/* NOTIFY_STATE：把状态与统计镜像给主线程读（避免主线程直接读状态机内部） */
-static void do_notify(void)
+/* 统计镜像：把状态机里的状态/计数拷进 g_stat（主线程只读镜像，绝不摸状态机内部）。
+ *
+ * ★ 为什么**每轮循环**都拷，而不是只在 NOTIFY_STATE 时拷：
+ *   有些字段变化**不伴随任何动作** —— 最典型的就是 SUBACK 成功：状态机只把
+ *   rc 记进 granted_qos，不产出任何动作，于是 do_notify() 根本不会被调用，
+ *   镜像就永远停在"未收到"。实测（--suback-rc 1，broker 明确授予 QoS1）：
+ *   诊断页从头到尾只显示 `QoS=未收到`，而 broker 侧日志白纸黑字写着
+ *   `-> 回 SUBACK pid=1 rc=1` —— 可观测性字段被自己的更新时机坑了。
+ *   拷贝成本是十来个赋值，相对一轮 poll 可以忽略。 */
+static void mirror_stats(void)
 {
     g_state = (int)g_fsm.state;
     g_backoff_ms  = g_fsm.backoff_ms;    /* 退避时长镜像：无它则退避曲线不可观测 */
@@ -467,6 +475,12 @@ static void do_notify(void)
     g_stat.suback_reject  = g_fsm.stat_suback_reject;
     g_stat.suback_timeout = g_fsm.stat_suback_timeout;
     g_stat.granted_qos    = (g_fsm.granted_qos == 0xFFu) ? -1 : (int)g_fsm.granted_qos;
+}
+
+/* NOTIFY_STATE：镜像 + 把"值得出声的变化"打出来 */
+static void do_notify(void)
+{
+    mirror_stats();
     const int connected = (g_fsm.state == MQTT_ST_CONNECTED);
     if (g_conn != connected) {
         g_conn = connected;
@@ -725,9 +739,11 @@ static void * mqtt_net_thread(void *arg)
         /* 2) 消费上行指令队列（持锁只做 memcpy，不做套接字 IO） */
         cmdq_drain(now_ms, &out);
 
-        /* 3) 驱动状态机：tick + 把产出的动作全部执行掉 */
-        mqtt_fsm_tick(&g_fsm, now_ms, &out);
-        act_all(now_ms, &out);
+    /* 3) 驱动状态机：tick + 把产出的动作全部执行掉 */
+    mqtt_fsm_tick(&g_fsm, now_ms, &out);
+    act_all(now_ms, &out);
+    /* ★ 每轮都刷一次镜像：不依赖"恰好有 NOTIFY_STATE"才更新（见 mirror_stats 注释）。 */
+    mirror_stats();
 
         /* 4) poll 超时 = min(状态机定时器；有上行指令 / 有待发残留则 0) */
         int timeout = (int)mqtt_fsm_next_wake_ms(&g_fsm, now_ms);

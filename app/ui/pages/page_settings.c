@@ -13,6 +13,7 @@
  * 数据来源（全部真实接口，无占位符）：
  *   app_config()            —— face_backend / mqtt_host:port / log_max_entries
  *   mqtt_is_connected()     —— MQTT 在线状态
+ *   mqtt_state_ex() 那组 getter —— 订阅链路与退避（见下面 s_mqtt_sub_lbl 的注释）
  *   hal_time()/hal_time_ms()/hal_time_source() —— 时钟、运行时长、时钟源
  *   log_query()             —— 当前日志条数（**仅在创建与手动刷新时读一次**，
  *                              不放周期定时器：log_query 是全文件读取，
@@ -37,7 +38,8 @@
 
 static lv_obj_t * s_clock_lbl;      /* 标题行实时时钟 */
 static lv_obj_t * s_uptime_lbl;     /* 系统运行时长（每秒刷新） */
-static lv_obj_t * s_mqtt_lbl;       /* MQTT 状态（每秒刷新） */
+static lv_obj_t * s_mqtt_lbl;       /* MQTT 通道（每秒刷新） */
+static lv_obj_t * s_mqtt_sub_lbl;   /* MQTT 订阅/退避诊断（每秒刷新） */
 static lv_obj_t * s_logcnt_lbl;     /* 当前日志条数（创建/手动刷新时读） */
 static lv_obj_t * s_logcap_lbl;     /* 日志保留上限（随配置） */
 
@@ -195,6 +197,10 @@ lv_obj_t * page_settings_create(lv_obj_t * parent)
     info_row(right, "MQTT 通道", &v_mqtt);
     s_mqtt_lbl = v_mqtt;
 
+    lv_obj_t * v_sub = NULL;
+    info_row(right, "MQTT 订阅", &v_sub);
+    s_mqtt_sub_lbl = v_sub;
+
     lv_obj_t * v_cap = NULL;
     info_row(right, "日志保留上限", &v_cap);
     s_logcap_lbl = v_cap;
@@ -250,6 +256,45 @@ static void clock_timer_cb(lv_timer_t * t)
              mqtt_is_connected() ? "已连接" : "断线");
     lv_label_set_text(s_mqtt_lbl, buf);
     lv_obj_add_style(s_mqtt_lbl, mqtt_is_connected() ? &st_ok_text : &st_danger_text, 0);
+
+    /* ★ 订阅/退避诊断行 —— 这一行是「界面显示在线，但远程开锁永远不响应」的
+     * **当场定位**手段。
+     *
+     * 为什么非有它不可：那个现象是本项目最难排查的一类 —— 设备 CONNACK 成功、
+     * 状态显示"在线"、safe/status 上行照常，但 broker 一条下行都不推，
+     * 而且**零报错**。可能的原因散在四个环节（没订阅 / 订阅被拒 / 授予 QoS
+     * 降级 / 在退避），光看"已连接/断线"两个字完全分不出来。
+     * 这一行把它们并列出来（实际文本示例）：
+     *     retry 退避=30000ms 重试=7 被拒=6 超时=0 QoS=未收到
+     *   · 被拒 > 0         → ACL 没给这个 client 订阅权限（broker 侧配置）
+     *   · 超时 > 0         → broker 不回 SUBACK（链路或 broker 过载）
+     *   · QoS=未收到       → 至今没收到过合法 SUBACK，跟上面两条一起看
+     *   · 退避/重试一直涨  → 链路层在反复失败，看状态与退避的爬升曲线
+     * 也就是说，只要页面上出现 `被拒=37 QoS=未收到`，不用抓包就能归因到订阅环节。
+     *
+     * 为什么放周期定时器而不用"点刷新才读"：这几个数全在 do_notify() 做的镜像里，
+     * 读的是 volatile 副本，**不碰状态机、不持锁、不做 IO**，一秒一次的成本可忽略。
+     * （对比：日志条数走 log_query()，是全文件读取，所以只在创建/手动刷新时读。）
+     */
+    if (s_mqtt_sub_lbl) {
+        uint32_t suback_reject = 0, suback_timeout = 0;
+        int granted = -1;
+        char sub[96];
+        /* 16 字节：中文按 UTF-8 是 3 字节/字，"未收到" 要 9+1 字节，
+         * 给 8 会被 -Wformat-truncation 逮住（实测踩到）。 */
+        char qos[16];
+        mqtt_stats_ex(NULL, NULL, NULL, NULL, NULL, NULL,
+                      &suback_reject, &suback_timeout, &granted);
+        /* granted 出口是 int：-1 = 至今没收到过合法 SUBACK（哨兵值，不是 QoS0）。
+         * ★ 必须显示成人话：直接打 "-1" 用户看不懂，还会误以为 QoS 是负数。 */
+        if (granted >= 0) snprintf(qos, sizeof(qos), "%d", granted);
+        else              snprintf(qos, sizeof(qos), "未收到");
+        snprintf(sub, sizeof(sub), "%s 退避=%ums 重试=%u 被拒=%u 超时=%u QoS=%s",
+                 mqtt_state_str(),
+                 (unsigned)mqtt_backoff_ms(), (unsigned)mqtt_retry_count(),
+                 (unsigned)suback_reject, (unsigned)suback_timeout, qos);
+        lv_label_set_text(s_mqtt_sub_lbl, sub);
+    }
 }
 
 /* 当前日志条数：log_query 为全文件读取，只在创建与手动刷新时调用 */
