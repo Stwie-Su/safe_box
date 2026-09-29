@@ -191,8 +191,13 @@ typedef enum {
     JOB_SET_FACE_POLICY,
     JOB_REMOTE_UNLOCK,
     JOB_INJECT_FACE_LOG,
-    JOB_SET_TIME            /* QA-03：sync_time —— 校时 + 审计日志都在 worker 段 */
+    JOB_SET_TIME,           /* QA-03：sync_time —— 校时 + 审计日志都在 worker 段 */
+    JOB_QUERY_USERS         /* P7：只读用户清单 —— 读盘在 ② worker，主线程零阻塞 */
 } rpc_job_kind_t;
+
+/* query_users 响应缓冲：**必须 ≤ 上行 PAYLOAD_MAX(512)**，否则 cmdq_push 的
+ * snprintf 会把它截半截 —— 那正是本指令要消灭的「静默截断」。取 480 留余量。 */
+#define RPC_Q_USERS_BUF 480
 
 typedef struct {
     rpc_job_kind_t kind;
@@ -217,7 +222,23 @@ typedef struct {
     bool    unlock_ok;   /* ② 写（JOB_REMOTE_UNLOCK），③ 读 */
     int64_t target_ts;   /* JOB_SET_TIME：目标 Unix 秒 */
     char    inj_detail[96];  /* JOB_INJECT_FACE_LOG */
+
+    int     q_offset;           /* JOB_QUERY_USERS：起始下标（分页游标，按值拷入） */
+    char    q_buf[RPC_Q_USERS_BUF]; /* ② 拼好的完整响应（含信封），③ 原样上行 */
 } rpc_job_t;
+
+/* JSON 字符串内容转义（仅 " 和 \，控制字符在本工程字段里不会出现：
+ * 用户名限字母数字、req_id 是对端自拟的短标识）。正常路径（字母数字）零改动。 */
+static void rpc_json_escape(const char *in, char *out, size_t cap)
+{
+    size_t o = 0;
+    if (in == NULL) { out[0] = '\0'; return; }
+    for (size_t i = 0; in[i] != '\0' && o + 3 <= cap - 1; i++) {
+        if (in[i] == '"' || in[i] == '\\') out[o++] = '\\';
+        out[o++] = in[i];
+    }
+    out[o] = '\0';
+}
 
 /* ② worker 线程：仅做 store 写操作 + 会写盘的 TOTP 校验，结果写回 job。 */
 static void rpc_job_fn(void *arg)
@@ -309,6 +330,61 @@ static void rpc_job_fn(void *arg)
         snprintf(j->msg, sizeof(j->msg), "ok");
         break;
     }
+    case JOB_QUERY_USERS: {
+        /* ★ 安全红线：只回 id / name / role / enabled / face（是否已录人脸）。
+         *   **绝不回 pin_hash / pin_salt / face_id（模组模板号）** —— 本指令是给
+         *   远端做「用户数对账」用的，不是同步凭据；凭据字段哪怕只是哈希也不该
+         *   出设备（哈希可离线爆破，模板号可被用于定位/伪造）。
+         *
+         * ★ 为什么分页而不是一次全量：上行 PAYLOAD_MAX=512 是硬上限；静默截断
+         *   （截到哪算哪、不标注）会让远端把半份清单当全量去做对账 —— 比不给
+         *   数据更糟。所以放不下的条目**整条**不写（绝不截半条），并显式带上
+         *   total / count / next_offset / truncated；远端拿 next_offset 再查一次。
+         *   宁可多一次往返，不给假数据。
+         *
+         * ★ 读盘在 ② worker 段（QA-20/QA-21 同款理由）：user_load_all 要解析
+         *   整份 users.json，放主线程会卡 LVGL 泵一拍。 */
+        safe_user_t *us = NULL;
+        int n = 0;
+        if (user_load_all(&us, &n) != 0) {
+            j->code = RPC_CODE_CMD_FAIL;
+            snprintf(j->msg, sizeof(j->msg), "读用户表失败");
+            break;
+        }
+        int off = j->q_offset;
+        if (off < 0) off = 0;
+        if (off > n) off = n;
+
+        char rid[RPC_REQ_ID_CAP * 2];
+        rpc_json_escape(j->req_id, rid, sizeof(rid));
+        size_t used = (size_t)snprintf(j->q_buf, sizeof(j->q_buf),
+            "{\"ts\":%lld,\"code\":0,\"req_id\":\"%s\",\"total\":%d,\"users\":[",
+            (long long)hal_time(), rid, n);
+        int cnt = 0;
+        for (int i = off; i < n; i++) {
+            char nm[sizeof(us[i].name) * 2];
+            rpc_json_escape(us[i].name, nm, sizeof(nm));
+            char ent[224];
+            int el = snprintf(ent, sizeof(ent),
+                "%s{\"id\":%d,\"name\":\"%s\",\"role\":\"%s\",\"enabled\":%s,\"face\":%s}",
+                cnt ? "," : "", us[i].id, nm, us[i].role,
+                us[i].enabled ? "true" : "false",
+                us[i].face_id >= 0 ? "true" : "false");
+            /* 预留结尾 "],count…}"（≈56B）：放不下整条就停，绝不写半条 */
+            if (used + (size_t)el + 56 >= sizeof(j->q_buf)) break;
+            memcpy(j->q_buf + used, ent, (size_t)el);
+            used += (size_t)el;
+            cnt++;
+        }
+        int next = off + cnt;
+        snprintf(j->q_buf + used, sizeof(j->q_buf) - used,
+                 "],\"count\":%d,\"next_offset\":%d,\"truncated\":%s}",
+                 cnt, next, (next < n) ? "true" : "false");
+        j->code = 0;
+        snprintf(j->msg, sizeof(j->msg), "ok");
+        user_list_free(us);
+        break;
+    }
     }
 }
 
@@ -336,6 +412,12 @@ static void rpc_job_done(void *arg)
         break;  /* 仅写盘，无主线程副作用 */
     case JOB_SET_TIME:
         ack(j->req_id, j->code, j->msg);
+        break;
+    case JOB_QUERY_USERS:
+        /* 响应已在 ② 拼好（含信封，≤ PAYLOAD_MAX），这里原样上行；
+         * 只有读盘失败才会走到文本 ack。 */
+        if (j->q_buf[0] != '\0') mqtt_publish("safe/log", j->q_buf, 1, 0);
+        else ack(j->req_id, j->code, j->msg);
         break;
     }
     /* ★ 明文敏感数据：free 之前再清一次（见 rpc_job_t 的注释）。
@@ -442,6 +524,23 @@ static void dispatch(const char *payload)
         store_cache_user_count(&user_count, NULL);
         char *s = build_status(0, NULL, req_id, user_count);
         if (s) { mqtt_publish("safe/log", s, 1, 0); free(s); }
+        cJSON_Delete(root);
+        return;
+    }
+
+    /* ---- query_users：只读用户清单（分页；② 读盘在 worker） ----
+     * 权限分级说明：本指令**无副作用**（重放无害），但不进 readonly 豁免名单 ——
+     * 因为它的**返回内容**本身敏感（用户名枚举）。走敏感档意味着：
+     * 配置了 MQTT 凭据时匿名/未鉴权通道一律 1006 拒绝，且必须带唯一 req_id。
+     * 宁可让轮询方每次换 req_id，也不给匿名连接枚举用户名的口子。 */
+    if (strcmp(c, "query_users") == 0) {
+        rpc_job_t *j = calloc(1, sizeof(*j));
+        if (!j) { ack(req_id, 1003, "internal"); cJSON_Delete(root); return; }
+        j->kind = JOB_QUERY_USERS;
+        strncpy(j->req_id, req_id, sizeof(j->req_id) - 1);
+        cJSON *oj = params ? cJSON_GetObjectItem(params, "offset") : NULL;
+        j->q_offset = cJSON_IsNumber(oj) ? (int)oj->valuedouble : 0;
+        worker_post(rpc_job_fn, j, rpc_job_done);
         cJSON_Delete(root);
         return;
     }
