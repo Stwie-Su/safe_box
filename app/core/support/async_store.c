@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "core/auth/unlock_backend.h"
+#include "core/event_bus.h"
 #include "core/store/store.h"
 
 /* ---------------- 加载失败可观测（S1） ----------------
@@ -133,6 +134,23 @@ void astore_append_log(const char * evt, const char * user, int res, const char 
     strncpy(a->detail, detail ? detail : "", sizeof(a->detail) - 1);
     a->res = res;
     worker_post(al_worker, a, NULL);   /* done=NULL：后台完成后框架释放 arg */
+}
+
+/* ---------------- 用户/凭据变更事件（EV_USER_CHANGED）----------------
+ * 为什么不需要后台作业：事件内容在调用方线程里就已经备好（evt/user/detail 都是
+ * 定长字符串，不需要读盘），所以这里**不**走 worker_post，直接把 POD 投进总线队列。
+ * 用 post 而不是 publish：调用方此刻多半在 worker 线程（变更点即写盘点），
+ * 而订阅回调会碰 LVGL —— 必须等主线程 pump 时再派发。
+ * 队列满时 event_bus_post 会丢最旧一条：上报是**可丢**的，权威记录是本地 safe.log。 */
+void astore_report_user_event(const char * evt, const char * user, int res, const char * detail)
+{
+    ev_user_changed_t e;
+    memset(&e, 0, sizeof(e));
+    strncpy(e.evt,    evt    ? evt    : "-", sizeof(e.evt)    - 1);
+    strncpy(e.user,   user   ? user   : "-", sizeof(e.user)   - 1);
+    strncpy(e.detail, detail ? detail : "",  sizeof(e.detail) - 1);
+    e.res = res;
+    (void)event_bus_post(EV_USER_CHANGED, &e, sizeof(e));
 }
 
 /* ---------------- verify admin pin ---------------- */

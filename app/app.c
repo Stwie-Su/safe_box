@@ -58,6 +58,27 @@ static void on_bus_auth_result(ev_topic_t topic, const void * payload, void * us
     printf("[auth] %s user=%s res=%d detail=%s\n", p->evt, p->user, p->res, p->detail);
 }
 
+/* 用户 / 凭据变更 → 远程通道（safe/log）。
+ *
+ * 为什么用「订阅总线」而不是在 6 个 CRUD 点各调一次 rpc_publish_event：
+ *   1) 变更点全在 worker 线程，而 MQTT 上报属于远程通道，把两者写在一处会让
+ *      「本地改一个用户」和「发一条 MQTT」绑死 —— 断线时要么阻塞本地操作，
+ *      要么每个点各写一遍重试逻辑。走总线后，上报只是**一个订阅者**：
+ *      断线/队列满时它自己丢，本地变更照常完成（安全设备的硬要求）。
+ *   2) 以后要加第二个订阅者（如「变更即闪烁告警灯」）不用再动任何 CRUD 点。
+ *
+ * payload 可能为 NULL（见 event_bus.h 的 ev_user_changed_t 注释：
+ * 「模组人脸全清」「启动对账」只想要用户页刷列表，不是一次需要上报的变更）——
+ * 这里直接返回，不上报一条语义不明的空事件。 */
+static void on_bus_user_changed(ev_topic_t topic, const void * payload, void * user)
+{
+    (void)topic;
+    (void)user;
+    const ev_user_changed_t * p = (const ev_user_changed_t *)payload;
+    if (p == NULL) return;
+    rpc_publish_event(p->evt, p->user, p->detail, p->res);
+}
+
 void app_main(void)
 {
     /* 时间后端选择（规约 §5.14）：必须排在最前——TOTP、日志时间戳、
@@ -108,6 +129,9 @@ void app_main(void)
     ui_init();
 
     event_bus_subscribe(EV_AUTH_RESULT, on_bus_auth_result, NULL);
+    /* 订阅要早于 rpc_init：总线订阅与 MQTT 是否连上无关，连上后历史事件不会补发，
+     * 但订阅本身必须就位，否则开机后第一次本地改用户就漏报。 */
+    event_bus_subscribe(EV_USER_CHANGED, on_bus_user_changed, NULL);
 
     const app_config_t * cfg = app_config();
     if(cfg->mqtt_enabled) {

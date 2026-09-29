@@ -46,6 +46,30 @@ typedef struct {
     int  res;
 } ev_auth_result_t;
 
+/* EV_USER_CHANGED：用户 / 凭据变更（evt/user/detail 截断到定长，res 1 = 成功 0 = 失败）。
+ *
+ * 全部定长 char 数组 + 一个 int，**无指针成员** —— 跨线程 post 是 memcpy 按值拷贝，
+ * 有指针成员的话拷过去的就是悬空地址。
+ *
+ * ★ 尺寸预算 128B（实测 124B，event_bus.c 里有 _Static_assert 把这条钉死）：
+ *   总线硬上限其实是 192B，这里按 128B 收着用，是因为这类载荷还要**再包一层 JSON
+ *   经 MQTT 上行**（PAYLOAD_MAX=512）—— 载荷越大，JSON 越容易顶到 512B 被截断，
+ *   而截断是静默的（见 mqtt_client.c 的 cmdq_push）。留 64B 余量给后续字段。
+ *
+ * ★ detail 取 72 而不是 64：最长的审计详情是临时用户建档
+ *   「<31 字符用户名> role=temp until=1730000000 limit=999」≈ 68 字节，
+ *   取 64 会把 limit 截掉 —— 而「这个临时用户当初给的是几次」正是审计要看的东西。
+ *
+ * ★ payload **允许为 NULL**：本主题的语义是「用户数据变了」，而历史上
+ *   「模组人脸全清」「启动对账」两个发布点只想要「用户页重新拉一次列表」，
+ *   并不代表一次需要上报的变更。订阅方必须容忍 NULL，不能假设一定有载荷。 */
+typedef struct {
+    char evt[16];
+    char user[32];
+    char detail[72];
+    int  res;
+} ev_user_changed_t;
+
 /* EV_FACE_EVENT：人脸模块事件。ev 决定哪个子结构有效：
  *  FACE_EV_DETECT     → res；FACE_EV_ENROLL_DONE → enroll；
  *  FACE_EV_DELETE_DONE→ del；FACE_EV_ERROR       → msg。 */

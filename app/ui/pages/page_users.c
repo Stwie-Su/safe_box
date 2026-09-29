@@ -1189,6 +1189,9 @@ static void add_user_worker(void * p)
             snprintf(det, sizeof(det), "%s role=%s", u.name, u.role);
         }
         log_append("user_add", "admin", 1, det);
+        /* 本地留痕 + 远程上报成对出现：审计的权威记录在 safe.log，远程通道只是
+         * 把它送出去（上报失败不影响本地，见 astore_report_user_event 注释）。 */
+        astore_report_user_event("user_add", "admin", 1, det);
     }
 }
 
@@ -1331,6 +1334,7 @@ static void chg_pwd_worker(void * p)
         if (rr == -2)      { a->result = 2;  return; }  /* 重名 */
         else if (rr == -1) { a->result = -1; return; }   /* 写盘失败 */
         log_append("user_rename", a->newname, 1, "name updated");
+        astore_report_user_event("user_rename", a->newname, 1, "name updated");
     }
     /* —— 改 PIN：沿用原流程（原 PIN 校验 + 重算哈希 + 整记录覆盖） —— */
     if (a->do_pin) {
@@ -1348,6 +1352,9 @@ static void chg_pwd_worker(void * p)
         u2.lock_until = 0;
         res = (user_update(&u2) == 0) ? 0 : -1;
         if (res == 0) log_append("pwd_change", u2.name, 1, "pin updated");
+        /* 改 PIN 是最该被远程看见的变更之一：谁在什么时候改了自己的凭据，
+         * 只有本地日志的话，云端侧完全无感。 */
+        if (res == 0) astore_report_user_event("pwd_change", u2.name, 1, "pin updated");
     }
     a->result = res;
 }
@@ -1465,6 +1472,7 @@ static void tog_worker(void * p)
     u.enabled = !u.enabled;
     a->result = (user_update(&u) == 0) ? 0 : -1;
     if (a->result == 0) log_append("user_modify", u.name, 1, u.enabled ? "enabled" : "disabled");
+    if (a->result == 0) astore_report_user_event("user_modify", u.name, 1, u.enabled ? "enabled" : "disabled");
 }
 
 static void tog_done(void * p)
@@ -2083,6 +2091,7 @@ static void del_worker(void * p)
 
     a->result = user_del(a->id);
     if (a->result == 0) log_append("user_del", "admin", 1, name);
+    if (a->result == 0) astore_report_user_event("user_del", "admin", 1, name);
 }
 
 /* FR-21 防线 2「确认删除结果」：本地用户记录删掉之后，模组侧的人脸模板也必须删掉，

@@ -1041,6 +1041,10 @@ static void factory_worker(void * p)
 
     store_init();   /* 重建默认 admin */
     log_append("factory_reset", "system", 1, "all data cleared");
+    /* ★ 恢复出厂必须上报：这是「设备被整台重置」的唯一外部可见信号。
+     * 注意顺序 —— 上报在 store_init() 之后：默认 admin 重建完成才代表重置真正生效，
+     * 在此之前上报会让云端以为设备已经可用，而此刻用户表还是空的。 */
+    astore_report_user_event("factory_reset", "system", 1, "all data cleared");
 }
 
 static void factory_done(void * p)

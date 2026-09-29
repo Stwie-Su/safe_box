@@ -36,8 +36,15 @@
     typedef char SAFE_ASSERT_CAT(safe_static_assert_, __LINE__)[(cond) ? 1 : -1]
 #endif
 
-SAFE_STATIC_ASSERT(sizeof(ev_auth_result_t) <= PAYLOAD_MAX_BYTES, "ev_auth_result_t exceeds bus payload cap");
-SAFE_STATIC_ASSERT(sizeof(ev_face_event_t)  <= PAYLOAD_MAX_BYTES, "ev_face_event_t exceeds bus payload cap");
+SAFE_STATIC_ASSERT(sizeof(ev_auth_result_t)  <= PAYLOAD_MAX_BYTES, "ev_auth_result_t exceeds bus payload cap");
+SAFE_STATIC_ASSERT(sizeof(ev_user_changed_t) <= PAYLOAD_MAX_BYTES, "ev_user_changed_t exceeds bus payload cap");
+/* 事件载荷的**约定预算**是 128B（不是总线硬上限 192B）：这类载荷还要再包一层
+ * JSON 经 MQTT 上行（PAYLOAD_MAX=512），留余量才不会顶到上行上限被静默截断。
+ * 写成断言，是为了以后有人往结构里加字段时被编译期拦住，而不是悄悄超预算。 */
+#define EVENT_PAYLOAD_BUDGET_BYTES  128
+SAFE_STATIC_ASSERT(sizeof(ev_auth_result_t)  <= EVENT_PAYLOAD_BUDGET_BYTES, "ev_auth_result_t exceeds 128B event budget");
+SAFE_STATIC_ASSERT(sizeof(ev_user_changed_t) <= EVENT_PAYLOAD_BUDGET_BYTES, "ev_user_changed_t exceeds 128B event budget");
+SAFE_STATIC_ASSERT(sizeof(ev_face_event_t)   <= PAYLOAD_MAX_BYTES, "ev_face_event_t exceeds bus payload cap");
 
 typedef struct {
     ev_handler_t handler;
