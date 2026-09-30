@@ -12,6 +12,7 @@
 #include "core/store/store.h"
 #include "core/store/store_cache.h"  /* 主线程只读快照（QA-20 不变式：读写全归 worker） */
 #include "core/support/worker.h"   /* worker_post：把 store 写操作下沉 worker 线程（QA-20） */
+#include "core/support/async_store.h"  /* astore_report_user_event：变更事件上总线（P6） */
 #include "core/auth/totp.h"
 #include "hal/hal_time.h"
 #include "hal/hal_face.h"
@@ -268,14 +269,35 @@ static void rpc_job_fn(void *arg)
 
         if (j->u.id <= 0) j->u.id = user_next_id();   /* 分配 id 在 worker（读盘）做 */
         int r = user_add(&j->u);
-        if (r == 0) log_append("user_add", "remote", 1, j->u.name);
+        if (r == 0) {
+            /* ★ 远程路径与 UI 路径**必须**留同样的痕：安全设备上「谁在什么时候
+             *   动了用户表」，本地 safe.log 与远端 safe/log 看到的必须是同一个
+             *   事实 —— 只写本地，远端只能靠 user_count 跳变猜；只上报不落盘，
+             *   断网时段的操作就凭空消失。两条都做、失败互不影响。 */
+            log_append("user_add", "remote", 1, j->u.name);
+            astore_report_user_event("user_add", "remote", 1, j->u.name);
+        }
         j->code = r == 0 ? 0 : 1003;
         snprintf(j->msg, sizeof(j->msg),
                  r == 0 ? "ok" : (r == -2 ? "用户名已存在" : "add failed"));
         break;
     }
     case JOB_DEL_USER: {
+        /* ★ 审计必须先取名字再删：删完就查不到了，而「删的是谁」正是审计
+         *   要回答的问题。此前远程删除完全无痕（本地 safe.log 与远端 safe/log
+         *   双缺失）—— 事后无法追责/对账，且 fd85ae1 只声明了「远程改用户
+         *   不做」这个边界，从未声明「远程删用户免审计」；与 UI 删除路径
+         *   （del_worker 两条都写）不一致。远程路径同样要与 UI 对齐：
+         *   安全设备上「谁能删用户」，本地和远端看到的必须是同一个事实。 */
+        safe_user_t victim;
+        char vname[32] = "-";
+        if (user_find_by_id(j->del_uid, &victim) == 0)
+            strncpy(vname, victim.name, sizeof(vname) - 1);
         int r = user_del_cascade(j->del_uid, &j->del_fid);
+        if (r == 0) {
+            log_append("user_del", "remote", 1, vname);
+            astore_report_user_event("user_del", "remote", 1, vname);
+        }
         j->code = r == 0 ? 0 : 2003;
         snprintf(j->msg, sizeof(j->msg), r == 0 ? "ok" : "user not found");
         break;
@@ -293,12 +315,29 @@ static void rpc_job_fn(void *arg)
             break;
         }
         user_update(&j->u);
+        /* ★ 与 UI 启停路径对齐：face_enable 是用户数据的一部分，UI 侧 tog_worker
+         *   走 "user_modify" 且两条都写；远程只改的是人脸这一项，evt 仍用
+         *   user_modify，detail 写清楚改的是哪一项。 */
+        char fdet[72];
+        snprintf(fdet, sizeof(fdet), "%s face_enable=%s",
+                 j->u.name, j->u.face_enable ? "enabled" : "disabled");
+        log_append("user_modify", "remote", 1, fdet);
+        astore_report_user_event("user_modify", "remote", 1, fdet);
         j->code = 0; snprintf(j->msg, sizeof(j->msg), "ok");
         break;
     }
     case JOB_SET_FACE_POLICY: {
         if (j->face_otp_after >= 1 || j->face_timeout_s >= 3) {
             user_policy_set_face(j->face_otp_after, j->face_timeout_s);
+            /* ★ 全局策略变更同样留痕。只写本地审计、**不发** EV_USER_CHANGED：
+             *   该事件语义是「用户数据变了」（订阅方是用户页刷新 + 远程上报），
+             *   全局策略不属于用户数据；硬塞进去会让远端收到语义错误的
+             *   user_modify 事件。策略变更的可观测走本地 setting_change +
+             *   周期性 query_status（策略值本来就随状态上报暴露）。 */
+            char pdet[72];
+            snprintf(pdet, sizeof(pdet), "face_otp_after=%d face_timeout_s=%d",
+                     j->face_otp_after, j->face_timeout_s);
+            log_append("setting_change", "remote", 1, pdet);
             j->code = 0; snprintf(j->msg, sizeof(j->msg), "ok");
         } else {
             j->code = 1001; snprintf(j->msg, sizeof(j->msg), "缺少有效参数");
