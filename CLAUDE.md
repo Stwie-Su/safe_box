@@ -1,20 +1,26 @@
-# CLAUDE.md — lv_port_linux（智能保险柜 UI / i.MX6ULL）
+# CLAUDE.md — lv_port_linux（智能保险柜 / i.MX6ULL + LVGL v9）
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> 规约 / 计划 / 进度均在 `~/桌面/规约/`，**开工前必读**。需求规约 v1.7、技术路线规约 v1.4。
+> **规约驱动开发**：需求规约（做什么）→ 技术路线规约（怎么做）→ 开发进度（做到哪）三文档是本仓库唯一权威，全部在 `规约/` 下（**随仓库入库**，2026-09-30 起）。`资料/`（厂商 FM225 手册）**不入库、仅本地存在**。开工前必读三文档。
 
-## 1. 文档与资料（绝对路径）
+## 1. 文档地图（相对仓库根，均可直接打开）
 
-| 类别 | 路径 |
-|---|---|
-| 需求规约（做什么）v1.7 | `~/桌面/规约/需求规约.md` |
-| 技术路线规约（怎么做）v1.4 | `~/桌面/规约/技术路线规约.md` |
-| 执行计划（当前阶段） | `~/桌面/规约/下一步行动计划_2026-09-14.md`（Sprint3 计划已全部完成，原件在 `归档/`） |
-| **开发进度（唯一真源）** | `~/桌面/规约/开发进度.md` |
-| FM225 手册（协议唯一依据） | `~/桌面/资料/FM22x系列人脸锁算法模组用户开发手册V1.7.pdf` |
-| FM225 上板接线与自检 | `~/桌面/规约/FM225_上板接线与自检清单.md` |
-| 旧版归档 | `~/桌面/规约/归档/` |
+| 类别 | 路径 | 说明 |
+|---|---|---|
+| 需求规约（做什么）**v1.10** | `规约/需求规约.md` | 需求变更先改这里再动代码 |
+| 技术路线规约（怎么做）**v1.5** | `规约/技术路线规约.md` | 接口签名变更先回改 §5 |
+| **开发进度（唯一真源）** | `规约/开发进度.md` | 当前步只从 §0 读，不得凭记忆猜 |
+| 当前执行计划 | `规约/计划/下一步行动计划_2026-09-18.md` | R9 主线 + 缺陷修复执行计划 |
+| MQTT 专项进度 | `规约/专项/R9_MQTT_进度.md` | R9 T01~T06 落地明细 |
+| R9 T03/T04 设计分解 | `规约/专项/R9_T03_T04_设计与任务分解_2026-09-20.md` | 五模块拆解与任务书 |
+| UI 重设计任务书 | `规约/专项/claude_prompt_ui_redesign.md` | M1~M6（M6 四主题适配未完） |
+| FM225 上板接线与自检 | `规约/参考/FM225_上板接线与自检清单.md` | 上板联调必读 |
+| UI 视觉真源 | `规约/参考/ui_redesign_preview_v2.html` | 1024×600，浏览器打开 |
+| Debug 案例集 | `规约/案例/` | D 系列缺陷复盘两册 + 现状审查 |
+| 旧版归档 | `规约/归档/` | 历史快照**不维护、不改写** |
+| FM225 手册（协议唯一依据，不入库） | `资料/FM22x系列人脸锁算法模组用户开发手册V1.7.pdf` | 仅本地开发环境有 |
+| 环境配置 / 排错（项目外） | `~/桌面/配置笔记/` | 与代码无关的环境问题 |
 
 ## 2. 工作纪律（铁律）
 
@@ -30,13 +36,13 @@ Windows 端 WorkBuddy 与 Ubuntu 端 Claude Code 共用同一份进度文件，*
 **会话开始（必做）**：
 
 ```bash
-sed -n '1,20p' ~/桌面/规约/开发进度.md                     # §0 标记 + §4 当前步指针
-sed -n '1,60p' ~/桌面/规约/下一步行动计划_2026-09-14.md      # 当前阶段执行计划与拍板决策
+sed -n '1,20p' 规约/开发进度.md                        # §0 标记 + §4 当前步指针
+sed -n '1,60p' 规约/计划/下一步行动计划_2026-09-18.md    # 当前阶段执行计划与拍板决策
 ```
 
 不一致时以进度文件为准，并顺手修正计划文档。
 
-**每完成一步 / 子项（立即，别等会话结束）**：更新《开发进度.md》（§0 标记 + §4 打 ✅ 填实测数据 + 里程碑一行）→ 更新行动计划文档该步骤 ✅ → 独立 commit（Sprint3 期间用 `s3u<N>: <摘要>`，当前阶段沿用 `feat:/fix:` 风格）。
+**每完成一步 / 子项（立即，别等会话结束）**：更新《开发进度.md》（§0 标记 + §4 打 ✅ 填实测数据 + 里程碑一行）→ 更新行动计划文档该步骤 ✅ → 独立 commit（沿用 `feat:/fix:` 风格）。
 
 **会话结束（必做）**：留下可接续状态——做到哪一步、进行到哪个子项、当前阻塞、下一步建议。
 
@@ -44,7 +50,7 @@ sed -n '1,60p' ~/桌面/规约/下一步行动计划_2026-09-14.md      # 当前
 
 多用户共享保险柜（民宿短租 / 小型办公室 / 多成员家庭）→ 多用户权限、TOTP、远程管理、审计日志、限时授权均为必需项。基于 **LVGL v9**；目标硬件 100ask i.MX6ULL（Cortex-A7 单核 / 512MB / 1024×600 触摸屏）。
 
-**当前阶段：FM225 真模组闭环**（USB 串口 by-id + UVC 摄像头自动扫描，板上构建已打通）。DS3231 未到货：RTC 后端壳已就位（`time_rtc.c`，`SAFE_RTC_DEV`），业务链路以 fake/sys 后端验证。进度详见《开发进度.md》§13。
+**当前阶段：R9 自研 MQTT 已收口**（《开发进度.md》§16：协议层 codec/inflight/fsm 带确定性单测 + tls_stream(mbedTLS) + rpc 十指令 + 审计对齐，16 缺陷全修；`ctest` 17/17）。**下一步 = 上板实测（FR-15，P0 最大缺口）→ OTA 期①（FR-29，PC 可验的固件包接收/校验/落盘）**；**板子未接入是当前唯一阻塞项**。RTC 后端抽象已就位（`SAFE_TIME_BACKEND=sys|rtc`），硬件对接状态见《开发进度.md》。
 
 ## 5. 构建
 
@@ -56,6 +62,11 @@ cd ~/桌面/lv_port_linux
 cmake -B build_pc -DLV_PORT_DEFCONFIG=configs/pc.defconfig .
 cmake --build build_pc -j$(nproc)
 ctest --test-dir build_pc --output-on-failure
+
+# PC + MQTT over TLS（build_tls = pc.defconfig + 双开关）
+cmake -B build_tls -DLV_PORT_DEFCONFIG=configs/pc.defconfig \
+  -DSAFE_FEATURE_MQTT=ON -DSAFE_FEATURE_MQTT_TLS=ON .
+cmake --build build_tls -j$(nproc)
 
 # 无桌面登录时（DISPLAY=:0 不可用）
 Xvfb :99 -screen 0 1280x800x24 & DISPLAY=:99 ./build_pc/bin/lvglsim
@@ -75,15 +86,18 @@ cmake -B build_board -DLV_PORT_DEFCONFIG=configs/board.defconfig \
 cmake --build build_board -j$(nproc)
 ```
 
-可选特性（`cmake/SafeFeatures.cmake`，缺依赖自动降级、不会让构建失败）：`SAFE_FEATURE_MQTT`（PC 自动探测）/ `SAFE_FACE_BACKEND=fake|fm225|none` / `SAFE_BUILD_TESTS`（PC ON、交叉 OFF）/ `SAFE_DATA_DIR`（PC `data/`，板子 `/var/lib/safe`）。
+可选特性（`cmake/SafeFeatures.cmake`，缺依赖自动降级、不会让构建失败）：`SAFE_FEATURE_MQTT`（PC 自动探测）/ `SAFE_FEATURE_MQTT_TLS` / `SAFE_FACE_BACKEND=fake|fm225|none` / `SAFE_BUILD_TESTS`（PC ON、交叉 OFF）/ `SAFE_DATA_DIR`（PC `data/`，板子 `/var/lib/safe`）。
 
-调试环境变量（`grep -r 'getenv("SAFE_' app` 为准）：`SAFE_DATA_DIR`、`SAFE_TEST_PAGE`（HOME/LOGS/SETTINGS/USERS/NETWORK/SYSTEM/KEYPAD/FACE）、`SAFE_TEST_THEME`(0..3)、`SAFE_TEST_DLG`(add_user|auth|change_pwd)、`SAFE_TEST_SHOT` / `SAFE_TEST_SHOT_MS`、`SAFE_TEST_UNLOCK=1`、`SAFE_TEST_TRANS_MS` / `SAFE_TEST_TRANS_PAGE`、`SAFE_TEST_FACE`、`SAFE_ICON_CHECK`、`SAFE_PERF_LOG=1`、`SAFE_MQTT_HOST|PORT`、`SAFE_MQTT_OFF=1`、`SAFE_FACE_BACKEND` / `SAFE_FACE_DEV`、`SAFE_FM225_DEV`（真模组串口，建议 by-id 路径）、`SAFE_FACE_PREVIEW_SCALE`、`SAFE_CAMERA_BACKEND` / `SAFE_CAMERA_DEV` / `SAFE_CAMERA_ROT`、`SAFE_TIME_BACKEND` / `SAFE_RTC_DEV`。
+调试环境变量（`grep -r 'getenv("SAFE_' app` 为准）：`SAFE_DATA_DIR`、`SAFE_TEST_PAGE`（HOME/LOGS/SETTINGS/USERS/NETWORK/SYSTEM/KEYPAD/FACE）、`SAFE_TEST_THEME`(0..4，THEME_COUNT=5)、`SAFE_TEST_DLG`(add_user|auth|change_pwd)、`SAFE_TEST_SHOT` / `SAFE_TEST_SHOT_MS`、`SAFE_TEST_UNLOCK=1`、`SAFE_TEST_TRANS_MS` / `SAFE_TEST_TRANS_PAGE`、`SAFE_TEST_FACE`、`SAFE_ICON_CHECK`、`SAFE_PERF_LOG=1`、`SAFE_MQTT_HOST|PORT`、`SAFE_MQTT_OFF=1`、`SAFE_FACE_BACKEND` / `SAFE_FACE_DEV`、`SAFE_FM225_DEV`（真模组串口，建议 by-id 路径）、`SAFE_FACE_PREVIEW_SCALE`、`SAFE_CAMERA_BACKEND` / `SAFE_CAMERA_DEV` / `SAFE_CAMERA_ROT`、`SAFE_TIME_BACKEND` / `SAFE_RTC_DEV`。
 
-辅助脚本：`tools/fm225_sim.py`（socat 虚拟串口对扮模组）、`tools/fm225_selftest.py`（不启主程序的串口链路 30 秒自检）、`tools/crash_consistency_test.sh`（store 崩溃一致性长跑）。
+辅助脚本：`tools/fm225_sim.py`（socat 虚拟串口对扮模组）、`tools/fm225_selftest.py`（不启主程序的串口链路 30 秒自检）、`tools/crash_consistency_test.sh`（store 崩溃一致性长跑）、`tools/mqtt_lab.py`（MQTT 本地实验）、`tools/check_layers.sh` / `tools/check_main_thread_store.sh`（分层与线程纪律闸门）。
 
 ## 6. 目录结构
 
 ```
+规约/                规约驱动开发文档（入库）：需求 / 技术路线 / 开发进度
+│                    + 计划/ 专项/ 案例/ 参考/ 归档/
+资料/                厂商手册（不入库，仅本地）
 app/
 ├── main.c          进程入口：引导 + 主循环，不含业务逻辑
 ├── app.c/h         应用编排：初始化顺序、周期节拍（不依赖 LVGL）
@@ -91,7 +105,7 @@ app/
 │   ├── err.h / event_bus / config
 │   ├── store/      users.json / network.json / safe.log（唯一凭据体系）
 │   ├── auth/       auth_fsm / totp / unlock_backend
-│   ├── remote/     mqtt_client + rpc（缺依赖时编 *_stub.c）
+│   ├── remote/     mqtt_client(codec/inflight/fsm/tls_stream) + rpc（缺依赖时编 *_stub.c）
 │   └── support/    worker、async_store、crypto、sha1
 ├── hal/            硬件抽象：头文件 + 后端实现
 │   ├── hal_face.h  ★ 人脸服务接口（业务层唯一可见）
@@ -100,8 +114,13 @@ app/
 ├── ui/             外壳、主题、字体、页面（ui_init 只做界面，不管业务编排）
 └── platform/       platform_sdl / fbdev / null、perf_probe、debug_hooks
 ports/lv_port/      LVGL 官方 Linux 移植层
-third_party/        aes、sha256
-tests/              CTest（7 项）：totp / auth_fsm / cred_reconcile / event_bus / fm225_proto / store / store_crash + check_layers
+third_party/        aes、sha256、stb
+tests/              CTest（17 项：store 缓存/崩溃/P0、mqtt codec/fsm/inflight、rpc、
+                    fm225_proto/enroll、auth_fsm、cred_reconcile、totp、unlock_backend、
+                    event_bus + check_layers、check_main_thread_store）
+tools/              自检 / 实验 / 字体再生成脚本
+configs/            pc / board / board_3d 三套 defconfig
+cmake/              特性与版本模块 + 交叉编译工具链
 data/               PC 运行时数据（不入库）
 ```
 
@@ -132,7 +151,7 @@ data/               PC 运行时数据（不入库）
 - TOTP 一码一用（`last_otp_counter` 递增防重放），±1 窗口容忍。
 - 执行器脉冲上限 500ms 由 `hal_actuator_pulse()` 强制截断。
 - 删除用户后必须仍保留 ≥1 个启用管理员（`user_del` 内已校验）。
-- 临时用户到期 / 次数用尽**直接删除记录（含人脸凭据）**（FR-9，需求 v1.6 定案）；当前代码仍为「置停用」，由步骤 1 对齐。
+- 临时用户到期 / 次数用尽**直接删除记录（含人脸凭据）**（FR-9，需求 v1.6 定案）；实现对齐状态以《开发进度.md》为准。
 
 ## 10. 接硬件时改哪里
 
@@ -160,5 +179,5 @@ data/               PC 运行时数据（不入库）
 
 ## 12. 范围与边界
 
-- 本期做：FM225 录入/解锁闭环（N1~N5 缺口补齐）、FR-21 凭据一致性、FR-23 模组健康降级、D10 hal_net + NETWORK 页、M6 自研 MQTT（R9：poll 状态机 + QoS1 + 退避 + LWT + 断线补传，已拍板一步到位）、DS3231 驱动、电磁锁 GPIO 后端、单元测试、板上验证。
+- 本期做：R9 自研 MQTT ✅ 已收口（《开发进度.md》§16：codec/inflight/fsm + tls_stream(mbedTLS) + rpc 十指令）；**FR-29 OTA 两期**（期① 固件包接收/校验/落盘 PC 可验；期② 分区切换/自确认/回滚，强依赖上板）、FM225 录入/解锁闭环（N1~N3 完成度以代码核对为准）、FR-21 凭据一致性、FR-23 模组健康降级、D10 hal_net + NETWORK 页、DS3231 驱动、电磁锁 GPIO 后端、单元测试、板上验证。
 - 本期不做：公网穿透、小程序、指纹/NFC/4G/CAN、数据库（SQLite 留接口）。
