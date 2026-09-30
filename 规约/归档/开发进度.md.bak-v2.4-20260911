@@ -1,0 +1,120 @@
+# 智能保险柜系统 · 开发进度
+
+> 版本：v2.4（Sprint3 步骤 3c FM225 协议状态机 + socat 虚拟串口端到端完成）　更新日期：2026-09-11
+> 代码位置：Ubuntu VM `~/桌面/lv_port_linux`（本工程为后续唯一真源）
+> 计划文档：`~/桌面/规约/Sprint3_Ubuntu先行计划.md`（**当前阶段执行计划，含当前步指针**）
+
+---
+
+## 0. 机器可读当前步（两端同步用，每次改动必须同步更新）
+
+```
+CURRENT_STEP: 3c
+STATUS:       步骤 0/1/2/2.5/2.6/3a/3b 已完成；**步骤 3c（FM225 协议状态机 + socat 虚拟串口端到端）已完成**
+              （commit `931eaa3`：fm225_proto 纯状态机 7 组单测全绿 + backend_fm225 接解析器/超时重发/verify 保活 +
+              tools/fm225_sim.py 9 种注入序列 + socat 串口对 /tmp/fm225_host↔/tmp/fm225_dev 全链路实测，
+              ctest 7/7；前置必改已落地——face_service_emit 写 s_last/s_seq 持 s_last_lock +
+              test_event_bus 并发撕裂检测用例）
+UPDATED:      2026-09-11
+OWNER:        WorkBuddy(Win) / ClaudeCode(Ubuntu)
+NEXT:         步骤 4（性能验收与收尾）：perf_probe / SAFE_PERF_LOG=1 记录帧率与 CPU 占用，
+              目标 ≥20fps @ 320×240；「只转最新帧」压力验证（模拟源高帧率轰炸，看串口响应延迟与主循环耗时）；
+              实测数据回填本文件与计划文档 §3；更新《技术路线规约》§4.2「先测量后优化」实测值；
+              顺带：QA 登记的 RSS/arena 复核（上板设 MALLOC_ARENA_MAX=1）、TSan 补跑（3b ③ 遗留）
+```
+
+> 本文件是**唯一进度真源**。Windows 端 WorkBuddy 与 Ubuntu 端 Claude Code 共用它，
+> 交接以本文件为准：**没写进这里 = 没做完**，另一端无法接续。
+
+---
+
+## 1. 里程碑
+
+| 日期 | 事件 | 备注 |
+|---|---|---|
+| 2026-08-25 | `DESIGN.md` 确立 Sprint1 PC 阶段需求基线 | 日志/用户管理/数据存储/UI |
+| 2026-08-27 | 工程骨架初始化 + git + lvgl 子模块 | 初版 UI 跑通 |
+| 2026-08-30 | **分层重构**（commit `28e8a57`） | 分层目录 + 模块化构建 + HAL 后端注册 + 单元测试 |
+| 2026-08-30 | 构建产物与运行时数据移出版本控制（commit `d7ac697`） | `.gitignore` 覆盖 build/data |
+| 2026-08-31 | **headless MQTT 验收 21/21 PASS** | Xvfb+SDL+mosquitto，6 组用例全绿 |
+| 2026-08-31 | 工程去冗余清理 | 移出 legacy/.build_bak/.cache（备份 `_trash_20260831`） |
+| 2026-08-31 | **UI 重构（参考 UI 设计交接文档）** | 4 套精确色板 + 56px 顶栏 + 72px 四胶囊页签（主页/用户/日志/设置）；增量编译通过；Xvfb 截图验证渲染正常 |
+| 2026-08-31 | **默认主题改回月白 + 文档落根目录** | 默认主题由石墨黑→月白（index 1）；需求/目录结构(含架构)/开发进度三份文档置于工程根目录，直接可见 |
+| 2026-08-31 | **改管理员密码接入动态码二次确认（FR-14）** | `page_users.c`：仅管理员改密保存前弹 6 位动态码键盘，`backend_admin_verify_totp` 校验通过才提交；普通用户改密不要求；添加 `SAFE_TEST_DLG=otp` 调试钩子实证可构建 |
+| 2026-09-08 | **技术路线规约升级 v1.3**（SSH 全量代码审计驱动） | 掉电安全未落地/主线程同步 PBKDF2+文件 IO/时钟混用/face 链路未闭合/payload 含指针/退出残缺等 6 项风险登记；线程模型修订（face 线程合并、≤4 封顶）；v1.2 备份 `归档/技术路线规约_v1.2_20260908.md` |
+| 2026-09-08 | **验收期未提交改动整理入库**（commit `17eba52`） | UI 重构（4 色板/56px 顶栏/72px 四页签/图标库/人脸页）+ 改管理员密码动态码二次确认（FR-14）+ `SAFE_TEST_DLG=otp` 调试钩子，主线恢复干净 |
+| 2026-09-08 | **Sprint3 步骤 0 重构止血 R1–R3 完成**（commit `7c4e7f2` / `9dddd95` / `fb219da`） | R1 `write_file_all` 改 tmp→`fsync`→`rename`→`fsync`(目录) 原子替换 + 新增 kill -9 崩溃一致性自测（盯梢 ~70.9 万次采样 0 中间态，换回非原子实现 10 轮全 FAIL）；R2 全工程 11 处 `time(NULL)` 收敛到 `hal_time()`；R3 删除死代码 `credentials.c/h`；ctest 5/5 全绿 |
+| 2026-09-08 | **Sprint3 Ubuntu 先行计划制定** | `规约/Sprint3_Ubuntu先行计划.md`：USB 摄像头 + socat 虚拟串口，不上板完成 Sprint3 主体（步骤 0–4）；FM225 手册入位 `~/桌面/资料/` |
+| 2026-09-08 | **Sprint3 步骤 1 face_reason_t 接口切换完成**（commit `8963f6d` / `29b7a82`） | `face_result_t` 删 score 增 `face_reason_t` 五档；`auth_fsm_submit_face(id,reason)` 按原因分流（OK→开锁 / NO_MATCH 计数达 `face_otp_after` 转 WAIT_OTP / LIVENESS_FAIL 拒绝+防伪告警 / TIMEOUT·ERROR 不计数）；新增 `backend_verify_totp_any`（身份未定动态码）；策略字段换 `face_otp_after`/`face_verify_timeout_s`/`virtual_pin_enable`；rpc `set_face_policy`/`inject_face`；**FR-9 对齐 v1.6**（临时用户到期/次数耗尽→直接删除）；ctest 5/5 |
+| 2026-09-10 | **Sprint3 步骤 2.5 人脸页视频填满面板 + 实时 FPS 角标完成**（commit `e65ef9d`） | 用户实测反馈「画面没有填满整个视频窗口、未显示帧率」驱动；`page_face.c` 预览面板从固定 `SY(360)×SY(280)` 改为 `flex_grow=1 + lv_pct(100)` 占满 root 中间区域；画布由 `lv_canvas_set_buffer` 静态改为 `rebuild_canvas` 动态分配（监听 `SIZE_CHANGED`）；采集 320×240 不变（FR-16 锁定），**最近邻插值**拉伸到面板宽高（整型除法，无浮点，A7 单核 20fps 不掉帧）；四角扫描框 + 扫描光带 + 新增 **FPS 角标**（右上角半透明圆角徽章，16pt，500ms 滑窗，`hal_time_ms()` 单调毫秒时钟）通过 `preview_size_changed_cb` 同步重定位。`debug_hooks.c::take_shot` 改为 step 30ms 循环推 `lv_tick_inc + lv_timer_handler`（旧 `usleep(1200ms)` 不动 lvgl tick，timer 不触发），总时长 1500ms→3000ms（留 USB 启动 ~1s + FPS 滑窗 500ms 起算）。实测 PC（Xvfb+SDL）双分辨率 1024×600 / 1843×1080 截图 FPS 角标清晰（13~15fps 截图窗口偏低，live 实测 20fps）；视频完整填满白色卡片；ctest 5/5 全绿 |
+| 2026-09-10 | **Sprint3 步骤 2.6 人脸页保持 4:3 比例居中最大化 + 双 FPS 分离显示**（commit `0528b93`） | 用户第二轮反馈「别拉伸比例、人脸放正中心、图像尽可能大、视频和 UI 分别显示帧率、尽可能流畅」驱动。①**保持比例不拉伸**：v4 是把 320×240 拉伸满面板（变形）→ 改为等比缩放取最大 `scale = min(cw*1000/320, ch*1000/240)`（千分比整型），得到最大 4:3 矩形居中放置；②**视频最大化**：视频区吃满整个面板高度，底部「状态文字 + 取消」改为 preview 的**半透明浮层子对象**（OPA 60 / 48px 高）叠在画面最下方，不再作为 flex 子项挤占纵向空间；root padding 20→8、pad_row 18→6。实测视频区由 373×280 提升至 **546×410**（面积 2.6 倍），1843×1080 下达 788×590；③**双 FPS 分离**：视频 fps = `hal_camera_frame()` 成功帧数；UI fps = `LV_EVENT_REFR_READY` 事件计数，二者各自 500ms 滑窗，右上角徽章两行显示；④**流畅性**：预计算最近邻映射表 `s_map_x/s_map_y`（SIZE_CHANGED 重建），绘制期查表代替逐像素除法——1024×600 每帧省约 **123 万次整型除法**；invalidate 从整个画布缩小到视频矩形 `lv_obj_invalidate_area`；⑤四角扫描框 + 扫描光带改为贴合视频区（`s_vid_*`）而非整个面板。实测 PC（Xvfb+SDL）：1024×600 → 视频 13fps / UI **27fps**；1843×1080 → 视频 17fps / UI 17fps；画面无变形、居中；构建 0 新增告警、ctest 5/5 全绿 |
+| 2026-09-10 | **Sprint3 步骤 3a event_bus payload POD 化 + face 事件接线完成**（commit `9210555`） | 9 文件 +301/-74。①`ev_auth_result_t` 的 3 个 `const char *` → 定长数组 `evt[16]/user[32]/detail[64]`；②新增 `ev_face_event_t` POD（`FACE_EV_ERROR` 载荷由 `const char *` 改 `char msg[64]`）；③`face_service` 拆除自有订阅数组统一走 `event_bus`（规约 §5.18：全工程只留 worker + event_bus 两套机制），`app.c:81` 补 `face_service_init()` 接线（此前全工程零调用）；④`auth_fsm.c:85` 订阅 `EV_FACE_EVENT`，`on_face_event` → `auth_fsm_submit_face(id,reason)`；顺带修 `EV_ALARM` 注释与规约「payload 一律 POD」一致。实测：增量构建 0 error；**ctest 6/6 全绿**（新增 `tests/test_event_bus.c` 4 组用例：跨线程 post 的 POD 按值拷贝 + 多订阅者 + unsubscribe（含 user 不匹配不退订）+ publish 同步语义 + 定长截断契约）；验收 grep：payload 结构体内 `const char *` 零命中、`face_service_subscribe` 零引用；**inject_face 全链路已通**：rpc `inject_face` → `face_service_inject` → `emit` → `event_bus` → `auth_fsm.on_face_event` → `auth_fsm_submit_face`（此前模拟器级注入不可用） |
+| 2026-09-10 | **Sprint3 步骤 3b face 线程 + 优雅退出链完成**（commit `e7ac93f`，14 文件 +398/-41） | 新增 `app/hal/face/face_thread.[ch]`：单线程 `poll()` 复用 V4L2 video fd（`hal_camera_fd()`，§5.13 新增）+ FM225 UART fd（占位 -1）；相机可读 → **只转最新帧**（camera 后端把就绪缓冲全部取出、只转末帧）→ 双帧缓冲发布（新帧覆盖旧帧/满则丢最旧，`fb` 锁）；主线程 `page_face` 经 `face_thread_get_preview()` 取最新帧渲染，**不再直接拉帧/做帧转换**。**优雅退出 R7**：`main.c` 注册 SIGTERM/SIGINT（处理函数只置 `g_quit`）→ 主循环跳出 → `app_shutdown()`（`face_thread_request_stop()`：置退出标志 + STREAMOFF + io 锁静默在途采集 → `hal_camera_deinit()`(close fd) → `face_thread_join()` → `face_service_deinit` → `mqtt_stop` → `worker_shutdown()` → `platform_shutdown()`）。`worker_shutdown()`（§5.7）补实现；`face_service_emit` 改 `event_bus_post`（跨线程安全）。规约同步：§5.13 增 `hal_camera_fd()`、新增 §5.19 face 线程接口、§5.8 post 措辞、§3.3 线程计数实测。**实测**：构建 0 error、无新增告警（仅基线）；ctest **6/6**；`SAFE_TEST_PAGE=FACE` 截图实证画面经新链路由真实摄像头渲染（视频/UI 双 FPS 正常）；**20 次 `kill -TERM` 全在 0.48s 内退出、0 hang、fd 恒 9**；5 分钟 RSS 153480→156912 kB（fd/线程恒定 9/23）。线程实测（QA 用 `gdb thread apply all bt` 逐线程取栈确证）：**应用自建 = 3**（`main`/`worker`/`face`），≤4 预算成立；另有第三方 LVGL swdraw 1 + Paho 2 + Mesa 17（仅 PC）= 进程内 23。**板子 FBDEV 下 Mesa 不存在，约 6 条**。详见规约 §3.3 |
+| 2026-09-11 | **3b 越界读修复（QA 发现 → 工程师修 → QA ASan 复验闭环）**（commit `02a6b38`） | `face_capture_once` 的 `memcpy(s_fb[slot], src, FB_BYTES)` 用编译期定长 153600，**未校验 `hal_camera_frame()` 返回的协商分辨率**——PC 摄像头恰好协商 320×240 才没触发，开发板接 FM225 时若协商出更小分辨率将读穿 mmap 缓冲。修复：memcpy 前校验 `info.width/height`，不符则丢弃 + `release_frame()`（守 §5.13）+ 限频告警（分辨率变化才打印）。**三路证据**：①**我的 A/B 场景构造**（把采集请求改 160×120 制造真越界）——有防护臂告警 1 次 + 画面显示占位；无防护臂告警 0 次 + 画面出现「上半人脸、下半彩色垃圾条纹」（越界读的可视证据）；**两臂均未崩溃**，说明危害形式是「悄悄花屏」而非段错误，更隐蔽；②**QA 用 detached worktree + ASan 复验**——旧 `e7ac93f` → `heap-buffer-overflow READ of size 614400`（缺陷复现），新 `02a6b38` → 0 报错、告警恰 1 次、采集不停；③ctest 6/6、强制重编 0 warning。 |
+| 2026-09-11 | **Sprint3 步骤 3c FM225 协议状态机 + socat 虚拟串口端到端完成**（commit `931eaa3`） | 11 文件（新建 4：`fm225_proto.[ch]` / `test_fm225_proto.c` / `fm225_sim.py`）。①**前置必改**：`face_service_emit` 写 `s_last/s_seq` 持 `s_last_lock`（锁内字段读写、锁外 `event_bus_post`，§5.11 并发条款先改规约再动码），`test_event_bus.c` 新增并发用例（face 线程 2000 次 emit vs 主线程 `last_result` 撕裂检测 `face_id==seq-1`）；②**fm225_proto 纯状态机**：7 状态逐字节推进，不依赖 fd/全局，`fm225_proto_tick` 推进帧内 200ms 超时，`fm225_proto_stats` 回吐 bad/resync/timeout；③**backend_fm225 全量重写**：VERIFY(0x12)/ENROLL(0x13)/DELETE_USER(0x20) 命令拼帧、XOR 校验、800ms 应答超时重发（3 次后 FACE_EV_ERROR 放弃）、**verify 会话保活**（无 pending 2s 退避重开，断链不停摆）、REPLY 受理策略（VERIFY 一律受理，ENROLL/DELETE 严格匹配 pending）；④**socat 串口对** `/tmp/fm225_host↔/tmp/fm225_dev`，backend 开 host 端 termios 115200 8N1，fd 经 `face_thread_set_uart_fd()` start 前接入（app.c 调序：face_service_init/start 移到 face_thread_start 之前）；⑤**fm225_sim.py** 9 种注入序列（ready/no_match[n]/liveness/match[uid]/enroll/delete/bad/heartbeat/listen）。**实测**：ctest **7/7**（新增 test_fm225_proto 7 组用例：手册帧验算/半包/粘包含 Data 区 0xEF 0xAA/坏 XOR/噪声重同步/超时/超长+空 Data）；全量重编 0 error 无新增告警（3c 触碰文件零告警）；**端到端**：3×no_match→DENY×3→WAIT_OTP（60s 后「动态码超时」反证）→截图人脸页→动态码页；liveness→DENY+**ALARM 活体检测失败（防伪）**；match uid=1→**UNLOCK admin via=face**；bad 帧后好帧正常解出（容错）；LOCKOUT 顺带验证（fail_streak=5 锁 30s） |
+| 2026-09-10 | **Sprint3 步骤 3 细化为 3a/3b/3c 三个可独立验收子步** | 拆分依据：face 线程产出要经 `event_bus_post(EV_FACE_EVENT)` 交主线程，但通道有两处硬伤——①`ev_auth_result_t` 含 3 个 `const char *`（跨线程 post 即悬空指针，R6 登记风险）；②`face_service_init` 全工程零调用。若先起线程需写两遍，故 **3a 先修通道**（POD 化 + 接线），3b 起线程（poll 双 fd + 只转最新帧 + 优雅退出 R7，线程数 ≤4），3c 补 FM225 协议状态机（纯状态机 + socat 端到端）。每子步独立 commit（`s3u3a` / `s3u3b` / `s3u3c`）与独立验收 |
+| 2026-09-08 | **Sprint3 步骤 2 camera_v4l2 + 人脸页实时预览完成**（commit `680752e` / `d79001e`） | 新增 `camera_v4l2.c`（mmap 零拷贝 + YUYV→RGB565 查表转换，4 缓冲）；camera_service 运行期选后端（默认 v4l2，失败自动降级 null）；page_face 320×240 1:1 画布 + 50ms 拉帧 timer（页面隐藏空转）+ 角标光带叠加画面；app.c 接线 hal_camera_init/start（此前零调用）；预览帧缓冲定长 uint16_t 防 32bpp 上板越界。实测：模拟器人脸页显示真实摄像头画面（YUYV 320×240 协商 1/20fps）；**11 分钟连续运行 RSS 平稳零泄漏**（113352→113272 kB）、DQBUF 错误 0；null 降级路径占位文字正常；ctest 5/5 |
+
+---
+
+## 2. 已完成模块
+
+- **认证状态机 `auth_fsm`**：按失败原因分流（v1.6 FR-19：OK→UNLOCK / NO_MATCH 计数→WAIT_OTP→LOCKOUT / LIVENESS_FAIL→DENY+防伪告警 / TIMEOUT·ERROR 不计数）+ 设备级/用户级双轨锁定。
+- **远程通道 `rpc` + `mqtt_client`**：MQTT 指令分发，支持 `inject_face` / `query_status` / `remote_unlock` / `set_face_policy` / `submit_otp`（调试）。
+- **双因子 `totp`**：RFC6238 实现，严格递增窗口计数器防重放；新增 `backend_verify_totp_any`（人脸连续未匹配后身份未定的动态码校验，失败不累加用户级计数）。
+- **数据存储 `store`**：JSON 文件 + 统一抽象层；PIN PBKDF2-SHA256 哈希，每用户随机盐；落盘走原子替换；策略含 `face_otp_after` / `face_verify_timeout_s` / `virtual_pin_enable`。
+- **HAL 后端注册**：face（fake/fm225/none，reason 契约）、actuator（mock）、camera（null）、time（sys）多后端可插拔。
+- **UI 外壳与主题（2026-08-31 重构）**：
+  - `theme.c`：4 套精确色板（石墨黑/月白/蓝白/松石青）+ 全局 `lv_style_t`；`theme_switch()` 一键换肤，**默认月白（index 1）**。
+  - `ui.c`：56px 顶栏（锁状态点 + 时钟 + **MQTT 连接点** + WiFi）、72px 四胶囊页签（主页/用户/日志/设置），覆盖层不切高亮。
+  - `page_users.c`：底部「用户」一级页签；**改管理员密码弹动态码二次确认**（自绘 6 位键盘），删除走 admin PIN 二次验证。
+  - `page_monitor` / `page_logs` / `page_settings` / `page_system` / `page_network` / `page_keypad` / `page_otp`：全部复用主题样式，换肤无需重建。
+- **工具与测试**：`tools/`（字体生成、TOTP 自测、崩溃一致性长跑）、`tests/`（auth_fsm / store / store_crash / totp 单元测试，当前 5/5 全绿）。
+
+---
+
+## 3. 当前未提交改动（待 commit）
+
+**无**——步骤 0 / 1 / 2 / 2.5 / 2.6 / 3a / 3b / 3c 已各自独立 commit（`17eba52` / `7c4e7f2` / `9dddd95` / `fb219da` / `8963f6d` / `29b7a82` / `680752e` / `d79001e` / `e65ef9d` / `0528b93` / `9210555` / `e7ac93f` / `02a6b38` / `60883f3` / **`931eaa3`**），业务代码工作区干净。CLAUDE.md 为用户改动，未纳入本工程提交（保持未暂存，配套 `CLAUDE.md.bak-*` 亦未跟踪）。
+
+---
+
+## 4. 当前步指针与下一步（2026-09-11 更新：步骤 3c 完成）
+
+> **▶ 当前：Sprint3 Ubuntu 先行 · 步骤 4（性能验收与收尾）——未开工**（步骤 0、1、2、2.5、2.6、3a、3b、3c 已完成）
+> 执行细节、验收标准见《Sprint3_Ubuntu先行计划.md》；每完成一步在下面打 ✅ 并填实测结果。
+
+| 步骤 | 内容 | 状态 |
+|---|---|---|
+| 0 | R1 `write_file_all` 原子替换（tmp→fsync→rename→fsync 目录）；R2 统一 `hal_time()`；R3 删 `credentials.c/h`；顺带整理 §3 未提交改动为一个 commit | ✅ 已完成（4 个 commit：`17eba52` 整理改动 / `7c4e7f2` R1 / `9dddd95` R2 / `fb219da` R3）。实测：全量重建 0 error、无新增告警；ctest **5/5 通过**（test_totp / test_auth_fsm / test_store / **test_store_crash** / check_layers，2.90s）；崩溃自测原子版盯梢 10 轮 ×100ms 累计采样 708,574 次、**中间态 0 次**，随机轮 10 轮全过；反向对照（换回非原子实现）盯梢 10 轮 **全 FAIL**，抓到 50 次中间态（size 0 / 4096），终态仅解析出 0~9 条用户。R1 顺带修复 `js_arr_count`/`js_arr_at` 对 `js_skip` 返回 NULL 未判（坏 users.json 会解引用空指针崩溃，反向对照时炸出，已加 2 行防护合入 R1） |
+| 1 | `face_reason_t` 接口切换：hal_face 去 score、auth_fsm 按原因分流、store/config 策略字段、rpc 指令改名 | ✅ 已完成（commit `8963f6d` 主体 + `29b7a82` 收尾，17 文件 +848/-574）。实测：增量重建 0 error、无新增告警（`platform.h` 既有 -Wcomment 已顺带修掉）；ctest **5/5**（test_auth_fsm 改写为 9 组按原因分流用例，含 WAIT_OTP 中 NO_MATCH 累计至 LOCKOUT、用户级锁定下 totp_any 跳过被锁用户）；FR-9 已对齐 v1.6（到期/次数耗尽→`user_del` 直接删除 + ALARM 审计日志，原置停用）；`safe_core` 显式链接 `safe_hal`（core→hal 符号不再依赖最终可执行文件补齐） |
+| 2 | `camera_v4l2.c` 后端（mmap + YUYV→RGB565）+ `page_face` 真实预览 320×240 | ✅ 已完成（commit `680752e` 主体 + `d79001e` 32bpp 越界修复，5 文件 +509/-73）。实测：①模拟器（Xvfb+SDL）人脸页显示**真实摄像头画面**，日志确认 YUYV 320×240 协商成功、帧率 1/20fps、4 buffers mmap；②**稳定性：连续 11 分钟 20fps 拉帧，进程存活、RSS 平稳 113352→113272 kB（零泄漏）、DQBUF 错误 0 次**；③降级：`SAFE_CAMERA_BACKEND=null` 时预览区显示「摄像头未配置」占位、系统正常；④`SAFE_CAMERA_DEV` 可换设备；⑤构建 0 新告警、ctest 5/5。转换在主循环 tick（步骤 2 口径），步骤 3 移交 face 线程 poll |
+| 2.5 | 人脸页**视频填满整个视频窗口** + **实时 FPS 角标**（用户截图反馈驱动：画面只在中间 320×240 一小块、未显示帧率） | ✅ 已完成（commit `e65ef9d`，2 文件 +277/-69）。实测：①预览面板 `flex_grow=1 + lv_pct(100)` 自动占满 root 中间区域，画布动态分配 `rebuild_canvas`（监听 `SIZE_CHANGED`，最坏 1024×600×2 ≈ 1.2MB）；②**最近邻插值** 320×240 → 面板宽高（整型除法，无浮点），PC（1024×600 / 1843×1080 双分辨率）+ 开发板（1024×600）行为一致；③FPS 角标右上角半透明圆角徽章（16pt），500ms 滑窗统计拉到的有效帧数；`take_shot` 改 step 30ms 循环推 `lv_tick + lv_timer_handler`（不能只 `usleep` 否则 lvgl tick 不动），总时长 1500ms→3000ms（USB 启动 ~1s + 滑窗 500ms）；④四角扫描框 + 扫描光带 + FPS 角标通过 `preview_size_changed_cb` 同步重定位，跨分辨率一致；⑤构建 0 新告警、ctest 5/5 全绿。**`hal_time()` 改 `hal_time_ms()`（单调毫秒时钟）**——`hal_time()` 是秒级 Unix 时间戳，500ms 滑窗用秒级时间源会跳秒，根本算不出毫秒级窗口 |
+| 2.6 | 人脸页重做：**保持 4:3 比例不拉伸** + **居中最大化**（视频吃满面板高度）+ **双 FPS 分离显示**（视频 / UI）+ 流畅性优化（查表缩放 / 局部 invalidate） | ✅ 已完成（commit `0528b93`，1 文件 +234/-100）。实测：①**画面无变形**——等比缩放 `scale = min(cw*1000/320, ch*1000/240)`，4:3 矩形居中；②视频区 373×280 → **546×410**（1024×600，面积 2.6×），1843×1080 → 788×590；③双 FPS 角标两行「视频 N fps / UI N fps」各自独立 500ms 滑窗；④**UI fps 实测 27**（1024×600）/ 17（1843×1080）——首次拿到真实渲染帧率，此前无任何 UI 性能数据；⑤查表缩放替代逐像素除法（省约 123 万次除法/帧）；⑥底部浮层改为半透明叠层，让出纵向空间给视频；⑦四角框/光带贴合视频区。构建 0 新告警、ctest 5/5 |
+| 3a | event_bus payload POD 化 + face 事件接线（R6）：`const char *` → 定长数组、`face_service_init` 接线、`auth_fsm` 订阅 `EV_FACE_EVENT` | ✅ 已完成（commit `9210555`，9 文件 +301/-74）。实测：ctest **6/6**（新增 `test_event_bus` 4 组用例，含跨线程 post 的 POD 按值拷贝——发布线程 post 后立即 `memset(0xFF)` 污染原栈变量，主线程仍拿到完整正确副本）；**inject_face 链路首次打通**（rpc → face_service → event_bus → auth_fsm → submit_face）；构建 0 新增告警。纪律：先改《技术路线规约》§5.8/§5.11 再动代码 |
+| 3b | face 线程（poll 双 fd）+ 只转最新帧 + 优雅退出链（R7）；线程数 ≤4 | ✅ 已完成（commit `e7ac93f` 主体 + **`02a6b38` 越界读修复**，14 文件 +398/-41）。①**face 线程**：新建 `app/hal/face/face_thread.[ch]`，单线程 `poll()` 复用 V4L2 video fd（`hal_camera_fd()`，§5.13 新增）+ FM225 UART fd（占位 -1，3c 接入；负 fd 被 poll 忽略）；②**只转最新帧**：`camera_v4l2.c::v4l2_frame` 改为把驱动队列里就绪缓冲全部取出、除末帧外直接 `QBUF` 不转换，只转换最新一帧；face 线程再拷进双帧缓冲（`s_fb[2]`，新帧覆盖旧帧/满则丢最旧，`fb` 锁发布），`page_face` 改经 `face_thread_get_preview()` 读缓冲渲染——**主线程不再做帧转换**（b3）；③**优雅退出 R7**：`main.c` SIGTERM/SIGINT 只置 `g_quit`（`volatile sig_atomic_t`）→ 主循环跳出 → `app_shutdown()`：`face_thread_request_stop()`（置退出标志 + STREAMOFF + `io` 锁静默在途采集）→ `hal_camera_deinit()`（close fd）→ `face_thread_join()` → `face_service_deinit` → `mqtt_stop` → `worker_shutdown()`（§5.7 补实现：置标志 + 唤醒 + join，不丢在途作业）→ `platform_shutdown()`；④`face_service_emit` 改 `event_bus_post`（跨线程 POD，§3.4）。**实测**：构建 0 error、无新增告警（仅基线 LVGL deprecated/unused）；**ctest 6/6**；`SAFE_TEST_PAGE=FACE` 截图**实证画面经新链路渲染真实摄像头帧**（双 FPS 正常）；**20 次 `kill -TERM` 平均 <0.25s、最大 0.48s 内退出，0 hang，进程 fd 恒 9**（b5）；5 分钟 RSS 153480→156912 kB、fd/线程恒定；线程数实测见规约 §3.3（**应用自建 3**，QA 经 gdb 逐栈确证；第三方 +20） |
+| 3c | FM225 协议状态机（纯状态机 + socat 虚拟串口对 + 模拟帧源） | ✅ 已完成（commit `931eaa3`，11 文件：新建 4）。**前置必改**：`face_service_emit` 写 `s_last/s_seq` 加 `s_last_lock`（锁内字段读写、锁外 post，§5.11 并发条款先改规约），`test_event_bus` 新增并发用例（face 线程 2000 次 emit vs 主线程 last_result，断言 seq 单调 + `face_id==seq-1` 撕裂检测）。**fm225_proto 纯状态机**（7 状态，不依赖 fd）：手册帧验算/半包/粘包（Data 区 0xEF 0xAA 不误触发）/坏 XOR（丢弃计数重同步）/噪声/帧内超时 200ms（tick 推进）/超长帧丢弃。**backend_fm225**：命令拼帧下发、VERIFY 一律受理 + ENROLL/DELETE 严格匹配 pending、800ms 超时重发 ×3、verify 保活 2s 退避（断链不停摆）、NOTE READY 清 pending。**接线**：app.c 调序 face_service_init/start → face_thread_start 之前（fd 仅 start 前可设）；face 线程 poll UART → feed → 帧回调 emit → event_bus_post → 主线程 auth_fsm。**实测**：ctest **7/7**（新增 test_fm225_proto 7 组用例）；构建 0 error、3c 触碰文件零告警；socat 端到端——3×no_match→DENY×3→**WAIT_OTP**（60s「动态码超时」反证）+ 截图（人脸页→动态码页）；liveness→**ALARM 活体检测失败（防伪）**；match uid=1→**UNLOCK admin via=face**；bad 帧注入后好帧正常解出；LOCKOUT（fail_streak=5 锁 30s）顺带验证 |
+| 4 | 性能验收：≥20fps、CPU 占用留档（perf_probe / SAFE_PERF_LOG） | ⬜ |
+
+已完成的阶段：✅ Sprint1（PC/SDL 功能面）✅ 规约 v1.3 升级 ✅ 计划与资料落位 ✅ Sprint3 步骤 0（R1–R3 重构止血）✅ Sprint3 步骤 1（face_reason_t 接口切换）✅ Sprint3 步骤 2（摄像头实时预览）✅ **Sprint3 步骤 2.5（视频填满面板 + 实时 FPS 角标）** ✅ **Sprint3 步骤 2.6（保持 4:3 比例居中最大化 + 双 FPS 分离显示）** ✅ **Sprint3 步骤 3a（event_bus POD 化 + face 事件接线）** ✅ **Sprint3 步骤 3b（face 线程 + 只转最新帧 + 优雅退出链 R7）** ✅ **Sprint3 步骤 3c（FM225 协议状态机 + socat 端到端）**。
+
+**旧「下一步」条目去向**：未提交改动 commit → 并入步骤 0；摄像头/执行器上板、交叉构建 → 归入 Sprint2/3 上板段（待硬件，不在 Ubuntu 先行计划内）；~~FR-9 临时授权~~ → 已在步骤 1 对齐（直接删除）；FR-10 告警独立模块 → 后续迭代（活体失败已先走 `note_failure` + ALARM 日志）。
+
+**步骤 1 遗留（后续步骤处理）**：①`face_service_init`/`subscribe` 全工程仍零调用（R6 事件接线，属步骤 3，`on_face_event` unused 警告随之消除）——模拟器级 `inject_face` 注入在接线前不可用，接口级验证已由单测覆盖；②Sprint1 headless 验收脚本使用的 `inject_score`/`set_threshold` 指令已改名（`inject_face`/`set_face_policy`），复跑旧验收脚本前需同步脚本；③日志滚动截断不适用整块原子替换，按规约 §4.3 单项处理。
+
+---
+
+## 5. 风险与阻塞
+
+- ~~**未提交改动累积**~~：已解决（步骤 0 `17eba52` 整理入库，此后每步独立 commit，工作区保持干净）。
+- **硬件依赖**：摄像头/执行器依赖板子与外设，PC 阶段以 mock/null 占位，上板前无法端到端验证（摄像头预览已在 Ubuntu VM 用真实 USB 摄像头先行验证，风险已部分消解）。
+- **主题 RGB565 量化**：设计稿 hex 为预览值，上板 FBDEV 为 RGB565，深色主题实测可能有轻微色偏，需上板后再微调（默认月白为浅色，量化偏差更小）。
+- **视频帧率上限说明（步骤 2.6 实测结论）**：UVC 摄像头 YUYV@320×240 的驱动协商帧率为 **20fps**（`1/20 fps`），这是带宽与需求（FR-16 锁定 320×240 YUYV）共同决定的硬上限。UI 帧率与视频帧率解耦后，实测 UI 可达 27fps（1024×600），说明 UI 侧不是瓶颈。若后续要提升视频流畅度，需改 MJPEG 采集（带宽更低可达 30fps）但 A7 上 JPEG 解码开销大，属需求变更，需先改规约。
+- **步骤 2.5 回归点**：① `page_face.c` 改动仅为 UI 层，未触碰 `camera_v4l2.c` 与 `app.c` 接线；②拉伸算法为最近邻（无抗锯齿），**画布大小变化时会重分配 buffer**——若未来要支持运行时窗口大小动态变化（不只是双分辨率切换），需关注分配/释放时序（当前实现 free→malloc 原子替换，无半状态）；③ FPS 滑窗 500ms 是 PC 调试与板子 20fps 兼容值，板子上若发现窗口内帧数 ≤5 显示明显跳变，可调小到 250ms。
+- **旧验收脚本指令集过期**：Sprint1 headless 验收脚本引用 `inject_score`/`set_threshold`，步骤 1 已改名，复跑前需同步脚本。
+- **RSS 缓慢单调增长（3b 期间观测；QA 已定位为分配器行为，非应用泄漏）**：默认环境 5 分钟 RSS +0.85~0.93 MB/min，全落 VmData。**四臂 A/B 对照归因**：①基线 `9210555` + 相机 → RSS **恒定**（152648 kB）；②`e7ac93f` + 相机 → +2568 kB；③`e7ac93f` + `SAFE_CAMERA_BACKEND=null` → +2168 kB（**与相机无关**）；④`e7ac93f` + **`MALLOC_ARENA_MAX=1`** → **完全归零**（153112 kB 恒定）。结论：**glibc 多 arena 保留，非应用每帧 malloc**——代码审查确认 `face_thread` / camera frame 路径 / `worker` 均无每帧分配（仅 `v4l2_start` 一次与 `page_face` SIZE_CHANGED）。真泄漏不会被 arena 数掩盖，故该 A/B 结论可信。**处置**：上板运行时设 `MALLOC_ARENA_MAX=1`（单核 A7 上同时减少 arena 竞争），RSS 即平稳；步骤 4 性能验收一并复核。
+- **QA 提示的疑点：`face_thread_get_preview` 的「发布后立即消费」窗口（主理人复核后判定为不成立，待 3c 顺带确认）**：QA 报称「生产者 `s_fb_seq++` 与消费者读数之间，生产者下一轮会覆盖刚发布那块，消费端可能拿到部分新部分旧的错帧」。**主理人复核双缓冲语义**：生产者恒写「非发布块」(`slot = s_fb_pub ^ 1`)、消费者在 `s_fb_lock` 内完成**整块 memcpy**；`s_fb_pub` 的单写者就是生产者本身（锁外读自己的上一次写值、锁内写新值，同线程无竞态），消费者只在锁内读它。故生产者覆盖的块**恒等于消费者上一轮已拷完的块**，不存在半新半旧的窗口。判定：**逻辑正确**；QA 所描述的「消费者看不到某帧」属「只转最新帧」的设计意图，非缺陷。3c 引入 UART 帧后若该缓冲仍有疑虑，可在 3c 一并加 `s_in_use` 显式标记做二次确认。
+- **线程计数口径（§3.3，已澄清）**：`ls /proc/<pid>/task | wc -l` 在 PC（Xvfb+SDL）下为 **23**，来源经 `gdb thread apply all bt` 逐栈确证：**应用自建 3**（main / worker / face）+ LVGL swdraw 1 + Paho 2 + Mesa 17（软件 GL，**仅 PC 存在**）。规约 §3.3 已明确「≤4」约束的是**应用自建线程**（第三方须显式登记），当前 3 ≤ 4 成立。**关键结论**：Paho 实占 2 条而 §3.1 的四角色模型只计 1 条，故 **R9（自研单线程 MQTT 客户端）是把进程内线程收敛到四角色模型（4 条）的必要条件**。板子 FBDEV 下 Mesa 消失，进程内约 6 条——评估板子资源勿用 PC 的 23 作依据。
+- **~~face_capture_once 越界读隐患（3b 引入，上板必踩）~~ — ✅ 已修复（commit `02a6b38`）**：原 `face_capture_once()` 以编译期定长 `FB_BYTES`（320×240×2 = 153600）`memcpy` 后端返回的 `src`，但 `src` 实际有效长度 = `info.width * info.height * 2`（驱动**协商后的真实分辨率**）。PC 摄像头恰协商成 320×240 故未触发；上板接 FM225 的 USB 视频流分辨率未知（可能 640×480 或更小），一旦协商出**小于** 320×240 的分辨率，该 `memcpy` 即**越界读 153600 − 实际字节数**、读穿 mmap 缓冲，最坏段错误——正是 CLAUDE.md §10「接硬件时改哪里」要防的前瞻项。**修复**：`memcpy` 前校验 `info.width == FACE_THREAD_PREVIEW_W && info.height == FACE_THREAD_PREVIEW_H`；不符则**不拷贝**、按 §5.13 契约调 `hal_camera_release_frame()` 释放帧（否则后端停更），并**限频告警**——静态变量 `s_warn_w/s_warn_h` 记住上次告警的协商分辨率（初值 0，保证首次不符必打印），仅当分辨率较上次变化才 `printf` 一次，文案含实际协商值与期望值（`[FACE-THREAD] 协商分辨率 %ux%u 与预览缓冲 %dx%d 不符，丢弃该帧`），杜绝每帧刷屏。实测：构建 0 error、**face_thread.c 0 告警**、ctest **6/6 全绿**。　**nit（§3.1）**：限频告警 `printf` 原先位于 `s_io_lock` 临界区内，已移出——锁内只用局部变量 `warn`/`warn_w`/`warn_h` 记下「本次是否告警」与 `(w,h)`（去重状态 `s_warn_w/s_warn_h` 的更新仍留锁内，保证无竞态），解锁后再 `printf`（§3.1 要求临界区内不做重计算、不持锁调用外部函数；`printf` 可能阻塞进而推迟 `request_stop()` 静默收尾），commit **`60883f3`**。异常路径复现（`app/app.c` 临时 `hal_camera_start(320,240)→(640,480)`，相机协商 640×480）实测告警仍**仅打印 1 次**，测后 app.c 已还原（`git diff --stat app/app.c` 为空）。
+- **越界读防护的 A/B 实证（2026-09-10，WorkBuddy 主理人构造场景验证）**：把相机请求分辨率由 320×240 改为 **160×120**（`src` 有效长度 38400 < `FB_BYTES` 153600，构造真越界），在 `SAFE_TEST_PAGE=FACE` 下做两臂对照——**A 臂（有防护 `02a6b38`）**：打印告警 **1 次**（`[FACE-THREAD] 协商分辨率 160x120 与预览缓冲 320x240 不符，丢弃该帧`，限频去重生效），画面显示**占位文字 + 视频 0 fps**（帧被正确丢弃，越界数据从未进入渲染）；**B 臂（临时移除防护）**：告警 **0 次**，画面出现**上半为人脸影像、下半为彩色垃圾条纹**——即 `memcpy` 读穿 38400 字节有效缓冲、把越界读到的堆内容当作图像数据显示的直接可视证据。⚠️ **两臂进程均未崩溃**（无 segmentation fault）——说明该缺陷的危害形式是「**悄悄显示损坏画面**」而非必然段错误，上板后若 FM225 协商出非 320×240 分辨率，用户看到的是花屏、极难定位。验证后已完整回滚（`git diff` 干净，ctest 6/6 全绿）。
+

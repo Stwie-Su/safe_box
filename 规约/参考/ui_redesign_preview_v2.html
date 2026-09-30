@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>智能保险柜 · UI 重设计预览 v2（1024×600 · 8 屏 + 5 主题）</title>
+<style>
+/* ============================================================
+   UI 重设计预览 v2 —— 施工真源（visual source of truth）
+   ------------------------------------------------------------
+   与 LVGL 落地的映射约定（工程师必须遵守）：
+   · 尺寸：面板 1024×600；rail 104px；topbar 56px；内容区 = 面板 − rail
+   · 圆角：卡片 16px（= theme.c st_panel radius 16）；次面板 12px；按钮 10px
+   · 描边：一律 1px solid var(--line)（= TH_BORDER）
+   · 阴影：预览里的模糊阴影仅为观感；A7 上**昂贵**，落地用
+           「1px 边框 + surface 色阶（panel / panel2 / panel3）」表达层次
+   · 颜色：**只允许**引用本文件 5 套主题的 token；
+           实现侧只允许 theme_color(TH_*) / st_* 样式，禁止任何硬编码 hex
+   · 图标：图标字体（lv_font_icon_*），此处用等价 SVG 示意
+   · 数据：实现侧必须取真实来源——user_load_all() / log_query() /
+           statvfs / hal_time() / mqtt_is_connected() / face_service_caps()；
+           禁止写死数字或"--"占位
+   ============================================================ */
+:root{
+  --r:16px; --r-s:12px; --r-btn:10px; --rail:104px; --top:56px;
+}
+/* ---- 5 套主题（严格取自 app/ui/theme.c :: THEMES[]） ---- */
+body[data-theme="0"]{ /* 石墨黑 */
+  --bg:#0D1117; --surface:#161B22; --surface-2:#1C2330; --surface-3:#222B39;
+  --text:#E6EDF3; --dim:#8B98A5; --line:#30363D;
+  --accent:#0091FF; --ink:#FFFFFF; --ok:#31A24C; --warn:#F2A918; --danger:#E41E3F;
+}
+body[data-theme="1"]{ /* 月白 */
+  --bg:#F5F3EF; --surface:#FFFAF7; --surface-2:#ECE8E1; --surface-3:#E1DBCF;
+  --text:#2B2722; --dim:#6B6358; --line:#DCD6CC;
+  --accent:#C0892D; --ink:#FFFFFF; --ok:#2E7D4F; --warn:#C8860A; --danger:#C0392B;
+}
+body[data-theme="2"]{ /* 蓝白 */
+  --bg:#EEF4FB; --surface:#FFFFFF; --surface-2:#DDE8F5; --surface-3:#CFDEED;
+  --text:#1A2B45; --dim:#5A6B85; --line:#D5DEE8;
+  --accent:#1565D8; --ink:#FFFFFF; --ok:#1F9254; --warn:#D98A00; --danger:#D32F2F;
+}
+body[data-theme="3"]{ /* 松石青 */
+  --bg:#0A1F1C; --surface:#102A26; --surface-2:#163A34; --surface-3:#1D4740;
+  --text:#E3F2EE; --dim:#8FB3AB; --line:#1A3D3A;
+  --accent:#1BB3A0; --ink:#FFFFFF; --ok:#2FAE8A; --warn:#E0A52E; --danger:#E5533D;
+}
+body[data-theme="4"]{ /* 浅蓝 */
+  --bg:#F0F7FD; --surface:#FFFFFF; --surface-2:#E1F0FB; --surface-3:#D2E7F7;
+  --text:#14324C; --dim:#5C7A93; --line:#D2E4F2;
+  --accent:#29B6F6; --ink:#FFFFFF; --ok:#2E9E6B; --warn:#E8A33D; --danger:#E5564B;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#1B1E24;font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif;
+  display:flex;flex-direction:column;align-items:center;gap:16px;padding:22px;color:var(--text)}
+.stage{display:flex;gap:28px;align-items:flex-start}
+
+/* ===== 主题切换器（仅预览控件，不进固件） ===== */
+.switcher{display:flex;gap:8px;align-items:center;background:#2A2E36;padding:10px 14px;border-radius:12px;
+  color:#C9D1D9;font-size:13px}
+.switcher b{font-weight:600;margin-right:6px;color:#8B98A5}
+.switcher button{border:1px solid #3A404A;background:#333840;color:#C9D1D9;border-radius:8px;
+  padding:6px 12px;font-size:12px;cursor:pointer}
+.switcher button.on{outline:2px solid #58A6FF;color:#fff;background:#3D444D}
+.switcher .sw{width:14px;height:14px;border-radius:4px;display:inline-block;margin-right:6px;vertical-align:-2px}
+
+/* ===== 设备 ===== */
+.device{width:1024px;height:600px;background:var(--bg);border-radius:22px;overflow:hidden;
+  display:flex;box-shadow:0 26px 70px rgba(0,0,0,.6);border:1px solid #000;position:relative}
+/* ---- 左 rail（= ui.c rail，104px） ---- */
+.rail{width:var(--rail);flex:0 0 var(--rail);background:var(--surface);display:flex;flex-direction:column;
+  align-items:center;padding:14px 0;gap:4px;border-right:1px solid var(--line)}
+.brand{width:46px;height:46px;border-radius:14px;background:var(--surface-2);color:var(--accent);
+  display:flex;align-items:center;justify-content:center;margin-bottom:10px}
+.brand svg{width:26px;height:26px;stroke:currentColor;fill:none;stroke-width:1.8}
+.nav{width:84px;height:58px;border-radius:14px;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:4px;color:var(--dim);cursor:pointer;transition:.18s;font-size:11px;
+  position:relative;user-select:none}
+.nav svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.8}
+.nav:hover{color:var(--text);background:var(--surface-2)}
+.nav.active{color:var(--accent);background:var(--surface-2)}
+.nav.active::before{content:"";position:absolute;left:-10px;top:13px;bottom:13px;width:4px;
+  border-radius:4px;background:var(--accent)}
+/* ---- 右侧：顶部状态栏 + 内容 ---- */
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.topbar{height:var(--top);flex:0 0 var(--top);display:flex;align-items:center;justify-content:space-between;
+  padding:0 22px;border-bottom:1px solid var(--line)}
+.lockp{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600}
+.dot{width:9px;height:9px;border-radius:50%;flex:0 0 9px}
+.dot.ok{background:var(--ok)} .dot.acc{background:var(--accent)}
+.dot.warn{background:var(--warn)} .dot.bad{background:var(--danger)}
+.clock{font-size:14px;color:var(--dim);font-variant-numeric:tabular-nums}
+.chips{display:flex;gap:8px}
+.chip{display:flex;align-items:center;gap:6px;font-size:12px;background:var(--surface-2);
+  padding:5px 11px;border-radius:999px;color:var(--dim)}
+.content{position:relative;flex:1;overflow:hidden}
+.screen{position:absolute;inset:0;padding:16px 22px;display:flex;flex-direction:column;gap:12px;
+  transition:transform .2s cubic-bezier(.22,.61,.36,1),opacity .18s ease;visibility:hidden}
+.screen.show{visibility:visible}
+.screen.fr{transform:translateX(46px);opacity:0}
+.screen.fl{transform:translateX(-46px);opacity:0}
+.screen.show{transform:translateX(0);opacity:1}
+
+/* ---- 通用件 ---- */
+.hd{display:flex;align-items:center;justify-content:space-between}
+.hd h1{font-size:19px;font-weight:700;letter-spacing:.3px}
+.hd .sub{font-size:12px;color:var(--dim);margin-top:2px}
+.hero{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;display:flex;align-items:center;gap:16px}
+.hero .ic{width:60px;height:60px;border-radius:16px;background:var(--surface);color:var(--accent);
+  display:flex;align-items:center;justify-content:center;flex:0 0 60px}
+.hero .ic svg{width:32px;height:32px;stroke:currentColor;fill:none;stroke-width:1.8}
+.hero .meta{flex:1;min-width:0}
+.hero .meta .st{font-size:17px;font-weight:700}
+.hero .meta .ds{font-size:12px;color:var(--dim);margin-top:3px}
+.btn{display:flex;align-items:center;gap:8px;background:var(--accent);color:var(--ink);font-weight:700;
+  border:none;border-radius:var(--r-btn);padding:13px 20px;font-size:15px;cursor:pointer}
+.btn svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:2}
+.btn.ghost{background:var(--surface);color:var(--text);border:1px solid var(--line);font-weight:600;
+  padding:11px 16px;font-size:13px}
+.btn.ghost svg{width:16px;height:16px}
+.btn.danger{background:var(--danger);color:#fff}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px}
+.card .ic{width:36px;height:36px;border-radius:11px;background:var(--surface-2);color:var(--accent);
+  display:flex;align-items:center;justify-content:center;margin-bottom:9px}
+.card .ic svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:1.8}
+.card .ic.ok{color:var(--ok)} .card .ic.warn{color:var(--warn)} .card .ic.dim{color:var(--dim)}
+.card .v{font-size:21px;font-weight:700;font-variant-numeric:tabular-nums}
+.card .k{font-size:12px;color:var(--dim);margin-top:2px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  padding:6px 14px;flex:1;overflow:auto;min-height:0}
+.panel .ttl{font-size:12px;color:var(--dim);padding:9px 4px 6px;display:flex;justify-content:space-between}
+.row{display:flex;align-items:center;gap:12px;padding:10px 4px;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:none}
+.ric{width:34px;height:34px;border-radius:10px;background:var(--surface-2);display:flex;align-items:center;
+  justify-content:center;color:var(--text);flex:0 0 34px}
+.ric svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8}
+.ric.ok{color:var(--ok)} .ric.warn{color:var(--warn)} .ric.bad{color:var(--danger)} .ric.acc{color:var(--accent)}
+.row .tx{flex:1;font-size:14px;min-width:0}
+.row .tx small{display:block;color:var(--dim);font-size:11px;margin-top:2px}
+.row .tm{font-size:12px;color:var(--dim);white-space:nowrap}
+.avatar{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+  font-weight:700;color:#fff;font-size:16px;flex:0 0 40px}
+.badge{font-size:11px;padding:3px 9px;border-radius:999px;white-space:nowrap}
+.badge.admin{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent)}
+.badge.user{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--text)}
+.badge.temp{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
+.hint{font-size:11px;color:var(--dim);text-align:center;flex:0 0 auto}
+/* 日志筛选 chips */
+.filters{display:flex;gap:8px}
+.filters .f{font-size:12px;padding:6px 14px;border-radius:999px;background:var(--surface-2);
+  color:var(--dim);border:1px solid transparent;cursor:pointer}
+.filters .f.on{background:var(--accent);color:var(--ink);font-weight:600}
+/* 人脸页：视频框 + 四角扫描框 */
+.vwrap{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;position:relative}
+.vframe{position:relative;width:512px;height:384px;background:var(--surface-2);border:1px solid var(--line);
+  border-radius:var(--r);overflow:hidden;display:flex;align-items:center;justify-content:center}
+.vframe .ph{color:var(--dim);font-size:13px;text-align:center;line-height:1.7}
+.vframe .ph svg{width:44px;height:44px;stroke:currentColor;fill:none;stroke-width:1.4;display:block;margin:0 auto 8px}
+.scan{position:absolute;width:190px;height:230px;left:50%;top:50%;transform:translate(-50%,-50%)}
+.scan i{position:absolute;width:26px;height:26px;border:3px solid var(--accent);border-radius:4px}
+.scan i:nth-child(1){left:0;top:0;border-right:0;border-bottom:0}
+.scan i:nth-child(2){right:0;top:0;border-left:0;border-bottom:0}
+.scan i:nth-child(3){left:0;bottom:0;border-right:0;border-top:0}
+.scan i:nth-child(4){right:0;bottom:0;border-left:0;border-top:0}
+.scan.ok i{border-color:var(--ok)}
+.scan.bad i{border-color:var(--danger)}
+.scan .beam{position:absolute;left:6px;right:6px;height:2px;background:var(--accent);opacity:.85;top:50%}
+.fps{position:absolute;right:10px;top:10px;display:flex;gap:6px}
+.fps span{font-size:11px;background:rgba(0,0,0,.55);color:#fff;padding:3px 8px;border-radius:6px;
+  font-variant-numeric:tabular-nums}
+.vfoot{display:flex;align-items:center;justify-content:space-between;gap:12px;flex:0 0 auto}
+.vfoot .state{font-size:13px;color:var(--dim)}
+/* 设置入口卡 */
+.entry{display:flex;align-items:center;gap:14px;background:var(--surface);border:1px solid var(--line);
+  border-radius:var(--r);padding:14px 16px;cursor:pointer}
+.entry .eic{width:42px;height:42px;border-radius:12px;background:var(--surface-2);color:var(--accent);
+  display:flex;align-items:center;justify-content:center;flex:0 0 42px}
+.entry .eic svg{width:21px;height:21px;stroke:currentColor;fill:none;stroke-width:1.8}
+.entry .et{flex:1}
+.entry .et b{font-size:15px;font-weight:600}
+.entry .et small{display:block;color:var(--dim);font-size:12px;margin-top:3px}
+.entry .chev{color:var(--dim)}
+.entry .chev svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2}
+/* 系统页：策略步进器 + 主题色块 */
+.stepper{display:flex;align-items:center;gap:10px}
+.stepper button{width:32px;height:32px;border-radius:9px;border:1px solid var(--line);background:var(--surface-2);
+  color:var(--text);font-size:16px;cursor:pointer}
+.stepper .val{min-width:64px;text-align:center;font-size:16px;font-weight:700;font-variant-numeric:tabular-nums}
+.kv{display:flex;justify-content:space-between;font-size:13px;padding:7px 0;border-bottom:1px solid var(--line)}
+.kv:last-child{border-bottom:none}
+.kv span:first-child{color:var(--dim)}
+.kv span:last-child{font-variant-numeric:tabular-nums}
+.tbtn{display:flex;gap:8px}
+.tbtn .t{width:40px;height:40px;border-radius:11px;border:2px solid transparent;cursor:pointer}
+.tbtn .t.on{border-color:var(--text)}
+/* keypad 覆盖层 */
+.overlay{position:absolute;inset:0;background:color-mix(in srgb,var(--bg) 82%,transparent);
+  display:none;align-items:center;justify-content:center;z-index:5}
+.overlay.show{display:flex}
+.sheet{background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:22px 26px;
+  display:flex;flex-direction:column;gap:14px;align-items:center;min-width:420px}
+.sheet h2{font-size:17px;font-weight:700}
+.pindots{display:flex;gap:12px}
+.pindots i{width:16px;height:16px;border-radius:50%;border:2px solid var(--line);display:block}
+.pindots i.f{background:var(--accent);border-color:var(--accent)}
+.keys{display:grid;grid-template-columns:repeat(3,78px);gap:10px}
+.keys button{height:54px;border-radius:12px;background:var(--surface-2);border:1px solid var(--line);
+  color:var(--text);font-size:20px;font-weight:600;cursor:pointer}
+.keys button.act{background:var(--accent);color:var(--ink);border-color:var(--accent)}
+.legend{max-width:1024px;color:#8B98A5;font-size:12px;line-height:1.9}
+.legend code{color:#C9D1D9;background:#2A2E36;padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body data-theme="4">
+
+<div class="switcher">
+  <b>主题（= theme.c THEMES[]）</b>
+  <button data-th="0"><i class="sw" style="background:#0D1117;border:1px solid #30363D"></i>石墨黑</button>
+  <button data-th="1"><i class="sw" style="background:#F5F3EF;border:1px solid #DCD6CC"></i>月白</button>
+  <button data-th="2"><i class="sw" style="background:#FFFFFF;border:1px solid #1565D8"></i>蓝白</button>
+  <button data-th="3"><i class="sw" style="background:#0A1F1C;border:1px solid #1BB3A0"></i>松石青</button>
+  <button data-th="4"><i class="sw" style="background:#F0F7FD;border:1px solid #29B6F6"></i>浅蓝</button>
+  <span style="margin-left:8px;color:#6E7681">默认=浅蓝（与应用一致）· 点左侧 rail 切换页面 · 点「一键开锁」看键盘层 · 点设置里任一入口看二次验证</span>
+</div>
+
+<svg width="0" height="0" style="position:absolute"><defs>
+  <g id="i-home"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></g>
+  <g id="i-lock"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M7 10V7a5 5 0 0 1 10 0v3"/></g>
+  <g id="i-unlock"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M7 10V7a5 5 0 0 1 9.5-2"/></g>
+  <g id="i-list"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1.4"/><circle cx="4" cy="12" r="1.4"/><circle cx="4" cy="18" r="1.4"/></g>
+  <g id="i-user"><circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/></g>
+  <g id="i-users"><circle cx="9" cy="8" r="3.4"/><path d="M3 20a6 6 0 0 1 12 0"/><path d="M16 5.5a3.4 3.4 0 0 1 0 6.6M18 20a6 6 0 0 0-2.2-4.6"/></g>
+  <g id="i-set"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></g>
+  <g id="i-net"><path d="M2 9a16 16 0 0 1 20 0M5 13a11 11 0 0 1 14 0M8.5 16.5a6 6 0 0 1 7 0"/><circle cx="12" cy="20" r="1.4"/></g>
+  <g id="i-sys"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></g>
+  <g id="i-finger"><path d="M8 11V6a2 2 0 0 1 4 0v5M12 11V4a2 2 0 0 1 4 0v7M16 11V6a2 2 0 0 1 4 0v8a8 8 0 0 1-8 8h-1a8 8 0 0 1-6-3l-3-4a2 2 0 0 1 3-2l2 2"/></g>
+  <g id="i-bell"><path d="M6 9a6 6 0 0 1 12 0c0 6 2 7 2 7H4s2-1 2-7"/><path d="M10 20a2 2 0 0 0 4 0"/></g>
+  <g id="i-face"><circle cx="12" cy="9" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></g>
+  <g id="i-key"><circle cx="8" cy="12" r="4"/><path d="M11 12h10M17 12v4M14 12v3"/></g>
+  <g id="i-plus"><path d="M12 5v14M5 12h14"/></g>
+  <g id="i-chev"><path d="M9 6l6 6-6 6"/></g>
+  <g id="i-disk"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></g>
+  <g id="i-refresh"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></g>
+  <g id="i-alert"><path d="M12 3l9 16H3l9-16z"/><path d="M12 10v4M12 17v.5"/></g>
+  <g id="i-cam"><path d="M3 8h4l2-3h6l2 3h4v11H3z"/><circle cx="12" cy="13" r="3.6"/></g>
+  <g id="i-info"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.6"/></g>
+  <g id="i-trash"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></g>
+  <g id="i-power"><path d="M12 3v9"/><path d="M6.5 6.5a8 8 0 1 0 11 0"/></g>
+  <g id="i-shield"><path d="M12 3l8 3v6c0 5-3.4 8.4-8 9.6C7.4 20.4 4 17 4 12V6l8-3z"/><path d="M9 12l2 2 4-4"/></g>
+  <g id="i-wifi"><path d="M4 10a12 12 0 0 1 16 0M7 14a7.5 7.5 0 0 1 10 0"/><circle cx="12" cy="18" r="1.6"/></g>
+  <g id="i-clock"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></g>
+</defs></svg>
+
+<div class="stage">
+<div class="device">
+  <!-- ============ 左 rail（规格：104px 固定，7 项 84×58，激活项左侧 4px accent 条） ============ -->
+  <nav class="rail">
+    <div class="brand"><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg></div>
+    <div class="nav active" data-t="home"><svg viewBox="0 0 24 24"><use href="#i-home"/></svg>主页</div>
+    <div class="nav" data-t="users"><svg viewBox="0 0 24 24"><use href="#i-users"/></svg>用户</div>
+    <div class="nav" data-t="logs"><svg viewBox="0 0 24 24"><use href="#i-list"/></svg>日志</div>
+    <div class="nav" data-t="face"><svg viewBox="0 0 24 24"><use href="#i-face"/></svg>人脸</div>
+    <div class="nav" data-t="net"><svg viewBox="0 0 24 24"><use href="#i-wifi"/></svg>网络</div>
+    <div class="nav" data-t="set"><svg viewBox="0 0 24 24"><use href="#i-set"/></svg>设置</div>
+    <div class="nav" data-t="sys"><svg viewBox="0 0 24 24"><use href="#i-sys"/></svg>系统</div>
+  </nav>
+
+  <div class="main">
+    <!-- ============ 顶部状态栏（规格：56px；左锁状态、中实时时钟 hal_time、右 MQTT/WiFi 真实状态） ============ -->
+    <div class="topbar">
+      <div class="lockp"><span class="dot ok"></span>保险柜已上锁</div>
+      <div class="clock">09:41:07</div>
+      <div class="chips">
+        <div class="chip"><span class="dot acc"></span>MQTT 已连</div>
+        <div class="chip"><span class="dot ok"></span>WiFi</div>
+      </div>
+    </div>
+
+    <div class="content">
+
+      <!-- ================= HOME（已实现，M3 基线，勿回归） ================= -->
+      <section class="screen fr show" id="sc-home">
+        <div class="hd">
+          <div><h1>智能保险柜</h1><div class="sub">设备 SN IMX6-2026-0907 · 固件 v1.0.0</div></div>
+        </div>
+        <div class="hero">
+          <div class="ic"><svg viewBox="0 0 24 24"><use href="#i-lock"/></svg></div>
+          <div class="meta">
+            <div class="st">保险柜已上锁</div>
+            <div class="ds">最后开启 今天 08:12 · 主管理员 · 人脸</div>
+          </div>
+          <button class="btn" id="btn-unlock"><svg viewBox="0 0 24 24"><use href="#i-unlock"/></svg>一键开锁</button>
+          <button class="btn ghost"><svg viewBox="0 0 24 24"><use href="#i-key"/></svg>密码开锁</button>
+        </div>
+        <div class="grid4">
+          <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><use href="#i-user"/></svg></div><div class="v">3</div><div class="k">注册用户</div></div>
+          <div class="card"><div class="ic acc" style="color:var(--accent)"><svg viewBox="0 0 24 24"><use href="#i-bell"/></svg></div><div class="v">17</div><div class="k">今日事件</div></div>
+          <div class="card"><div class="ic ok"><svg viewBox="0 0 24 24"><use href="#i-face"/></svg></div><div class="v">已启用</div><div class="k">人脸识别</div></div>
+          <div class="card"><div class="ic dim"><svg viewBox="0 0 24 24"><use href="#i-disk"/></svg></div><div class="v">46%</div><div class="k">存储占用</div></div>
+        </div>
+        <div class="panel">
+          <div class="ttl"><span>最近事件</span><span>log_query() 倒序前 4 条</span></div>
+          <div class="row"><div class="ric ok"><svg viewBox="0 0 24 24"><use href="#i-face"/></svg></div>
+            <div class="tx">人脸开锁成功<small>主管理员 · 本地验证</small></div><div class="tm">08:12</div></div>
+          <div class="row"><div class="ric bad"><svg viewBox="0 0 24 24"><use href="#i-lock"/></svg></div>
+            <div class="tx">开锁被拒 ×3<small>PIN 错误 · 已临时锁定</small></div><div class="tm">08:55</div></div>
+          <div class="row"><div class="ric acc"><svg viewBox="0 0 24 24"><use href="#i-plus"/></svg></div>
+            <div class="tx">新增人脸模板<small>用户「张三」· face_id 11</small></div><div class="tm">昨天</div></div>
+          <div class="row"><div class="ric warn"><svg viewBox="0 0 24 24"><use href="#i-alert"/></svg></div>
+            <div class="tx">安防告警<small>防拆开关触发</small></div><div class="tm">昨天</div></div>
+        </div>
+        <div class="hint">规格：状态/最后开启/统计/事件四项必须走真实接口；禁止硬编码（M3 已交付）</div>
+      </section>
+
+      <!-- ================= USERS ================= -->
+      <section class="screen fr" id="sc-users">
+        <div class="hd">
+          <div><h1>用户管理</h1><div class="sub">3 个用户 · 1 管理员 · 上限 8</div></div>
+          <button class="btn ghost"><svg viewBox="0 0 24 24"><use href="#i-plus"/></svg>添加用户</button>
+        </div>
+        <div class="panel">
+          <div class="row"><div class="avatar" style="background:var(--accent)">管</div>
+            <div class="tx">主管理员<small>admin · 全部权限 · PIN + 人脸</small></div>
+            <span class="badge admin">管理员</span><div class="tm">刚刚</div></div>
+          <div class="row"><div class="avatar" style="background:var(--ok)">张</div>
+            <div class="tx">张三<small>zhangsan · PIN + 人脸</small></div>
+            <span class="badge user">普通</span><div class="tm">昨天</div></div>
+          <div class="row"><div class="avatar" style="background:var(--warn)">客</div>
+            <div class="tx">访客-01<small>临时 · 限次 2/5 · 限时剩 1h42m</small></div>
+            <span class="badge temp">临时</span><div class="tm">今天 11:23 到期</div></div>
+          <div class="row"><div class="avatar" style="background:var(--dim)">李</div>
+            <div class="tx">李四<small>lisi · 仅 PIN · 未绑定人脸</small></div>
+            <span class="badge user">普通</span><div class="tm">09-02</div></div>
+        </div>
+        <div class="hint">规格：临时用户行必须显示「剩余次数 / 剩余时长」；到期或次数耗尽 → 直接删除（FR-9），列表不保留灰行</div>
+      </section>
+
+      <!-- ================= LOGS（待改造） ================= -->
+      <section class="screen fr" id="sc-logs">
+        <div class="hd">
+          <div><h1>操作日志</h1><div class="sub">共 1 284 条 · 今日 17 条 · 上限 5000 滚动转存</div></div>
+          <button class="btn ghost"><svg viewBox="0 0 24 24"><use href="#i-disk"/></svg>导出</button>
+        </div>
+        <div class="filters">
+          <span class="f on">全部</span><span class="f">开锁</span><span class="f">用户</span>
+          <span class="f">设置</span><span class="f">失败</span>
+        </div>
+        <div class="panel">
+          <div class="ttl"><span>2026-09-14</span><span>今日 17 条</span></div>
+          <div class="row"><div class="ric ok"><svg viewBox="0 0 24 24"><use href="#i-face"/></svg></div>
+            <div class="tx">开锁成功<small>主管理员 · 人脸</small></div><div class="tm">08:12:34</div></div>
+          <div class="row"><div class="ric bad"><svg viewBox="0 0 24 24"><use href="#i-lock"/></svg></div>
+            <div class="tx">开锁失败<small>未知 PIN · 第 3 次</small></div><div class="tm">08:55:02</div></div>
+          <div class="row"><div class="ric acc"><svg viewBox="0 0 24 24"><use href="#i-plus"/></svg></div>
+            <div class="tx">新增用户<small>访客-01 · 临时 5 次 / 2 小时</small></div><div class="tm">09:23:41</div></div>
+          <div class="row"><div class="ric warn"><svg viewBox="0 0 24 24"><use href="#i-set"/></svg></div>
+            <div class="tx">策略变更<small>失败阈值 5 → 3</small></div><div class="tm">09:31:10</div></div>
+          <div class="row"><div class="ric acc"><svg viewBox="0 0 24 24"><use href="#i-net"/></svg></div>
+            <div class="tx">远程指令<small>remote_unlock · req 7f2a · 已执行</small></div><div class="tm">09:38:55</div></div>
+        </div>
+        <div class="hint">规格：日期分组头 + 类型着色图标 + 等宽时间列；筛选切换就地重建列表（勿新建页面）；类型字符串大小写必须与写入侧一致（曾因 UNLOCK/unlock 致「最后开启」恒为 --）</div>
+      </section>
+
+      <!-- ================= FACE（待改造） ================= -->
+      <section class="screen fr" id="sc-face">
+        <div class="hd">
+          <div><h1>人脸识别</h1><div class="sub">后端 fm225 · 模板 2/20 · 健康：正常</div></div>
+          <button class="btn ghost"><svg viewBox="0 0 24 24"><use href="#i-trash"/></svg>删除模板</button>
+        </div>
+        <div class="vwrap">
+          <div class="vframe">
+            <div class="ph"><svg viewBox="0 0 24 24"><use href="#i-cam"/></svg>
+              320×240 摄像头预览（1:1 映射，显示放大上限 1.3×）</div>
+            <div class="scan" id="scanbox"><i></i><i></i><i></i><i></i><span class="beam"></span></div>
+            <div class="fps"><span>UI 20.5 fps</span><span>视频 10.2 fps</span></div>
+          </div>
+        </div>
+        <div class="vfoot">
+          <div class="state">扫描框四态：<b style="color:var(--accent)">青</b> 待识别 ·
+            <b style="color:var(--ok)">绿</b> 已匹配 · <b style="color:var(--danger)">红</b> 未匹配/活体失败</div>
+          <button class="btn"><svg viewBox="0 0 24 24"><use href="#i-face"/></svg>录入人脸</button>
+        </div>
+        <div class="hint">规格：画面区必须是「视频矩形」而非满屏（T3 已把画布收缩到视频矩形，白刷留白曾吃掉 3.7× 帧率）；FPS 角标取实测值；后端降级/超时要给明确文案而非空白</div>
+      </section>
+
+      <!-- ================= NETWORK（待改造） ================= -->
+      <section class="screen fr" id="sc-net">
+        <div class="hd">
+          <div><h1>网络</h1><div class="sub">wlan0 · DHCP</div></div>
+          <button class="btn ghost"><svg viewBox="0 0 24 24"><use href="#i-refresh"/></svg>重新扫描</button>
+        </div>
+        <div class="hero">
+          <div class="ic"><svg viewBox="0 0 24 24"><use href="#i-wifi"/></svg></div>
+          <div class="meta">
+            <div class="st">已连接 · 100ask_AP</div>
+            <div class="ds">IP 192.168.150.139 · 网关 192.168.150.1 · 信号 -47 dBm</div>
+          </div>
+          <div class="chip"><span class="dot acc"></span>MQTT 已连</div>
+        </div>
+        <div class="grid2" style="flex:1;min-height:0">
+          <div class="panel">
+            <div class="ttl"><span>可用网络</span><span>6 个</span></div>
+            <div class="row"><div class="ric ok"><svg viewBox="0 0 24 24"><use href="#i-wifi"/></svg></div>
+              <div class="tx">100ask_AP<small>-47 dBm · WPA2</small></div><div class="tm">已连接</div></div>
+            <div class="row"><div class="ric"><svg viewBox="0 0 24 24"><use href="#i-wifi"/></svg></div>
+              <div class="tx">TP-LINK_5F2A<small>-62 dBm · WPA2</small></div><div class="tm">连 接</div></div>
+            <div class="row"><div class="ric"><svg viewBox="0 0 24 24"><use href="#i-wifi"/></svg></div>
+              <div class="tx">ChinaNet-xK9<small>-78 dBm · 开放</small></div><div class="tm">连 接</div></div>
+          </div>
+          <div class="panel">
+            <div class="ttl"><span>已保存</span><span>2 个</span></div>
+            <div class="row"><div class="ric ok"><svg viewBox="0 0 24 24"><use href="#i-wifi"/></svg></div>
+              <div class="tx">100ask_AP<small>自动连接</small></div><div class="tm">编辑</div></div>
+            <div class="row"><div class="ric"><svg viewBox="0 0 24 24"><use href="#i-wifi"/></svg></div>
+              <div class="tx">Hostel-2G<small>自动连接</small></div><div class="tm">编辑</div></div>
+          </div>
+        </div>
+        <div class="hint">规格：可用/已保存双列 = 两个卡片；信号强度用 dBm 真实值；连接中要有进行态与失败原因</div>
+      </section>
+
+      <!-- ================= SETTINGS（待改造） ================= -->
+      <section class="screen fr" id="sc-set">
+        <div class="hd">
+          <div><h1>设置</h1><div class="sub">进入任一子页需管理员二次验证</div></div>
+        </div>
+        <div class="entry" data-dlg="auth"><div class="eic"><svg viewBox="0 0 24 24"><use href="#i-users"/></svg></div>
+          <div class="et"><b>用户管理</b><small>增删用户、绑定人脸、临时用户配额</small></div>
+          <div class="chev"><svg viewBox="0 0 24 24"><use href="#i-chev"/></svg></div></div>
+        <div class="entry" data-dlg="auth"><div class="eic"><svg viewBox="0 0 24 24"><use href="#i-wifi"/></svg></div>
+          <div class="et"><b>网络</b><small>WiFi 扫描与连接、MQTT 通道状态</small></div>
+          <div class="chev"><svg viewBox="0 0 24 24"><use href="#i-chev"/></svg></div></div>
+        <div class="entry" data-dlg="auth"><div class="eic"><svg viewBox="0 0 24 24"><use href="#i-sys"/></svg></div>
+          <div class="et"><b>系统</b><small>策略阈值、主题、时钟、恢复出厂</small></div>
+          <div class="chev"><svg viewBox="0 0 24 24"><use href="#i-chev"/></svg></div></div>
+        <div class="card" style="display:flex;align-items:center;gap:12px">
+          <div class="ic" style="margin:0;color:var(--warn)"><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg></div>
+          <div style="font-size:12px;color:var(--dim);line-height:1.7">
+            二次验证 = 管理员精确 PIN（FR-18：此处<strong>不允许虚位</strong>，虚位仅用于开锁）</div>
+        </div>
+        <div class="hint">规格：入口卡 = 图标色块 + 标题 + 一行说明 + 右侧 chevron；点击后先弹二次验证，验证通过才切页</div>
+      </section>
+
+      <!-- ================= SYSTEM（待改造 + 按钮折叠修复） ================= -->
+      <section class="screen fr" id="sc-sys">
+        <div class="hd">
+          <div><h1>系统</h1><div class="sub">需管理员权限</div></div>
+        </div>
+        <div class="grid4">
+          <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg></div>
+            <div class="v" style="font-size:15px">2026-09-14</div><div class="k">系统时钟 09:41:07</div></div>
+          <div class="card"><div class="ic ok"><svg viewBox="0 0 24 24"><use href="#i-sys"/></svg></div>
+            <div class="v">4</div><div class="k">应用线程（上限 4）</div></div>
+          <div class="card"><div class="ic dim"><svg viewBox="0 0 24 24"><use href="#i-disk"/></svg></div>
+            <div class="v">46%</div><div class="k">存储占用</div></div>
+          <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></div>
+            <div class="v" style="font-size:15px">v1.0.0</div><div class="k">固件版本</div></div>
+        </div>
+        <div class="grid2" style="flex:1;min-height:0">
+          <div class="card">
+            <div style="font-size:13px;font-weight:600;margin-bottom:6px">安全策略</div>
+            <div class="kv"><span>连续失败锁定阈值</span>
+              <span class="stepper"><button>−</button><span class="val">5</span><button>＋</button></span></div>
+            <div class="kv"><span>锁定时长</span>
+              <span class="stepper"><button>−</button><span class="val">30 s</span><button>＋</button></span></div>
+            <div class="kv"><span>人脸连续未匹配转动态码</span>
+              <span class="stepper"><button>−</button><span class="val">3</span><button>＋</button></span></div>
+            <div class="kv"><span>虚位密码</span><span style="color:var(--ok)">已启用</span></div>
+          </div>
+          <div class="card" style="display:flex;flex-direction:column;gap:10px">
+            <div style="font-size:13px;font-weight:600">主题</div>
+            <div class="tbtn" id="themebtns">
+              <div class="t" data-th="0" style="background:#0D1117;border-color:#30363D"></div>
+              <div class="t" data-th="1" style="background:#F5F3EF"></div>
+              <div class="t" data-th="2" style="background:#EEF4FB"></div>
+              <div class="t" data-th="3" style="background:#0A1F1C"></div>
+              <div class="t" data-th="4" style="background:#F0F7FD"></div>
+            </div>
+            <div style="font-size:12px;color:var(--dim)">当前：<b id="thname">月白</b> · 切换后全页即时换肤，不需重建页面</div>
+            <div style="flex:1"></div>
+            <!-- 修复项：危险区必须在可视区完整可见可点，不得被卡内滚动折叠 -->
+            <div style="border:1px solid var(--line);border-radius:12px;padding:12px;background:var(--surface-2)">
+              <div style="font-size:13px;font-weight:600;margin-bottom:4px">危险区</div>
+              <div style="font-size:12px;color:var(--dim);margin-bottom:10px">恢复出厂设置将清空全部用户、日志与配置</div>
+              <button class="btn danger" style="width:100%;justify-content:center">
+                <svg viewBox="0 0 24 24"><use href="#i-alert"/></svg>恢复出厂设置</button>
+            </div>
+          </div>
+        </div>
+        <div class="hint">规格：本页「恢复出厂设置」按钮此前被卡内滚动区裁切 —— 本轮必须完整可见可点（基线遗留，并入本轮）</div>
+      </section>
+
+      <!-- ================= KEYPAD 覆盖层（全屏层，非 rail 项） ================= -->
+      <div class="overlay" id="ov-keypad">
+        <div class="sheet">
+          <h2>输入开锁密码</h2>
+          <div class="pindots"><i class="f"></i><i class="f"></i><i></i><i></i><i></i><i></i></div>
+          <div class="keys">
+            <button>1</button><button>2</button><button>3</button>
+            <button>4</button><button>5</button><button>6</button>
+            <button>7</button><button>8</button><button>9</button>
+            <button class="act">取消</button><button>0</button><button class="act">确认</button>
+          </div>
+          <div class="hint">规格：虚位密码开启时，「确认」不校验长度，只做子串匹配</div>
+        </div>
+      </div>
+
+      <!-- ================= 二次验证弹窗（弹窗层） ================= -->
+      <div class="overlay" id="ov-auth">
+        <div class="sheet" style="min-width:360px">
+          <h2 style="display:flex;align-items:center;gap:8px">
+            <svg width="20" height="20" viewBox="0 0 24 24" style="stroke:var(--warn);fill:none;stroke-width:1.8">
+              <use href="#i-shield"/></svg>管理员验证</h2>
+          <div style="font-size:12px;color:var(--dim);text-align:center;line-height:1.7">
+            请输入管理员 PIN（必须精确匹配）</div>
+          <div class="pindots"><i class="f"></i><i class="f"></i><i class="f"></i><i></i></div>
+          <div style="display:flex;gap:10px">
+            <button class="btn ghost" id="auth-cancel" style="min-width:96px;justify-content:center">取消</button>
+            <button class="btn" style="min-width:120px;justify-content:center">确认</button>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /content -->
+  </div><!-- /main -->
+</div><!-- /device -->
+</div><!-- /stage -->
+
+<div class="legend">
+  <b>交付约定（给实现方）</b>　
+  ① 颜色只走 token：<code>theme_color(TH_*)</code> 或 <code>st_*</code> 样式，禁止硬编码 hex（唯一例外：<code>UID_MAGIC</code> 之类的非颜色常量）；
+  ② 卡片层次用「1px 边框 + <code>surface / surface-2 / surface-3</code> 色阶」，<b>不用模糊阴影</b>（A7 上昂贵）；
+  ③ 每个页面根节点必须能被过渡接管（根节点做 translate_x + opa 插值，勿用 <code>lv_screen_load_anim</code>）；
+  ④ 全部数字/状态必须取真实来源，无数据时给明确文案（如「后端未启用」「未连接」），不得留 <code>--</code> 或空白；
+  ⑤ 新主题必须 <code>lv_theme_set_parent(新, 默认)</code>，否则丢默认控件样式导致整页位移。
+</div>
+
+<script>
+/* ---------- 页面切换（与 ui.c 的 rail 过渡同参数：入 200ms / 出 160ms，位移 ±46px） ---------- */
+const ORDER = ['home','users','logs','face','net','set','sys'];
+const screens = {}; ORDER.forEach(k => screens[k] = document.getElementById('sc-' + k));
+let cur = 'home';
+
+document.querySelectorAll('.nav').forEach(n => n.onclick = () => {
+  const t = n.dataset.t;
+  if (t === cur) return;
+  document.querySelectorAll('.nav').forEach(x => x.classList.toggle('active', x === n));
+  const dir = ORDER.indexOf(t) > ORDER.indexOf(cur) ? 'r' : 'l';
+  const oldEl = screens[cur], newEl = screens[t];
+  oldEl.classList.remove('show');
+  oldEl.classList.add(dir === 'r' ? 'fl' : 'fr');
+  newEl.classList.remove('fl','fr');
+  newEl.classList.add(dir === 'r' ? 'fr' : 'fl');
+  requestAnimationFrame(() => requestAnimationFrame(() => newEl.classList.add('show')));
+  cur = t;
+});
+
+/* ---------- 主题（5 套，与 theme.c 一一对应） ---------- */
+const THNAMES = ['石墨黑','月白','蓝白','松石青','浅蓝'];
+function setTheme(i){
+  document.body.dataset.theme = i;
+  document.getElementById('thname').textContent = THNAMES[i];
+  document.querySelectorAll('.switcher button').forEach(b => b.classList.toggle('on', +b.dataset.th === i));
+  document.querySelectorAll('#themebtns .t').forEach(b => b.classList.toggle('on', +b.dataset.th === i));
+}
+document.querySelectorAll('.switcher button').forEach(b => b.onclick = () => setTheme(+b.dataset.th));
+document.querySelectorAll('#themebtns .t').forEach(b => b.onclick = () => setTheme(+b.dataset.th));
+setTheme(4);   /* 与应用默认一致：theme.c g_idx = 4（浅蓝）—— 用户 2026-09-14 裁定保持浅蓝 */
+
+/* ---------- 覆盖层演示 ---------- */
+document.getElementById('btn-unlock').onclick = () => document.getElementById('ov-keypad').classList.add('show');
+document.querySelectorAll('.entry').forEach(e => e.onclick = () => document.getElementById('ov-auth').classList.add('show'));
+document.getElementById('auth-cancel').onclick = () => document.getElementById('ov-auth').classList.remove('show');
+document.querySelectorAll('.overlay').forEach(o => o.onclick = ev => { if (ev.target === o) o.classList.remove('show'); });
+
+/* ---------- 时钟：真实走时（实现侧用 hal_time()） ---------- */
+setInterval(() => {
+  const d = new Date();
+  const p = n => String(n).padStart(2,'0');
+  document.querySelector('.clock').textContent = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}, 1000);
+</script>
+</body>
+</html>
