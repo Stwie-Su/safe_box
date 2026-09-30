@@ -38,3 +38,7 @@ build_asan/
 .env
 .env.*
 *.env
+
+# 规约驱动整理（2026-09-30）：厂商资料与本地编译产物不入库
+资料/
+tools/test_totp
