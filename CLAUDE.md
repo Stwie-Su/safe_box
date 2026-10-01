@@ -21,6 +21,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 旧版归档 | `规约/归档/` | 历史快照**不维护、不改写** |
 | FM225 手册（协议唯一依据，不入库） | `资料/FM22x系列人脸锁算法模组用户开发手册V1.7.pdf` | 仅本地开发环境有 |
 | 环境配置 / 排错（项目外） | `~/桌面/配置笔记/` | 与代码无关的环境问题 |
+| Ubuntu 主机环境速查（工具链/设备树） | `UBUNTU_ENV.md` | 主机侧 SDK、交叉工具链、dtb 路径、构建命令，AI Agent 快速定位 |
 
 ## 2. 工作纪律（铁律）
 
@@ -181,3 +182,4 @@ data/               PC 运行时数据（不入库）
 
 - 本期做：R9 自研 MQTT ✅ 已收口（《开发进度.md》§16：codec/inflight/fsm + tls_stream(mbedTLS) + rpc 十指令）；**FR-29 OTA 两期**（期① 固件包接收/校验/落盘 PC 可验；期② 分区切换/自确认/回滚，强依赖上板）、FM225 录入/解锁闭环（N1~N3 完成度以代码核对为准）、FR-21 凭据一致性、FR-23 模组健康降级、D10 hal_net + NETWORK 页、DS3231 驱动、电磁锁 GPIO 后端、单元测试、板上验证。
 - 本期不做：公网穿透、小程序、指纹/NFC/4G/CAN、数据库（SQLite 留接口）。
+
