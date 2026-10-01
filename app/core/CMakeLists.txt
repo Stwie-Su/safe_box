@@ -17,6 +17,9 @@ set(SAFE_CORE_SRC
     support/async_store.c
     support/crypto.c
     support/sha1.c
+    # WLAN 控制通道的命令应答解析（纯函数，无 IO / 无堆分配，见 core/net）。
+    # 放进 core 而非 hal，是为了能像 remote/mqtt_codec.c 一样做确定性单测。
+    net/net_scan_parse.c
     # 远程指令的轻量访问控制（req_id 去重 / 时效 / 命令分级）。
     # 纯逻辑、无第三方依赖，故**无条件**编入 core，便于单测直接链接。
     remote/rpc_guard.c

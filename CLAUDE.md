@@ -83,13 +83,19 @@ BR=~/100ask_imx6ull-sdk/Buildroot_2020.02.x
 export PATH=~/tools/cmake-3.22.1-linux-x86_64/bin:$BR/output/host/bin:$PATH
 cmake -B build_board -DLV_PORT_DEFCONFIG=configs/board.defconfig \
   -DCMAKE_TOOLCHAIN_FILE=cmake/user_cross_compile_setup.cmake \
-  -DPython3_EXECUTABLE=$BR/output/host/bin/python3 .
+  -DPython3_EXECUTABLE=/usr/bin/python3 .
+# ★ 必须指向宿主机 python3，绝不能用 $BR/output/host/bin/python3：
+#   Buildroot host 的 python3.8 只有 `python3 --version` 能响应，一旦执行 `-c <代码>`
+#   就报 "Python path configuration"（stdlib 路径坏死，设 PYTHONHOME 也救不回来）。
+#   而 CMake find_package(Python3) 正是用 `-c` 探测解释器 → 配置必失败：
+#   "Could NOT find Python3 (missing: Interpreter) ... Cannot run the interpreter"。
+#   实测 2026-10-02：改 /usr/bin/python3（3.10.12）后交叉配置+编译一次通过。
 cmake --build build_board -j$(nproc)
 ```
 
 可选特性（`cmake/SafeFeatures.cmake`，缺依赖自动降级、不会让构建失败）：`SAFE_FEATURE_MQTT`（PC 自动探测）/ `SAFE_FEATURE_MQTT_TLS` / `SAFE_FACE_BACKEND=fake|fm225|none` / `SAFE_BUILD_TESTS`（PC ON、交叉 OFF）/ `SAFE_DATA_DIR`（PC `data/`，板子 `/var/lib/safe`）。
 
-调试环境变量（`grep -r 'getenv("SAFE_' app` 为准）：`SAFE_DATA_DIR`、`SAFE_TEST_PAGE`（HOME/LOGS/SETTINGS/USERS/NETWORK/SYSTEM/KEYPAD/FACE）、`SAFE_TEST_THEME`(0..4，THEME_COUNT=5)、`SAFE_TEST_DLG`(add_user|auth|change_pwd)、`SAFE_TEST_SHOT` / `SAFE_TEST_SHOT_MS`、`SAFE_TEST_UNLOCK=1`、`SAFE_TEST_TRANS_MS` / `SAFE_TEST_TRANS_PAGE`、`SAFE_TEST_FACE`、`SAFE_ICON_CHECK`、`SAFE_PERF_LOG=1`、`SAFE_MQTT_HOST|PORT`、`SAFE_MQTT_OFF=1`、`SAFE_FACE_BACKEND` / `SAFE_FACE_DEV`、`SAFE_FM225_DEV`（真模组串口，建议 by-id 路径）、`SAFE_FACE_PREVIEW_SCALE`、`SAFE_CAMERA_BACKEND` / `SAFE_CAMERA_DEV` / `SAFE_CAMERA_ROT`、`SAFE_TIME_BACKEND` / `SAFE_RTC_DEV`。
+调试环境变量（`grep -r 'getenv("SAFE_' app` 为准）：`SAFE_DATA_DIR`、`SAFE_TEST_PAGE`（HOME/LOGS/SETTINGS/USERS/NETWORK/SYSTEM/KEYPAD/FACE）、`SAFE_TEST_THEME`(0..4，THEME_COUNT=5)、`SAFE_TEST_DLG`(add_user|auth|change_pwd)、`SAFE_TEST_SHOT` / `SAFE_TEST_SHOT_MS`、`SAFE_TEST_UNLOCK=1`、`SAFE_TEST_TRANS_MS` / `SAFE_TEST_TRANS_PAGE`、`SAFE_TEST_FACE`、`SAFE_ICON_CHECK`、`SAFE_PERF_LOG=1`、`SAFE_MQTT_HOST|PORT`、`SAFE_MQTT_OFF=1`、`SAFE_FACE_BACKEND` / `SAFE_FACE_DEV`、`SAFE_FM225_DEV`（真模组串口，建议 by-id 路径）、`SAFE_FACE_PREVIEW_SCALE`、`SAFE_CAMERA_BACKEND` / `SAFE_CAMERA_DEV` / `SAFE_CAMERA_ROT`、`SAFE_TIME_BACKEND` / `SAFE_RTC_DEV`、`SAFE_NET_BACKEND`（wpa|none，WLAN 后端强制指定）/ `SAFE_WPA_CTRL`（wpa_supplicant ctrl_iface 路径，默认 /var/run/wpa_supplicant/wlan0）。
 
 辅助脚本：`tools/fm225_selftest.py`（不启主程序的串口链路 30 秒自检）、`tools/crash_consistency_test.sh`（store 崩溃一致性长跑）、`tools/mqtt_lab.py`（MQTT 本地实验）、`tools/check_layers.sh` / `tools/check_main_thread_store.sh`（分层与线程纪律闸门）。
 

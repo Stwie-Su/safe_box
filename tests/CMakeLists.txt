@@ -51,6 +51,9 @@ safe_add_test(test_mqtt_inflight)
 safe_add_test(test_mqtt_fsm)
 # 只读用户表快照缓存（store_cache，双缓冲）：读侧读不到半张表、stamp 语义、钳位。
 safe_add_test(test_store_cache)
+# WLAN 后端命令应答解析：SSID 含空格 / \r\n / 容量截断 / 畸形行作废 /
+# STATUS 取值与前缀不误命中。纯逻辑，不需要网卡与 wpa_supplicant。
+safe_add_test(test_net_parse)
 
 # 分层检查：core 不碰 LVGL/平台头，hal 头文件不带平台实现，ui 不碰底层协议
 find_program(SAFE_BASH bash)

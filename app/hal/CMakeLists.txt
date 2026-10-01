@@ -17,7 +17,12 @@ set(SAFE_HAL_SRC
     storage/storage_service.c
     camera/camera_service.c
     camera/camera_null.c
-    camera/camera_v4l2.c)
+    camera/camera_v4l2.c
+    # WLAN：wpa_supplicant ctrl_iface 后端 + 降级后端 + 服务门面。
+    # 依赖只有 libc 与 POSIX socket，板子与 PC 编同一份代码（不引入任何第三方库）。
+    net/net_service.c
+    net/backend_wpa.c
+    net/backend_none.c)
 
 add_library(safe_hal STATIC ${SAFE_HAL_SRC})
 

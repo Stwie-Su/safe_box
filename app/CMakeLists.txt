@@ -14,11 +14,19 @@ target_include_directories(lvglsim PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_BINARY_DIR}/generated/app)
 
+# ★ core 与 hal 是静态库级互相引用（hal->core: net_scan_parse / event_bus；
+#   core->hal: hal_time 等）。单趟归档扫描无法闭合，依赖「某个恰好被引用的
+#   符号把对方 .o 拽进来」是脆弱巧合（tests/CMakeLists.txt 同款注释的教训：
+#   曾因去掉一条无订阅者的 event_bus_publish 而链接即断）。用 --start-group
+#   允许链接器重扫，lvgl_linux 是单向依赖留在组外。
 target_link_libraries(lvglsim PRIVATE
+    -Wl,--start-group
     safe_platform
     safe_ui
     safe_core
     safe_hal
+    safe_thirdparty
+    -Wl,--end-group
     lvgl_linux
     ${SAFE_EXTRA_LIBS}
     Threads::Threads)
