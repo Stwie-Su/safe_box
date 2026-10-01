@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate lv_font_cn_*.c from all CJK chars used in src/.
+"""Regenerate lv_font_cn_*.c from all CJK chars used in app/.
 Uses the system's NotoSansCJK-Regular.ttc (VM has it; .otf not available).
 """
 import os
@@ -7,9 +7,9 @@ import re
 import subprocess
 import sys
 
-SRC = os.path.expanduser("~/桌面/lv_port_linux/src")
+SRC = os.path.expanduser("~/桌面/lv_port_linux/app")
 FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
-OUT = os.path.expanduser("~/桌面/lv_port_linux/src/ui/fonts")
+OUT = os.path.expanduser("~/桌面/lv_port_linux/app/ui/fonts")
 SIZES = [14, 16, 20, 28]
 
 def collect_cjk(path):
@@ -62,7 +62,7 @@ def main():
         sys.exit(1)
     cps = collect_cjk(SRC)
     rng = build_range(cps)
-    print(f"collected {len(cps)} unique CJK/codepoints from src/")
+    print(f"collected {len(cps)} unique CJK/codepoints from app/")
     print(f"range preview: {rng[:200]}...")
 
     for sz in SIZES:
