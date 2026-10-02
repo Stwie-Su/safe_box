@@ -247,24 +247,50 @@ static safe_err_t v4l2_start(uint16_t w, uint16_t h)
      * （旧实现每次 start 都重新 REQBUFS+mmap：映射泄漏，且旧映射失效，
      *   真机表现为「离开人脸页再回来，预览停格 0fps」——用户验收 2026-09-15。） ---- */
     if (s_buf_count > 0 && s_out != NULL) {
+        /* 快速恢复路径（FR-27）：stop 只做 STREAMOFF，重新入队 + STREAMON。
+         * 2026-10-02 真机修复：板载 FM225 的 UVC 实现（ffff:ffff，非标）在
+         * STREAMOFF 后不接受直接重新入队，QBUF 静默 EINVAL，导致「离开人脸页
+         * 再回来预览 0 帧」。现把 QBUF/STREAMON 失败改为**退回完整重开路径**
+         *（STREAMOFF 清态 + unmap + REQBUFS(0) 释放驱动缓冲），自愈且带回 errno 日志。 */
+        bool q_ok = true;
         for (int i = 0; i < s_buf_count; i++) {
             struct v4l2_buffer b;
             memset(&b, 0, sizeof(b));
             b.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             b.memory = V4L2_MEMORY_MMAP;
             b.index  = (unsigned)i;
-            if (xioctl(s_fd, VIDIOC_QBUF, &b) < 0) return SAFE_ERR_FAIL;
+            if (xioctl(s_fd, VIDIOC_QBUF, &b) < 0) {
+                printf("[CAMERA] 快速恢复 QBUF[%d] 失败: %s\n", i, strerror(errno));
+                q_ok = false;
+                break;
+            }
         }
+        if (q_ok) {
+            int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            if (xioctl(s_fd, VIDIOC_STREAMON, &type) < 0) {
+                printf("[CAMERA] 快速恢复 STREAMON 失败: %s\n", strerror(errno));
+                q_ok = false;
+            }
+        }
+        if (q_ok) {
+            s_streaming = true;
+            s_held      = false;
+            printf("[CAMERA] 恢复采集: %ux%u %s, %d buffers\n", s_cap_w, s_cap_h,
+                   s_is_mjpg ? "MJPG(软解)" : "YUYV", s_buf_count);
+            return SAFE_OK;
+        }
+
+        /* 落回完整重开：清掉半开的流状态与缓冲，让下方完整路径重新协商 */
+        printf("[CAMERA] 快速恢复失败，退回完整重开路径\n");
         int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        if (xioctl(s_fd, VIDIOC_STREAMON, &type) < 0) {
-            printf("[CAMERA] STREAMON 失败\n");
-            return SAFE_ERR_FAIL;
-        }
-        s_streaming = true;
-        s_held      = false;
-        printf("[CAMERA] 恢复采集: %ux%u %s, %d buffers\n", s_cap_w, s_cap_h,
-               s_is_mjpg ? "MJPG(软解)" : "YUYV", s_buf_count);
-        return SAFE_OK;
+        xioctl(s_fd, VIDIOC_STREAMOFF, &type);
+        unmap_bufs();
+        struct v4l2_requestbuffers req0;
+        memset(&req0, 0, sizeof(req0));
+        req0.count  = 0;
+        req0.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        req0.memory = V4L2_MEMORY_MMAP;
+        xioctl(s_fd, VIDIOC_REQBUFS, &req0);
     }
 
     /* ---- 1. 协商格式：优先 YUYV（查表直转，零解码成本）；驱动不接受

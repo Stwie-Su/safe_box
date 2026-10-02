@@ -17,6 +17,7 @@
  *********************/
 #include <unistd.h>
 #include <stdlib.h>
+#include <string.h>
 #include <stdbool.h>
 
 #include "lvgl/lvgl.h"
@@ -91,6 +92,17 @@ static lv_display_t * init_fbdev(void)
     }
 
     lv_linux_fbdev_set_file(disp, device);
+
+    /* 画面旋转：SAFE_DISPLAY_ROT=180 时整屏软件旋转 180 度（板端屏幕倒装场景）。
+     * 渲染侧由本后端 flush 阶段的 lv_draw_sw_rotate 完成；触摸侧由 evdev 后端
+     * 按同一环境变量联动做双轴镜像（见 evdev.c evdev_apply_calibration）。 */
+    {
+        const char * rot_env = getenv("SAFE_DISPLAY_ROT");
+        if(rot_env != NULL && strcmp(rot_env, "180") == 0) {
+            lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_180);
+            LV_LOG_USER("fbdev: SAFE_DISPLAY_ROT=180 -> display rotated 180");
+        }
+    }
 
     return disp;
 }

@@ -71,8 +71,26 @@ safe_err_t hal_camera_deinit(void)
 
 safe_err_t hal_camera_start(uint16_t w, uint16_t h)
 {
+    if (!s_inited) hal_camera_init();
     if (!s_inited) return SAFE_ERR_STATE;
     if (s_started) return SAFE_OK;
+
+    /* 开机竞态重试（2026-10-02 实测）：应用启动早于 USB 枚举时，v4l2 首扫
+     * 找不到相机而降级 null，且 hal_camera_init 是一次性的，此后永远没预览。
+     * 人脸页触发 start 时若仍是 null 后端且未显式指定 null，重试 v4l2 初始化
+     *（每个进程最多 3 次，覆盖「插上相机才开机/开机慢枚举」两种场景）。 */
+    {
+        const char * want = getenv("SAFE_CAMERA_BACKEND");
+        bool want_null = (want != NULL && strcmp(want, "null") == 0);
+        static int s_race_retries = 0;
+        if (s_backend == &hal_camera_backend_null && !want_null && s_race_retries < 3) {
+            s_race_retries++;
+            printf("[CAMERA] 开机竞态重试 %d：重新扫描 v4l2 相机\n", s_race_retries);
+            s_inited = false;
+            hal_camera_init();
+        }
+    }
+
     safe_err_t e = s_backend->start(w, h);
     if (e == SAFE_OK) s_started = true;
     return e;
