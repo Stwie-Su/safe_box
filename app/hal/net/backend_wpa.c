@@ -91,6 +91,7 @@ static int wpa_cmd(const char * cmd, char * buf, size_t cap)
     ca.sun_family = AF_UNIX;
     strncpy(ca.sun_path, cpath, sizeof(ca.sun_path) - 1);
     if(bind(fd, (struct sockaddr *)&ca, sizeof(ca)) != 0) {
+        printf("[WPA] bind %s 失败：%s\n", cpath, strerror(errno));
         close(fd);
         return SAFE_ERR_IO;
     }
@@ -101,6 +102,7 @@ static int wpa_cmd(const char * cmd, char * buf, size_t cap)
     snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", ctrl_path());
 
     if(connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+        printf("[WPA] connect %s 失败：%s\n", sa.sun_path, strerror(errno));
         close(fd);
         unlink(cpath);
         return SAFE_ERR_IO;
@@ -117,6 +119,7 @@ static int wpa_cmd(const char * cmd, char * buf, size_t cap)
     ssize_t r = recv(fd, buf, cap - 1, 0);
     if(r < 0) {
         int e = errno;
+        printf("[WPA] recv 超时/失败：cmd=%s errno=%d\n", cmd, e);
         close(fd);
         unlink(cpath);
         return (e == EAGAIN || e == EWOULDBLOCK) ? SAFE_ERR_TIMEOUT : SAFE_ERR_IO;
@@ -127,8 +130,14 @@ static int wpa_cmd(const char * cmd, char * buf, size_t cap)
 
     /* 应答以 FAIL / UNKNOWN 开头表示命令本身被拒。注意 ADD_NETWORK 成功返回的是
      * 数字 id，使能类命令返回 OK，都不能按 OK 一刀切，所以这里只识别失败前缀。 */
-    if(strncmp(buf, "FAIL", 4) == 0)    return SAFE_ERR_FAIL;
-    if(strncmp(buf, "UNKNOWN", 7) == 0) return SAFE_ERR_UNSUP;
+    if(strncmp(buf, "FAIL", 4) == 0) {
+        printf("[WPA] 命令被拒：cmd=%s 应答=%s\n", cmd, buf);
+        return SAFE_ERR_FAIL;
+    }
+    if(strncmp(buf, "UNKNOWN", 7) == 0) {
+        printf("[WPA] 未知命令：cmd=%s\n", cmd);
+        return SAFE_ERR_UNSUP;
+    }
     return SAFE_OK;
 }
 
@@ -182,7 +191,10 @@ static int wpa_available(void)
 {
     char buf[WPA_BUF_CMD];
     /* PING 是从不做副作用的探测命令，回 PONG。用它判断 socket 可达且 wpa 活着。 */
-    return wpa_cmd("PING", buf, sizeof(buf)) == SAFE_OK;
+    int rc = wpa_cmd("PING", buf, sizeof(buf));
+    if(rc != SAFE_OK) printf("[WPA] 探测失败 rc=%d（ctrl=%s，wpa_supplicant 未起或路径不符）\n",
+                              rc, ctrl_path());
+    return rc == SAFE_OK;
 }
 
 static int wpa_scan(wpa_ap_t * out, size_t cap)

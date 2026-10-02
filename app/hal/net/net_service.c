@@ -58,21 +58,24 @@ static const net_backend_t * effective(void)
     if(s_real_be != NULL) return s_real_be;
 
     if(s_be->available != NULL && s_be->available()) {
-        s_real_be = s_be;
+        s_real_be = s_be;    /* 探测成功才缓存结论 */
     }
     else {
-        s_real_be = &net_backend_none;   /* 降级 */
+        /* 失败不缓存（2026-10-02 修复）：应用启动（S05lvgl）早于 wpa_supplicant
+         * （S46wifi）的 init 顺序下，首探会因 ctrl socket 尚不存在而失败；
+         * 若负缓存，「无无线网卡」会被焊死到进程退出，wpa 起来也永不恢复。
+         * 失败路径改为每次重探：一次 PING 往返毫秒级，调用方只在页面打开时问。 */
+        return &net_backend_none;
     }
     return s_real_be;
 }
 
 int hal_net_available(void)
 {
-    if(s_available >= 0) return s_available;
-
     const net_backend_t * be = effective();
-    s_available = (be->available != NULL && be->available()) ? 1 : 0;
-    return s_available;
+    int r = (be->available != NULL && be->available()) ? 1 : 0;
+    if(r) s_available = 1;   /* 同上：只缓存成功结论，失败留给下次重探 */
+    return r;
 }
 
 const char * hal_net_backend_name(void)
