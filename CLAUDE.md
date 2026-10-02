@@ -51,7 +51,7 @@ sed -n '1,60p' 规约/计划/下一步行动计划_2026-09-18.md    # 当前阶�
 
 多用户共享保险柜（民宿短租 / 小型办公室 / 多成员家庭）→ 多用户权限、TOTP、远程管理、审计日志、限时授权均为必需项。基于 **LVGL v9**；目标硬件 100ask i.MX6ULL（Cortex-A7 单核 / 512MB / 1024×600 触摸屏）。
 
-**当前阶段：主线 1.0.3 已上板**（《开发进度.md》§20+§21：上板联调全通——ch341/FM225/180° 旋转/WiFi UI/OTA 期①；§21 D22——用户页布局扩容、网络页刷新按钮、MQTT 双向验证（safe/status 心跳 + safe/cmd 下行回执）、ota_http `.tar` 白名单修复、OTA HTTP 直连通道端到端全通；`ctest` 19/19）。**下一步 = OTA 第 2 档（签名校验 / 差分 / 模型热更新，FR-29 延伸）+ 环境噪声治理（触摸驱动假死、USB 接触不良、S05lvgl stop 失败叠多实例，见 §20/§21 已知项）**。服务器双工程（自研 MQTT broker + OTA HTTP）源码部署于 Ubuntu 桌面 `~/桌面/mqtt-server`、`~/桌面/ota-server`；运行态 MQTT 用 mosquitto，OTA HTTP 用自研 ota_http。
+**当前阶段：主线 1.0.5 已上板，FR-25 双向 TLS 与 FR-29 断点续传/HMAC 均已闭环**（《开发进度.md》§23：板端 8883 双向证书互验打通，上行心跳 + 下行回执全通，100s 零断链；OTA 1.0.4→1.0.5 实机升级，续传走 206、HMAC 不符/缺失均 ERR_HMAC 并删包）。**下一步 = ③ 规约三处滞后回改（FR-13 rail / §9.3 RTC / NFR-4 补传）+ ④ page_users.c 拆分收尾**。TLS 运维依赖：板端 8883 需 PC 侧端口转发（永久用管理员 `netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=8883 connectaddress=192.168.150.139 connectport=8883`；临时转发器务必在建连后 `settimeout(None)`，否则 30s 掐断长连接，见 §23.1）。
 
 ## 5. 构建
 
