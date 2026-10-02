@@ -1,6 +1,10 @@
 #!/bin/sh
-# OTA 应用升级（v3）：状态文件重写式、落 /var/ota/status；HTTP 下载实时进度；
-# 解包用纯 tar（板端 BusyBox 无 -z）；file/sha 可由参数传入，缺省自动读 manifest。
+# OTA 应用升级（v4）：断点续传（wget -c + 服务器 Range/206）+ HMAC 来源验签。
+# - 断点续传：wget -c 从 /tmp/ota_pkg 已有字节继续；换包残片由「size 越界清除」
+#   与 sha256 终验双保险兜底。
+# - HMAC：manifest 的 hmac 字段【强制】要求（缺失/不符均拒）——防「剥字段降级」；
+#   验签用板载 python3.8.5（tools/ota_hmac.py，无第三方依赖）。
+# 其余同 v3：状态重写式落 /var/ota/status；纯 tar；file/sha 缺省读 manifest。
 # 用法: ota_apply.sh [url_base] [file] [sha256]
 URL=${1:-http://10.218.148.51:8080}
 FILE=${2:-$(grep -o '"file":"[^"]*"' /tmp/ota_manifest.json 2>/dev/null | cut -d'"' -f4)}
@@ -15,7 +19,13 @@ TOTAL=$(grep -o '"size":[0-9]*' /tmp/ota_manifest.json 2>/dev/null | head -1 | c
 
 upd "STATE=DOWNLOADING"
 SRC=HTTP
-wget -q --tries=1 -T 10 -O /tmp/ota_pkg "$URL/$FILE" 2>/dev/null &
+# 残片防御：已有文件若超过包大小（服务器换过包），续传会拼出混合体 → 清掉重来
+if [ -f /tmp/ota_pkg ]; then
+    SZ0=$(stat -c %s /tmp/ota_pkg 2>/dev/null || echo 0)
+    if [ "$TOTAL" -gt 0 ] && [ "$SZ0" -gt "$TOTAL" ]; then rm -f /tmp/ota_pkg; fi
+fi
+# -c 断点续传（服务器需支持 Range/206）；-t 3 -T 30 弱网宽容
+wget -q -c -t 3 -T 30 -O /tmp/ota_pkg "$URL/$FILE" 2>/dev/null &
 WPID=$!
 while kill -0 $WPID 2>/dev/null; do
     SZ=$(stat -c %s /tmp/ota_pkg 2>/dev/null || echo 0)
@@ -36,6 +46,13 @@ fi
 upd "STATE=VERIFY"
 ACT=$(sha256sum /tmp/ota_pkg | cut -d' ' -f1)
 [ "$ACT" = "$SHA" ] || { upd "STATE=ERR_SHA"; rm -f /tmp/ota_pkg; exit 1; }
+
+# HMAC 来源验签（FR-29：sha256 防损坏，hmac 防伪造）。
+# 强制字段：缺失即拒（杜绝攻击者剥掉 hmac 字段降级成无验签包）。
+HMAC=$(grep -o '"hmac":"[^"]*"' /tmp/ota_manifest.json 2>/dev/null | cut -d'"' -f4)
+[ -n "$HMAC" ] || { upd "STATE=ERR_HMAC"; rm -f /tmp/ota_pkg; exit 1; }
+CALC=$(python3 /usr/share/lvgl/ota_hmac.py /tmp/ota_pkg /etc/safe/ota.key 2>/dev/null)
+[ -n "$CALC" ] && [ "$CALC" = "$HMAC" ] || { upd "STATE=ERR_HMAC"; rm -f /tmp/ota_pkg; exit 1; }
 
 upd "STATE=EXTRACT" "SRC=$SRC"
 rm -rf /tmp/ota_x; mkdir -p /tmp/ota_x
