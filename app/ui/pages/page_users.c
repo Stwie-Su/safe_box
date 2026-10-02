@@ -355,14 +355,14 @@ lv_obj_t * page_users_create(lv_obj_t * parent)
     lv_obj_set_scrollable(hdr, false);
 
     /* 表头列 — 与行内**逐段等宽对齐**（行结构：头像28 + 8 + 用户名170 + 8 + 弹性
-     * + 8 + 状态64 + 8 + 8 + 8 + 操作组334）。表头同构排布：用户名 206、弹性占位、
-     * 状态 64、8、操作 334 —— 两行的固定宽度之和相等（644），弹性占位吸收的宽差
+     * + 8 + 状态72 + 8 + 8 + 8 + 操作组368）。表头同构排布：用户名 238、弹性占位、
+     * 状态 72、8、操作 368 —— 两行的固定宽度之和相等（718），弹性占位吸收的宽差
      * 一致，所以「状态」「操作」正好压在行内对应列上方。 */
     lv_obj_t * h_name = lv_label_create(hdr);
     lv_label_set_text(h_name, "用户名");  /* 用户名 */
     lv_obj_set_style_text_font(h_name, app_font_scaled(13), 0);
     lv_obj_set_style_text_color(h_name, theme_color(TH_TEXT_MUT), 0);
-    lv_obj_set_size(h_name, SX(206), LV_SIZE_CONTENT);
+    lv_obj_set_size(h_name, SX(238), LV_SIZE_CONTENT);
 
     lv_obj_t * h_sp = lv_obj_create(hdr);
     lv_obj_set_flex_grow(h_sp, 1);
@@ -374,7 +374,7 @@ lv_obj_t * page_users_create(lv_obj_t * parent)
     lv_label_set_text(h_st, "状态");  /* 状态 */
     lv_obj_set_style_text_font(h_st, app_font_scaled(13), 0);
     lv_obj_set_style_text_color(h_st, theme_color(TH_TEXT_MUT), 0);
-    lv_obj_set_size(h_st, SX(64), LV_SIZE_CONTENT);
+    lv_obj_set_size(h_st, SX(72), LV_SIZE_CONTENT);
 
     lv_obj_t * h_sp2 = lv_obj_create(hdr);
     lv_obj_set_size(h_sp2, SX(8), LV_SIZE_CONTENT);
@@ -386,7 +386,7 @@ lv_obj_t * page_users_create(lv_obj_t * parent)
     lv_label_set_text(h_ops, "操作");  /* 操作 */
     lv_obj_set_style_text_font(h_ops, app_font_scaled(13), 0);
     lv_obj_set_style_text_color(h_ops, theme_color(TH_TEXT_MUT), 0);
-    lv_obj_set_size(h_ops, SX(334), LV_SIZE_CONTENT);
+    lv_obj_set_size(h_ops, SX(368), LV_SIZE_CONTENT);
 
     /* ------ 用户列表（全宽紧凑行） ------ */
     s_list = lv_obj_create(root);
@@ -394,7 +394,7 @@ lv_obj_t * page_users_create(lv_obj_t * parent)
     lv_obj_set_size(s_list, lv_pct(100), lv_pct(100));
     lv_obj_add_style(s_list, &st_panel, 0);
     lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(s_list, SY(4), 0);
+    lv_obj_set_style_pad_row(s_list, SY(8), 0);
     lv_obj_set_style_pad_all(s_list, SX(6), 0);
     lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
 
@@ -452,8 +452,8 @@ static void add_group_header(lv_obj_t * parent, const char * title, int count)
     lv_obj_set_style_pad_all(h, 0, 0);
     lv_obj_set_style_pad_left(h, SX(4), 0);
     lv_obj_set_style_pad_right(h, SX(4), 0);
-    lv_obj_set_style_pad_top(h, SY(9), 0);
-    lv_obj_set_style_pad_bottom(h, SY(6), 0);
+    lv_obj_set_style_pad_top(h, SY(12), 0);
+    lv_obj_set_style_pad_bottom(h, SY(9), 0);
     lv_obj_set_flex_flow(h, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(h, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
@@ -462,14 +462,14 @@ static void add_group_header(lv_obj_t * parent, const char * title, int count)
     lv_obj_t * tl = lv_label_create(h);
     lv_label_set_text(tl, title);
     lv_obj_add_style(tl, &st_text, 0);
-    lv_obj_set_style_text_font(tl, app_font_scaled(13), 0);
+    lv_obj_set_style_text_font(tl, app_font_scaled(15), 0);
 
     char cbuf[24];
     snprintf(cbuf, sizeof(cbuf), "%d 人", count);
     lv_obj_t * cl = lv_label_create(h);
     lv_label_set_text(cl, cbuf);
     lv_obj_add_style(cl, &st_text_mut, 0);
-    lv_obj_set_style_text_font(cl, app_font_scaled(12), 0);
+    lv_obj_set_style_text_font(cl, app_font_scaled(13), 0);
 }
 
 /* 临时用户行副文案（规约 §5.8 交由实现决定 —— 此处选择展示）：
@@ -515,7 +515,7 @@ static lv_obj_t * row_op_btn(lv_obj_t * parent, ui_glyph_t glyph, const char * t
                              lv_event_cb_t cb, int uid)
 {
     lv_obj_t * b = lv_button_create(parent);
-    lv_obj_set_size(b, w, SY(44));
+    lv_obj_set_size(b, w, SY(52));
     lv_obj_add_style(b, style, 0);
     lv_obj_set_style_pad_hor(b, SX(6), 0);
     lv_obj_set_style_pad_ver(b, 0, 0);
@@ -528,7 +528,7 @@ static lv_obj_t * row_op_btn(lv_obj_t * parent, ui_glyph_t glyph, const char * t
 
     lv_obj_t * lb = lv_label_create(b);
     lv_label_set_text(lb, text);
-    lv_obj_set_style_text_font(lb, app_font_scaled(12), 0);
+    lv_obj_set_style_text_font(lb, app_font_scaled(13), 0);
 
     if (cb) lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, (void *)(uintptr_t)uid);
     return b;
@@ -544,14 +544,14 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
 
     /* 行容器 */
     lv_obj_t * row = lv_obj_create(s_list);
-    lv_obj_set_size(row, lv_pct(100), SY(56));
+    lv_obj_set_size(row, lv_pct(100), SY(72));
     lv_obj_add_style(row, &st_panel2, 0);
     lv_obj_set_style_radius(row, SX(8), 0);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_column(row, SX(8), 0);
     lv_obj_set_style_pad_row(row, 0, 0);
-    /* st_panel2 默认 pad_all=10：行高 56 只剩 36 可用，装不下「用户名 + 临时副文案」
-     * 两行文字（≈42px）。压到上下各 4 → 48 可用，两行也放得下，行高保持统一。 */
+    /* st_panel2 默认 pad_all=10：上下压到各 4，行高 72 → 64 可用，
+     * 操作按钮 52 与「用户名 + 临时副文案」两行（≈42px）都放得下。 */
     lv_obj_set_style_pad_ver(row, SY(4), 0);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(row, false);  /* 防止行内滚动 */
@@ -564,7 +564,7 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
      *      并渲染出一条滚动条。这就是本页头像区 scrollbar 的根因；
      *      同页的 sp1 / sp2 弹性占位是同一个疏漏，一并关掉。 */
     lv_obj_t * icon = lv_obj_create(row);
-    lv_obj_set_size(icon, SX(28), SX(28));
+    lv_obj_set_size(icon, SX(40), SX(40));
     lv_obj_set_scrollable(icon, false);
     lv_obj_set_style_radius(icon, LV_RADIUS_CIRCLE, 0);
     if (is_admin) {
@@ -581,13 +581,13 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
     char initial[4] = { u->name[0] ? u->name[0] : '?', '\0' };
     lv_obj_t * initial_lbl = lv_label_create(icon);
     lv_label_set_text(initial_lbl, initial);
-    lv_obj_set_style_text_font(initial_lbl, app_font_scaled(13), 0);
+    lv_obj_set_style_text_font(initial_lbl, app_font_scaled(16), 0);
     lv_obj_set_style_text_color(initial_lbl, is_admin ? theme_color(TH_ACCENT_INK) : theme_color(TH_TEXT), 0);
     lv_obj_center(initial_lbl);
 
     /* --- 用户名（+ 临时用户副文案） --- */
     lv_obj_t * mid = lv_obj_create(row);
-    lv_obj_set_size(mid, SX(170), LV_SIZE_CONTENT);
+    lv_obj_set_size(mid, SX(190), LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(mid, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(mid, 0, 0);
     lv_obj_set_style_pad_all(mid, 0, 0);
@@ -601,7 +601,7 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
     lv_label_set_text(nm, u->name);
     lv_obj_add_style(nm, &st_text, 0);
     lv_obj_set_style_text_font(nm, app_font_scaled(17), 0);
-    lv_obj_set_width(nm, SX(170));
+    lv_obj_set_width(nm, SX(190));
     lv_label_set_long_mode(nm, LV_LABEL_LONG_MODE_DOTS);   /* 超长用户名截断，不撑破行高 */
 
     if (strcmp(u->role, "temp") == 0) {
@@ -611,7 +611,7 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
         lv_label_set_text(sl, sub);
         lv_obj_add_style(sl, &st_text_mut, 0);
         lv_obj_set_style_text_font(sl, app_font_scaled(11), 0);
-        lv_obj_set_width(sl, SX(170));
+        lv_obj_set_width(sl, SX(190));
         lv_label_set_long_mode(sl, LV_LABEL_LONG_MODE_DOTS);
     }
 
@@ -632,7 +632,7 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
         lv_obj_add_style(st_lbl, &st_warn_text, 0);
     }
     lv_obj_set_style_text_font(st_lbl, app_font_scaled(13), 0);
-    lv_obj_set_width(st_lbl, SX(64));
+    lv_obj_set_width(st_lbl, SX(72));
 
     /* 小间距 */
     lv_obj_t * sp2 = lv_obj_create(row);
@@ -643,24 +643,24 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
 
     /* --- 右侧操作组：修改信息 / 启停 / 人脸 / 删除 --- */
     lv_obj_t * ops = lv_obj_create(row);
-    lv_obj_set_size(ops, LV_SIZE_CONTENT, SY(44));
+    lv_obj_set_size(ops, LV_SIZE_CONTENT, SY(52));
     lv_obj_set_style_bg_opa(ops, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(ops, 0, 0);
     lv_obj_set_style_pad_all(ops, 0, 0);
-    lv_obj_set_style_pad_column(ops, SX(6), 0);
+    lv_obj_set_style_pad_column(ops, SX(8), 0);
     lv_obj_set_flex_flow(ops, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(ops, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(ops, false);
 
     /* 修改信息（改名 + 可选改 PIN） */
-    row_op_btn(ops, UI_GLYPH_EDIT, "修改信息", SX(76), &st_ghost_btn, TH_TEXT,
+    row_op_btn(ops, UI_GLYPH_EDIT, "修改信息", SX(84), &st_ghost_btn, TH_TEXT,
                row_pwd_cb, uid);
 
     /* 启用/停用 —— 末位管理员锁死 */
     lv_obj_t * b_tog = row_op_btn(ops,
                                   u->enabled ? UI_GLYPH_LOCK : UI_GLYPH_LOCK_OPEN,
                                   u->enabled ? "停用" : "启用",
-                                  SX(76), &st_ghost_btn, TH_TEXT, NULL, uid);
+                                  SX(84), &st_ghost_btn, TH_TEXT, NULL, uid);
     if (last_admin) {
         lv_obj_add_state(b_tog, LV_STATE_DISABLED);
         lv_obj_set_style_opa(b_tog, LV_OPA_40, LV_STATE_DISABLED);
@@ -673,7 +673,7 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
     bool has_face = (u->face_id >= 0);
     bool cap_ok = face_cap_ok(!has_face);
     lv_obj_t * b_face = row_op_btn(ops, UI_GLYPH_FACE, has_face ? "删人脸" : "录人脸",
-                                   SX(88), &st_ghost_btn,
+                                   SX(92), &st_ghost_btn,
                                    has_face ? TH_DANGER : TH_ACCENT, NULL, uid);
     if (!cap_ok) {
         lv_obj_add_state(b_face, LV_STATE_DISABLED);
@@ -683,7 +683,7 @@ static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin)
     }
 
     /* 删除 —— 末位管理员锁死 */
-    lv_obj_t * b_del = row_op_btn(ops, UI_GLYPH_DELETE, "删除", SX(76), &st_danger_btn,
+    lv_obj_t * b_del = row_op_btn(ops, UI_GLYPH_DELETE, "删除", SX(84), &st_danger_btn,
                                   TH_ACCENT_INK, NULL, uid);
     if (last_admin) {
         lv_obj_add_state(b_del, LV_STATE_DISABLED);

@@ -43,6 +43,7 @@ static char s_cur_ssid[64] = {0};
 static void rebuild_all(void);
 static void net_connect_async(const char * ssid, const char * psk);
 static void go_back_cb(lv_event_t * e);
+static void refresh_cb(lv_event_t * e);
 static void wifi_click_cb(lv_event_t * e);
 static void net_conn_done(int result, const char * psk);
 static void net_add_done(int result);
@@ -90,6 +91,18 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
     lv_obj_add_style(s_status, &st_ok_text, 0);
     lv_obj_set_style_text_font(s_status, app_font_scaled(14), 0);
     lv_obj_set_style_pad_left(s_status, 20, 0);
+
+    /* 弹性占位 + 刷新按钮（FR：网络页手动刷新）——扫描/已存/状态三者都由
+     * rebuild_all() 的一个 worker 作业重取；点击后列表先回到占位态给即时反馈。 */
+    lv_obj_t * sp = lv_obj_create(head);
+    lv_obj_set_flex_grow(sp, 1);
+    lv_obj_set_style_bg_opa(sp, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(sp, 0, 0);
+    lv_obj_set_scrollable(sp, false);
+
+    ui_icon_text_button(head, LV_SYMBOL_REFRESH, "刷新",
+                        SX(90), SY(44), &st_ghost_btn,
+                        theme_color(TH_TEXT), refresh_cb, NULL);
 
     /* 主体：左可用 + 右已存 */
     lv_obj_t * body = lv_obj_create(root);
@@ -165,6 +178,28 @@ static void go_back_cb(lv_event_t * e)
 {
     (void)e;
     ui_switch_page(PAGE_HOME);   /* FR-7 变更：设置中枢已改为开发者选项，返回目标改主页 */
+}
+
+/* 刷新：列表清回占位态给即时反馈，数据由 rebuild_all() 的 worker 作业回填
+ *（扫描可达数秒，时序纪律同本页其它 hal_net_* 调用）。 */
+static void refresh_cb(lv_event_t * e)
+{
+    (void)e;
+    lv_label_set_text(s_status, "刷新中…");
+
+    lv_obj_clean(s_avail_list);
+    lv_obj_t * tip = lv_label_create(s_avail_list);
+    lv_label_set_text(tip, "扫描中…");
+    lv_obj_add_style(tip, &st_text_mut, 0);
+    lv_obj_set_style_text_font(tip, app_font_scaled(14), 0);
+
+    lv_obj_clean(s_saved_list);
+    lv_obj_t * tip2 = lv_label_create(s_saved_list);
+    lv_label_set_text(tip2, "读取中…");
+    lv_obj_add_style(tip2, &st_text_mut, 0);
+    lv_obj_set_style_text_font(tip2, app_font_scaled(14), 0);
+
+    rebuild_all();
 }
 
 /* ---------------- 后台取数：扫描 + 已存 + 状态，一个作业全拿 ----------------
