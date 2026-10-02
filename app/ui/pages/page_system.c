@@ -988,6 +988,12 @@ static void ota_poll_cb(lv_timer_t * t)
         lv_label_set_text(s_ota_status_lbl, "升级失败：sha256 校验不通过，已拒绝安装");
         lv_timer_del(t);
         s_ota_timer = NULL;
+    } else if (strcmp(st, "ERR_HMAC") == 0) {
+        /* FR-29 来源验证：sha256 防「传输损坏」，HMAC 防「来源伪造」——
+         * 包内容完整但密钥不符/字段缺失 = 来源不可信，与损坏同等拒绝。 */
+        lv_label_set_text(s_ota_status_lbl, "升级失败：HMAC 签名验证不通过（来源不可信），已拒绝安装");
+        lv_timer_del(t);
+        s_ota_timer = NULL;
     } else if (strcmp(st, "ERR_TAR") == 0) {
         lv_label_set_text(s_ota_status_lbl, "升级失败：升级包损坏（解包失败）");
         lv_timer_del(t);
