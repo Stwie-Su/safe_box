@@ -10,7 +10,7 @@ cmake_minimum_required(VERSION 3.16)
 #  保证核心链路在任何环境下都能编译。
 # ============================================================
 project(safe_lvgl
-    VERSION 1.0.3
+    VERSION 1.0.5
     DESCRIPTION "多用户共享保险柜 · LVGL v9"
     LANGUAGES C)
 

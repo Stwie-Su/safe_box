@@ -534,7 +534,16 @@ static void act_all(uint32_t now_ms, mqtt_fsm_out_t *out)
         uint16_t id = out->pkt_id;
         switch (a) {
         case MQTT_ACT_OPEN_SOCKET:      do_open(now_ms); break;
-        case MQTT_ACT_CLOSE_SOCKET:     do_close(); break;
+        case MQTT_ACT_CLOSE_SOCKET:
+            /* 断链原因可观测：每次断链打印一次统计快照，避免"周期性重连"只能靠猜。
+             * 断链是低频事件，打印不会刷屏。 */
+            printf("[MQTT] 断链：state=%d ping_to=%u suback_to=%u suback_rej=%u "
+                   "retrans=%u dropped=%u rx_pub=%u connects=%u reconnects=%u\n",
+                   (int)g_fsm.state, g_fsm.stat_ping_timeout,
+                   g_fsm.stat_suback_timeout, g_fsm.stat_suback_reject,
+                   g_fsm.stat_retransmit, g_fsm.stat_dropped, g_fsm.stat_rx_publish,
+                   g_fsm.stat_connects, g_fsm.stat_reconnects);
+            do_close(); break;
         case MQTT_ACT_SEND_CONNECT:     do_send_connect(now_ms); break;
         case MQTT_ACT_SEND_SUBSCRIBE:   do_send_subscribe(now_ms); break;
         case MQTT_ACT_SEND_PINGREQ:     do_send_pingreq(now_ms); break;
@@ -774,6 +783,10 @@ static void * mqtt_net_thread(void *arg)
          * 像好转，但稳态仍是 100% —— 取瞬时值会放过一个 100% 的忙循环。 */
         if (cmdq_pending() > 0 && g_fsm.state == MQTT_ST_CONNECTED) timeout = 0;
         if (g_tx_len > g_tx_sent) timeout = 0;
+        /* ★ TLS 层残留：SSL 缓冲里还有已解密字节时，底层 fd 不会再报 POLLIN，
+         *   必须自己把 timeout 打成 0 并再读一轮，否则残留数据被饿死。 */
+        bool ssl_pend = tls_stream_pending(g_ts);
+        if (ssl_pend) timeout = 0;
         if (timeout < 0) timeout = 0;
 
         /* 5) poll 双 fd：套接字 + self-pipe */
@@ -830,6 +843,7 @@ static void * mqtt_net_thread(void *arg)
                 mqtt_fsm_on_event(&g_fsm, MQTT_EV_TX_FLUSHED, NULL, now_ms, &out);
                 act_all(now_ms, &out);
             } else if (r < 0) {
+                fprintf(stderr, "[MQTT] tx_flush 失败 r=%d errno=%d\n", r, errno);
                 mqtt_fsm_on_event(&g_fsm, MQTT_EV_IO_ERROR, NULL, now_ms, &out);
                 act_all(now_ms, &out);
                 continue;
@@ -837,14 +851,14 @@ static void * mqtt_net_thread(void *arg)
         }
 
         /* 8) 可读：尽量读满，循环解析（粘包 / 半包） */
-        if (g_sock >= 0 && (fds[0].revents & (POLLIN | POLLHUP | POLLERR))) {
+        if (g_sock >= 0 && (ssl_pend || (fds[0].revents & (POLLIN | POLLHUP | POLLERR)))) {
             int io_err = 0;
             for (;;) {
                 if (rx_len >= sizeof(rx)) break;
                 int m = tls_stream_read(g_ts, rx + rx_len, sizeof(rx) - rx_len, 0);
                 if (m > 0) { rx_len += (size_t)m; continue; }
-                if (m == 0) io_err = 1;        /* EOF：对端关闭 */
-                else if (m < -1) io_err = 1;   /* 真错误 */
+                if (m == 0)      { io_err = 1; fprintf(stderr, "[MQTT] 读 EOF（对端关闭）\n"); }
+                else if (m < -1) { io_err = 1; fprintf(stderr, "[MQTT] 读错误 m=%d errno=%d\n", m, errno); }
                 break;                          /* m == -1 = 暂无数据，正常 */
             }
 

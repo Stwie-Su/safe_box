@@ -77,6 +77,21 @@ int tls_stream_write(tls_stream_t *s, const uint8_t *buf, size_t len);
 /** 非阻塞读。>0 读到的字节数；0 = 对端关闭(EOF)；-1 = 暂无数据(EAGAIN，**不是**错误)；-2 = 真错误。 */
 int tls_stream_read(tls_stream_t *s, uint8_t *buf, size_t cap, int timeout_ms);
 
+/**
+ * ★ TLS 层是否还有「已解密但上层尚未取走」的字节（mbedTLS 内部缓冲残留）。
+ *
+ * 为什么必须有这个接口（这是「把 TLS 嵌进非阻塞 poll 循环」的**第二个**坑）：
+ *   mbedTLS 的 mbedtls_ssl_read() 一次只交付**一个 TLS record 内**的数据，
+ *   同一 record 里剩下的字节、以及已收下的后续 record，都留在 SSL 层缓冲里。
+ *   此时**底层 socket 已经没有待读字节** —— 外层 poll(fd) 不会再报 POLLIN，
+ *   于是残留数据永远没人来取：PINGRESP / PUBACK / SUBACK 被"饿死"在 SSL 层，
+ *   上层表现是「连着却收不到任何下行」，最终 keepalive / SUBACK 超时断链重连。
+ *   明文后端无此问题（内核 socket 缓冲与 poll 天然一致），故恒返回 false。
+ *
+ * 用法：外层在 poll 之前查询；若为 true，则 timeout 置 0 并**无条件**再读一轮。
+ */
+bool tls_stream_pending(const tls_stream_t *s);
+
 /** 取底层套接字描述符，供外层 poll 使用。未连接返回 -1。 */
 int  tls_stream_fd(const tls_stream_t *s);
 

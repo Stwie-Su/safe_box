@@ -176,6 +176,15 @@ int tls_stream_fd(const tls_stream_t *s)
     return (s == NULL) ? -1 : s->fd;
 }
 
+bool tls_stream_pending(const tls_stream_t *s)
+{
+    if (s == NULL || s->fd < 0) return false;
+#if defined(SAFE_FEATURE_TLS)
+    if (s->tls) return mbedtls_ssl_get_bytes_avail(&s->ssl) > 0;
+#endif
+    return false;   /* 明文：内核缓冲与 poll 一致，不存在"取不走的残留" */
+}
+
 bool tls_stream_want_write(const tls_stream_t *s)
 {
     /* 明文后端：只有「非阻塞 connect 未完成」时才需要等 POLLOUT。
@@ -392,6 +401,11 @@ int tls_stream_read(tls_stream_t *s, uint8_t *buf, size_t cap, int timeout_ms)
         if (r == 0) return 0;                    /* 对端关闭 */
         if (r == MBEDTLS_ERR_SSL_WANT_READ)  { s->want_write = false; return -1; }
         if (r == MBEDTLS_ERR_SSL_WANT_WRITE) { s->want_write = true;  return -1; }
+        {   /* 真错误：打印 mbedTLS 错误码，否则上层只能看到「连接断了」四个字 */
+            char ebuf[128];
+            mbedtls_strerror(r, ebuf, sizeof(ebuf));
+            fprintf(stderr, "[TLS] read 错误 r=%d: %s\n", r, ebuf);
+        }
         return -2;                               /* 真错误 */
     }
 #endif
