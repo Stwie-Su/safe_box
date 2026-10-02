@@ -39,6 +39,7 @@
 #include "ui/pages/page_otp.h"
 #include "ui/pages/page_face.h"
 #include "ui/pages/page_enroll.h"
+#include <stdio.h>
 #include "core/store/store.h"      /* store_init */
 #include "core/support/worker.h"     /* worker_init, worker_poll */
 #include "core/auth/auth_fsm.h"   /* 阶段 1：置信度状态机 + UI hook */
@@ -146,8 +147,33 @@ static inline bool is_unlocked_now(void)
 /**
  * @brief GUI 启动入口，由 app.c 的 app_main 调用
  */
+/* OTA 健康确认：应用启动 20s 后清除 pending 标记；看门狗在 45s 后发现
+ * 标记仍在 → 判定新版本异常（起不来/秒退），自动回滚到 lvglsim.old。 */
+static void ota_healthy_cb(lv_timer_t * t)
+{
+    (void)t;
+    remove("/usr/share/lvgl/.ota_pending");
+    printf("[ui] OTA 健康确认完成\n");
+}
+
 void ui_init(void)
 {
+    // -1. 恢复持久化的屏幕旋转（系统页开关写入数据目录 ui_rot180；
+    //     无文件时跟随 wrapper 的 SAFE_DISPLAY_ROT env 默认）
+    {
+        char p[160];
+        snprintf(p, sizeof(p), "%s/ui_rot180", store_dir());
+        FILE * f = fopen(p, "r");
+        if (f != NULL) {
+            int v = fgetc(f);
+            fclose(f);
+            lv_display_set_rotation(lv_display_get_default(),
+                                    (v == '1') ? LV_DISPLAY_ROTATION_180
+                                               : LV_DISPLAY_ROTATION_0);
+            printf("[ui] 恢复屏幕旋转 = %s\n", (v == '1') ? "180" : "0");
+        }
+    }
+
     // 0. 初始化缩放系统（必须在所有 UI 创建之前）
     ui_scale_init();
     s_topbar_h = SY(TOPBAR_BASE);
@@ -158,6 +184,12 @@ void ui_init(void)
     theme_init();
     /* 图标字体自检：SAFE_ICON_CHECK=1 时逐码位打印命中情况（换字体后自证用） */
     if (getenv("SAFE_ICON_CHECK")) icon_font_selfcheck();
+
+    // 1.5 OTA 健康确认定时器（一次性，20s 后清标记）
+    {
+        lv_timer_t * hc = lv_timer_create(ota_healthy_cb, 20000, NULL);
+        lv_timer_set_repeat_count(hc, 1);
+    }
 
     // 2.5 注册主题切换回调
     theme_register_change_cb(topbar_refresh_theme);

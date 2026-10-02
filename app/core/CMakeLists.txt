@@ -17,6 +17,7 @@ set(SAFE_CORE_SRC
     support/async_store.c
     support/crypto.c
     support/sha1.c
+    support/ota_status.c
     # WLAN 控制通道的命令应答解析（纯函数，无 IO / 无堆分配，见 core/net）。
     # 放进 core 而非 hal，是为了能像 remote/mqtt_codec.c 一样做确定性单测。
     net/net_scan_parse.c

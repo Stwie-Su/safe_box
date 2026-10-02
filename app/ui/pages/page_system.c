@@ -29,6 +29,7 @@
 #include "core/store/store.h"
 #include "core/config.h"
 #include "core/support/async_store.h"
+#include "core/support/ota_status.h"  /* 状态契约解析（纯函数，ctest 锁定） */
 #include "core/support/worker.h"
 #include "core/event_bus.h"      /* 订阅 EV_FACE_EVENT：识别「全清完成」 */
 #include "hal/hal_face.h"        /* face_service_delete_all_async */
@@ -48,6 +49,15 @@ static lv_obj_t * s_vpin_sw;        /* 虚位密码开关（FR-18）—— 可�
 static bool       s_vpin_pending = false;   /* 待写入的开关目标值（管理员验证通过后才落盘） */
 static lv_obj_t * s_mode_sw;        /* 人脸录入模式：单帧 / 五向 */
 static bool       s_mode_pending = false;   /* 待写入的目标值（管理员验证通过后才落盘） */
+static lv_obj_t * s_rot_sw;         /* 屏幕旋转 180° 开关（显示偏好，即时生效免鉴权） */
+static bool       s_rot_on = false; /* 当前旋转状态（与 display rotation 同步） */
+static lv_obj_t * s_ota_status_lbl; /* OTA 状态行（检查/下载/校验/安装进度） */
+static lv_obj_t * s_ota_btn_up;     /* 「立即升级」按钮（发现新版本才显示） */
+static lv_timer_t * s_ota_timer;    /* /tmp/ota_status 轮询定时器 */
+static uint32_t     s_ota_start_ms; /* 本轮检查/升级发起时刻（超时兜底用） */
+static char       s_ota_file[64];   /* 服务器包文件名 */
+static char       s_ota_sha[65];    /* 服务器包 sha256 */
+static bool       s_ota_newer;
 static lv_obj_t * s_theme_btns[THEME_COUNT];
 static lv_obj_t * s_theme_cur;      /* 当前主题名（切换后刷新） */
 static lv_obj_t * s_adv_box = NULL; /* 「高级设置」折叠容器：低频开关收在这里 */
@@ -78,6 +88,11 @@ static void vpin_write_async(bool enable);
 static void mode_click_cb(lv_event_t * e);
 static void mode_refresh(void);
 static void mode_write_async(bool five_way);
+static void rot_click_cb(lv_event_t * e);
+static void rot_refresh(void);
+static void ota_check_cb(lv_event_t * e);
+static void ota_apply_cb(lv_event_t * e);
+static void ota_poll_cb(lv_timer_t * t);
 
 /* ---- 管理员二次验证（操作处鉴权，FR-7 2026-09-14 变更）----
  * 原设计把鉴权放在「设置中枢」页级入口；但主导航本就直接暴露 系统/用户/网络，
@@ -514,6 +529,12 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     info_cell(gr2, "固件版本", &fw);
     if (fw) lv_label_set_text(fw, SAFE_VERSION_STRING);
 
+    /* 屏幕旋转 180°：显示偏好，即时生效免鉴权（同主题切换） */
+    lv_obj_t * gr3 = adv_grid_row(s_adv_box);
+    toggle_cell(gr3, "屏幕旋转180°", &s_rot_sw, rot_click_cb);
+    s_rot_on = (lv_display_get_rotation(lv_display_get_default()) == LV_DISPLAY_ROTATION_180);
+    rot_refresh();
+
 
     /* --- 右：主题 --- */
     lv_obj_t * right = lv_obj_create(body);
@@ -556,6 +577,60 @@ lv_obj_t * page_system_create(lv_obj_t * parent)
     lv_obj_set_style_text_font(s_theme_cur, app_font_scaled(12), 0);
 
     /* 危险区上方的虚线分隔：把它与上方的安全设置**结构性**分开，降低误触概率 */
+    /* ---------- OTA 升级卡片（第 1 档闭环：检查/下载/校验/原子替换/回滚） ---------- */
+    lv_obj_t * ota = lv_obj_create(root);
+    lv_obj_set_size(ota, lv_pct(100), LV_SIZE_CONTENT);
+    lv_obj_add_style(ota, &st_panel, 0);
+    lv_obj_set_style_pad_all(ota, SX(12), 0);
+    lv_obj_set_scrollable(ota, false);
+    lv_obj_set_flex_flow(ota, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ota, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t * otxt = lv_obj_create(ota);
+    lv_obj_set_flex_grow(otxt, 1);
+    lv_obj_set_height(otxt, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(otxt, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(otxt, 0, 0);
+    lv_obj_set_style_pad_all(otxt, 0, 0);
+    lv_obj_set_scrollable(otxt, false);
+    lv_obj_set_flex_flow(otxt, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(otxt, 2, 0);
+
+    lv_obj_t * oh = lv_label_create(otxt);
+    lv_label_set_text(oh, "OTA 升级");
+    lv_obj_add_style(oh, &st_text, 0);
+    lv_obj_set_style_text_font(oh, app_font_scaled(15), 0);
+
+    lv_obj_t * od = lv_label_create(otxt);
+    lv_label_set_text(od, "从服务器检查新版本；升级包经 sha256 校验后原子替换，异常自动回滚");
+    lv_obj_add_style(od, &st_text_mut, 0);
+    lv_obj_set_style_text_font(od, app_font_scaled(12), 0);
+
+    s_ota_status_lbl = lv_label_create(otxt);
+    lv_label_set_text(s_ota_status_lbl, "尚未检查更新");
+    lv_obj_add_style(s_ota_status_lbl, &st_text_mut, 0);
+    lv_obj_set_style_text_font(s_ota_status_lbl, app_font_scaled(12), 0);
+
+    lv_obj_t * obtns = lv_obj_create(ota);
+    lv_obj_set_size(obtns, SX(190), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(obtns, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(obtns, 0, 0);
+    lv_obj_set_style_pad_all(obtns, 0, 0);
+    lv_obj_set_scrollable(obtns, false);
+    lv_obj_set_flex_flow(obtns, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(obtns, SY(8), 0);
+
+    lv_obj_t * oc = ui_icon_text_button(obtns, LV_SYMBOL_DOWNLOAD, "检查更新",
+                                        lv_pct(100), SY(44), &st_ghost_btn,
+                                        theme_color(TH_TEXT), ota_check_cb, NULL);
+    (void)oc;
+
+    s_ota_btn_up = ui_icon_text_button(obtns, LV_SYMBOL_UPLOAD, "立即升级",
+                                       lv_pct(100), SY(44), &st_accent_btn,
+                                       lv_color_white(), ota_apply_cb, NULL);
+    lv_obj_add_flag(s_ota_btn_up, LV_OBJ_FLAG_HIDDEN);
+
     danger_dash_sep(root);
 
     /* ---------- ③ 危险区：独立卡片，不参与任何滚动滚动 ---------- */
@@ -784,6 +859,193 @@ static void mode_refresh(void)
 
     lv_obj_t * lb = lv_obj_get_child(s_mode_sw, 0);
     if (lb) lv_label_set_text(lb, five ? "五向" : "单帧");
+}
+
+/* 屏幕旋转 180°：纯显示偏好，即时生效（渲染 + 触摸由 LVGL 随 rotation 自动跟随），
+ * 免管理员验证（非安全项，同主题切换）；落盘到数据目录 ui_rot180 小文件，
+ * 下次启动由 ui_init 恢复；无该文件时跟随 SAFE_DISPLAY_ROT env 默认。 */
+static void rot_refresh(void)
+{
+    if (!s_rot_sw) return;
+    if (s_rot_on) lv_obj_add_state(s_rot_sw, LV_STATE_CHECKED);
+    else          lv_obj_remove_state(s_rot_sw, LV_STATE_CHECKED);
+    lv_obj_t * lb = lv_obj_get_child(s_rot_sw, 0);
+    if (lb) lv_label_set_text(lb, s_rot_on ? "已开启" : "已关闭");
+}
+
+static void rot_click_cb(lv_event_t * e)
+{
+    (void)e;
+    s_rot_on = !s_rot_on;
+    lv_display_set_rotation(lv_display_get_default(),
+                            s_rot_on ? LV_DISPLAY_ROTATION_180 : LV_DISPLAY_ROTATION_0);
+    char p[160];
+    snprintf(p, sizeof(p), "%s/ui_rot180", store_dir());
+    FILE * f = fopen(p, "w");
+    if (f != NULL) {
+        fputc(s_rot_on ? '1' : '0', f);
+        fclose(f);
+        printf("[ui] 屏幕旋转 -> %s（已保存）\n", s_rot_on ? "180" : "0");
+    } else {
+        printf("[ui] 屏幕旋转保存失败: %s\n", p);
+    }
+    rot_refresh();
+    astore_append_log("setting_change", "admin", 1, s_rot_on ? "rot180=on" : "rot180=off");
+}
+
+/* ---------- OTA 升级（第 1 档闭环）----------
+ * 流程由 shell 脚本推进（wget/sha256sum/tar 均为板端现成工具），UI 只轮询
+ * /var/ota/status 的 KEY=VALUE 行做呈现 —— 脚本管流程，UI 管呈现，职责分离。
+ * 回滚：wrapper 写 .ota_pending 标记，应用 20s 健康确认清除；看门狗 45s
+ * 未清除 → 判定新版本异常，恢复 lvglsim.old 并重启。 */
+static void ota_status_read(char * buf, size_t cap)
+{
+    buf[0] = '\0';
+    FILE * f = fopen("/var/ota/status", "r");   /* 不落 tmpfs：/var/ota 由脚本 mkdir */
+    if (f == NULL) return;
+    size_t n = fread(buf, 1, cap - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+}
+
+static const char * ota_status_get(const char * buf, const char * key)
+{
+    /* 解析已剥离到 core/support/ota_status.c（纯函数 + test_ota_status 锁定，
+     * 契约：同名 KEY 取最后一次匹配 —— 兼容追加式与重写式两种写方）。 */
+    static char val[80];
+    if (ota_status_query(buf, key, val, sizeof(val)) != 0) return NULL;
+    return val;
+}
+
+static bool ota_version_num(const char * s, int * out)  /* "1.2.3" -> 10203，便于数值比较 */
+{
+    int a = 0, b = 0, c = 0;
+    if (s == NULL || sscanf(s, "%d.%d.%d", &a, &b, &c) != 3) return false;
+    *out = a * 10000 + b * 100 + c;
+    return true;
+}
+
+static void ota_poll_cb(lv_timer_t * t)
+{
+    (void)t;
+    char buf[512];
+    ota_status_read(buf, sizeof(buf));
+    if (buf[0] == '\0') return;
+    const char * st = ota_status_get(buf, "STATE");
+    if (st == NULL) {
+        /* 文件还没有 STATE 行：30 秒兜底，避免脚本异常时 UI 永远转圈 */
+        if (lv_tick_elaps(s_ota_start_ms) > 30000) {
+            lv_label_set_text(s_ota_status_lbl, "超时：状态文件无内容（脚本未运行？）");
+            lv_timer_del(t);
+            s_ota_timer = NULL;
+        }
+        return;
+    }
+    /* 状态仍在推进中的（CHECKING/DOWNLOADING...）：同样受 30 秒总超时保护。
+     * 正常检查 1-3s、升级 30s 内完成（含下载校验）；超 30s 判定异常。 */
+    if (strcmp(st, "CHECKING") == 0 || strcmp(st, "DOWNLOADING") == 0 ||
+        strcmp(st, "VERIFY") == 0 || strcmp(st, "EXTRACT") == 0 ||
+        strcmp(st, "INSTALL") == 0) {
+        if (lv_tick_elaps(s_ota_start_ms) > 30000) {
+            lv_label_set_text(s_ota_status_lbl, "超时：30 秒未到终态，请重试");
+            lv_timer_del(t);
+            s_ota_timer = NULL;
+            return;
+        }
+    }
+
+    if (strcmp(st, "CHECKED") == 0) {
+        const char * sv = ota_status_get(buf, "SERVER_VERSION");
+        int cur_n = 0, srv_n = 0;
+        bool srv_ok = ota_version_num(sv, &srv_n);
+        bool cur_ok = ota_version_num(SAFE_VERSION_STRING, &cur_n);
+        if (srv_ok && cur_ok && srv_n > cur_n) {
+            s_ota_newer = true;
+            const char * fl = ota_status_get(buf, "FILE");
+            const char * sh = ota_status_get(buf, "SHA256");
+            if (fl != NULL) { strncpy(s_ota_file, fl, sizeof(s_ota_file) - 1); s_ota_file[sizeof(s_ota_file)-1] = '\0'; }
+            if (sh != NULL) { strncpy(s_ota_sha, sh, sizeof(s_ota_sha) - 1); s_ota_sha[sizeof(s_ota_sha)-1] = '\0'; }
+            lv_label_set_text_fmt(s_ota_status_lbl, "发现新版本 %s，可升级", sv);
+            if (s_ota_btn_up != NULL) lv_obj_clear_flag(s_ota_btn_up, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_label_set_text_fmt(s_ota_status_lbl, "已是最新版本（服务器 %s）", srv_ok ? sv : "?");
+        }
+        lv_timer_del(t);
+        s_ota_timer = NULL;
+    } else if (strcmp(st, "ERR_NET") == 0) {
+        lv_label_set_text(s_ota_status_lbl, "检查失败：网络不可达");
+        lv_timer_del(t);
+        s_ota_timer = NULL;
+    } else if (strcmp(st, "ERR_MANIFEST") == 0) {
+        lv_label_set_text(s_ota_status_lbl, "检查失败：清单格式错误");
+        lv_timer_del(t);
+        s_ota_timer = NULL;
+    } else if (strcmp(st, "ERR_DOWNLOAD") == 0) {
+        lv_label_set_text(s_ota_status_lbl, "升级失败：下载失败（网络与本地分发均无可用包）");
+        lv_timer_del(t);
+        s_ota_timer = NULL;
+    } else if (strcmp(st, "ERR_SHA") == 0) {
+        lv_label_set_text(s_ota_status_lbl, "升级失败：sha256 校验不通过，已拒绝安装");
+        lv_timer_del(t);
+        s_ota_timer = NULL;
+    } else if (strcmp(st, "ERR_TAR") == 0) {
+        lv_label_set_text(s_ota_status_lbl, "升级失败：升级包损坏（解包失败）");
+        lv_timer_del(t);
+        s_ota_timer = NULL;
+    } else if (strcmp(st, "ERR_PKG") == 0) {
+        lv_label_set_text(s_ota_status_lbl, "升级失败：包内缺少应用文件");
+        lv_timer_del(t);
+        s_ota_timer = NULL;
+    } else if (strcmp(st, "ERR_ARGS") == 0) {
+        lv_label_set_text(s_ota_status_lbl, "升级失败：参数错误");
+        lv_timer_del(t);
+        s_ota_timer = NULL;
+    } else if (strcmp(st, "DOWNLOADING") == 0) {
+        const char * pr = ota_status_get(buf, "PROGRESS");
+        if (pr != NULL) lv_label_set_text_fmt(s_ota_status_lbl, "下载升级包中 %s…", pr);
+        else           lv_label_set_text(s_ota_status_lbl, "下载升级包中…");
+    } else if (strcmp(st, "VERIFY") == 0) {
+        lv_label_set_text(s_ota_status_lbl, "sha256 校验中…");
+    } else if (strcmp(st, "EXTRACT") == 0) {
+        lv_label_set_text(s_ota_status_lbl, "解包中…");
+    } else if (strcmp(st, "INSTALL") == 0) {
+        lv_label_set_text(s_ota_status_lbl, "安装中（原子替换）…");
+    } else if (strcmp(st, "RESTARTING") == 0) {
+        lv_label_set_text(s_ota_status_lbl, "升级完成，应用重启中…");
+    }
+}
+
+static void ota_check_cb(lv_event_t * e)
+{
+    (void)e;
+    const char * url = getenv("SAFE_OTA_URL");
+    if (url == NULL || *url == '\0') url = "http://192.168.150.139:8080";
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "sh /usr/share/lvgl/ota_check.sh '%s' '%s' >/dev/null 2>&1 &",
+             url, SAFE_VERSION_STRING);
+    system(cmd);
+    lv_label_set_text(s_ota_status_lbl, "检查中…");
+    s_ota_start_ms = lv_tick_get();
+    if (s_ota_btn_up != NULL) lv_obj_add_flag(s_ota_btn_up, LV_OBJ_FLAG_HIDDEN);
+    if (s_ota_timer == NULL) s_ota_timer = lv_timer_create(ota_poll_cb, 500, NULL);
+}
+
+static void ota_apply_cb(lv_event_t * e)
+{
+    (void)e;
+    if (!s_ota_newer) return;
+    const char * url = getenv("SAFE_OTA_URL");
+    if (url == NULL || *url == '\0') url = "http://192.168.150.139:8080";
+    char cmd[384];
+    snprintf(cmd, sizeof(cmd),
+             "sh /usr/share/lvgl/ota_apply.sh '%s' '%s' '%s' >/dev/null 2>&1 &",
+             url, s_ota_file, s_ota_sha);
+    system(cmd);
+    lv_label_set_text(s_ota_status_lbl, "升级中…");
+    s_ota_start_ms = lv_tick_get();
+    if (s_ota_btn_up != NULL) lv_obj_add_flag(s_ota_btn_up, LV_OBJ_FLAG_HIDDEN);
+    if (s_ota_timer == NULL) s_ota_timer = lv_timer_create(ota_poll_cb, 500, NULL);
 }
 
 static void mode_click_cb(lv_event_t * e)
