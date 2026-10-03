@@ -40,6 +40,20 @@ if [ ! -s /tmp/ota_pkg ]; then
     if [ -s /var/ota/ota_pkg_local ]; then SRC=LOCAL; cp /var/ota/ota_pkg_local /tmp/ota_pkg
     elif [ -s /tmp/ota_pkg_local ]; then SRC=LOCAL; cp /tmp/ota_pkg_local /tmp/ota_pkg
     fi
+    # ★ D27b：回退包必须用它**自己**的 manifest 校验。
+    # 原实现回退 LOCAL 旧包后仍拿 HTTP 新包的 sha256/hmac 去校 → 必然
+    # ERR_SHA / ERR_HMAC：安全方向没错（不会装错包），但报错误导，而且
+    # 「ADB 预推送」这条兜底通道实际上永远不可用。改为切换到 LOCAL manifest，
+    # sha 与 hmac 都取自同一份，校验的是「这个包本身是否可信」。
+    if [ "$SRC" = LOCAL ]; then
+        LM=/var/ota/ota_manifest_local.json
+        [ -s "$LM" ] || LM=/tmp/ota_manifest_local.json
+        if [ -s "$LM" ]; then
+            LSHA=$(grep -o '"sha256":"[^"]*"' "$LM" 2>/dev/null | head -1 | cut -d'"' -f4)
+            [ -n "$LSHA" ] && SHA=$LSHA
+            cp -f "$LM" /tmp/ota_manifest.json 2>/dev/null
+        fi
+    fi
 fi
 [ -s /tmp/ota_pkg ] || { upd "STATE=ERR_DOWNLOAD"; exit 1; }
 

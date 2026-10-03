@@ -152,13 +152,20 @@ bool face_service_running(void)
 /* ---------------- Duty-cycle（FR-27，规约 §5.20） ---------------- */
 
 /* 前台标志：主线程写（page_face 可见性边沿），face 线程 / 后端 tick 读。
- * 跨线程仅此一个 volatile 标量，与 face_thread 的退出标志同一纪律（§3.4）。 */
-static volatile bool s_fg = true;
+ * 跨线程仅此一个 volatile 标量，与 face_thread 的退出标志同一纪律（§3.4）。
+ *
+ * ★ D27a：必须是**三态**（-1 未定 / 0 后台 / 1 前台），不能用两态 bool 初值 true。
+ *   原实现初值 true，于是「首次进入前台」被 `if(s_fg == active) return` 直接吞掉 ——
+ *   既不打日志也不执行 hal_camera_start（恢复相机流）。默认页是 HOME 时由 app 开机
+ *   的 hal_camera_start 兜住所以没暴露；一旦默认页改成人脸页、或相机因 UVC 重枚举
+ *   掉流后重新进前台，就会表现为「画面不恢复」。-1 表示「还没人设过」，语义正确。 */
+static volatile int s_fg = -1;
 
 void face_service_set_foreground(bool active)
 {
-    if(s_fg == active) return;
-    s_fg = active;
+    int want = active ? 1 : 0;
+    if(s_fg == want) return;
+    s_fg = want;
     /* 相机流跟着前台走：STREAMOFF 后模组 UVC 传感断电（stop 幂等）；恢复时按
      * 预览契约的 320x240 重启。识别会话由 fm225 后端在 tick 里响应该标志：
      * 离开时 0x10 MID_RESET 终止在途会话 + 作废排队中的录入请求；进入时不主动发包
@@ -178,7 +185,10 @@ void face_service_set_foreground(bool active)
 
 bool face_service_foreground(void)
 {
-    return s_fg;
+    /* D27a：-1「未定」按**前台**处理 —— 与改前的既有行为一致（开机即可用：
+     * app 开机走 hal_camera_start，默认页若就是人脸页也照常识别）。
+     * 只有显式调用过 set_foreground(false) 才算后台。 */
+    return s_fg != 0;
 }
 
 safe_err_t face_service_enroll_async(const char * user_name)
