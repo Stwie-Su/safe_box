@@ -30,9 +30,9 @@ extern "C" {
  *
  * 调参口径：若板端实测 HOME 稳态 fps 降幅 >15%，先降 UI_TRANS_MS 到 160，
  * 仍不达标则退化为 opacity-only（把 UI_TRANS_SHIFT_PX 设为 0）。 */
-#define UI_TRANS_MS          70      /* 新页入场时长：200->70，切换期每帧重绘 ~84ms，太长会掉帧（2026-10-02 实测） */
-#define UI_TRANS_OUT_MS      50      /* 旧页退场时长 */
-#define UI_TRANS_SHIFT_PX    24      /* 页面切换横向位移基准：46->24 减少动画期失效面积 */
+#define UI_TRANS_MS          60      /* 新页入场时长：200->70，切换期每帧重绘 ~84ms，太长会掉帧（2026-10-02 实测） */
+#define UI_TRANS_OUT_MS      40      /* 旧页退场时长 */
+#define UI_TRANS_SHIFT_PX    12      /* 页面切换横向位移基准：46->24 减少动画期失效面积 */
 #define UI_TRANS_EASE        lv_anim_path_ease_out
 
 /* 旧版纵向过渡的缓动宏：主题层（theme.c 的 transition dsc）仍在使用，

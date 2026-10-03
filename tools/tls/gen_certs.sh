@@ -42,7 +42,7 @@ if [ ! -f broker.crt ]; then
     gen_ec_key broker.key
     openssl req -new -key broker.key \
         -subj "/C=CN/O=SafeCabinet/CN=safe-broker" -out broker.csr
-    printf "subjectAltName=IP:10.218.148.51,IP:192.168.150.139,IP:127.0.0.1,DNS:localhost\n" \
+    printf "subjectAltName=IP:10.218.148.51,IP:10.163.32.202,IP:192.168.150.139,IP:127.0.0.1,DNS:localhost\n" \
         > broker.ext
     openssl x509 -req -in broker.csr -CA ca.crt -CAkey ca.key \
         -CAcreateserial -days "$DAYS_LEAF" -sha256 \

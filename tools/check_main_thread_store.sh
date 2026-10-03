@@ -43,16 +43,19 @@ enclosing_fn() {
 # 与本次 R9 主线（自研 MQTT + 重活下沉）不成比例，故**本次明确不做**。
 # ★ 白名单按「文件::函数」登记而不是行号：行号一改就失效，函数名不会。
 #   新增文件 / 新增函数一律不在名单内 → 门禁对新代码仍然有效。
+# ★ D24（2026-10-02）：page_users.c 拆分为 rows/dlg 两文件，下列 5 个
+#   点击路径读 store 的函数整体搬入 page_users_dlg.c，白名单文件名同步跟进
+#   （函数与调用语义零改动，纯搬移）。
 legacy_case() {
     case "$1::$2" in
         # FSM 的状态迁移与 UI 必须在主线程，其 user_update / log_append 因此仍在
         # 主线程（含 submit_otp 路径）。与 FSM 状态迁移强耦合，A6 裁定本次不动。
         app/core/auth/auth_fsm.c::*)                    return 0 ;;
-        app/ui/pages/page_users.c::user_is_admin)       return 0 ;;  # 全表读判「是否有管理员」
-        app/ui/pages/page_users.c::face_btn_cb)         return 0 ;;  # 人脸按钮态需当拍拿到 face_id
-        app/ui/pages/page_users.c::face_start_cb)       return 0 ;;
-        app/ui/pages/page_users.c::page_users_retry_enroll) return 0 ;;
-        app/ui/pages/page_users.c::do_del_cb)           return 0 ;;  # 删除前取用户名写审计
+        app/ui/pages/page_users_dlg.c::user_is_admin)       return 0 ;;  # 全表读判「是否有管理员」
+        app/ui/pages/page_users_dlg.c::face_btn_cb)         return 0 ;;  # 人脸按钮态需当拍拿到 face_id
+        app/ui/pages/page_users_dlg.c::face_start_cb)       return 0 ;;
+        app/ui/pages/page_users_dlg.c::page_users_retry_enroll) return 0 ;;
+        app/ui/pages/page_users_dlg.c::do_del_cb)           return 0 ;;  # 删除前取用户名写审计
         app/ui/pages/page_settings.c::refresh_log_count)  return 0 ;; # 日志条数（创建/手动刷新时一次）
         app/ui/pages/page_monitor.c::count_today_events)  return 0 ;; # 今日事件计数（全量 log_query 后过滤）
         app/ui/ui_feedback.c::detect_text)                return 0 ;; # 按 face_id 反查用户名做提示

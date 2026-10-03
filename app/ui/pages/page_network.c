@@ -96,6 +96,9 @@ lv_obj_t * page_network_create(lv_obj_t * parent)
      * rebuild_all() 的一个 worker 作业重取；点击后列表先回到占位态给即时反馈。 */
     lv_obj_t * sp = lv_obj_create(head);
     lv_obj_set_flex_grow(sp, 1);
+    /* ★ D25：与 :121 avail 同一条铁律（grow 只管主轴），修 avail 时漏了这里。 */
+    lv_obj_set_height(sp, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(sp, 0, 0);
     lv_obj_set_style_bg_opa(sp, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(sp, 0, 0);
     lv_obj_set_scrollable(sp, false);
