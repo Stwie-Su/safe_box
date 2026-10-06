@@ -79,6 +79,14 @@ if(SAFE_BASH)
     add_test(NAME check_main_thread_store
              COMMAND ${SAFE_BASH} ${CMAKE_SOURCE_DIR}/tools/check_main_thread_store.sh
                      ${CMAKE_SOURCE_DIR})
+
+    # RPC 指令清单一致性：rpc.c::dispatch() 的 strcmp 分支 <-> rpc_guard 的
+    # 「已实现指令表」。同一事实散在两处，靠人记不住（D20 / D22b / D25 同源教训），
+    # 必须机械比对；其中「自带补码流程」那条漏登记的失败方向是**不安全**的
+    # （remote_unlock 本地弹码页 / sync_time 常规校时静默失效）。
+    add_test(NAME check_rpc_cmd_table
+             COMMAND ${SAFE_BASH} ${CMAKE_SOURCE_DIR}/tools/check_rpc_cmd_table.sh
+                     ${CMAKE_SOURCE_DIR})
 endif()
 
 # ---- Sanitizer 验证（**不默认开启**）----
