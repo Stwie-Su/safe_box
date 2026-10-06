@@ -489,35 +489,9 @@ static bool inject_hook_enabled(void)
     return rpc_env_flag_on(getenv("SAFE_ALLOW_INJECT"));
 }
 
-/* 已实现的指令清单：与 dispatch() 里的 strcmp 分支一一对应。
- * 为什么显式列一张表：入口的统一 OTP 门控要区分「未知指令」（回 1003 未知指令，
- * 保留诊断信息）与「已知但缺码」（回 2001 要求补码）。新增指令必须同时登记到
- * 这里 + rpc_guard 的 needs_otp 白名单 —— 漏登记的后果是被当未知指令拒掉，
- * 失败方向落在安全的一侧。 */
-static bool rpc_cmd_is_known(const char *c)
-{
-    static const char * const known[] = {
-        "query_status", "query_users", "remote_unlock", "add_user", "del_user",
-        "set_face_enable", "set_face_policy", "sync_time", "submit_otp", "inject_face",
-    };
-    if (c == NULL) return false;
-    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
-        if (strcmp(c, known[i]) == 0) return true;
-    }
-    return false;
-}
-
-/* 分支**自带补码流程**的指令：入口统一门控对它们让路，由分支按自己的语义承接。
- *   · remote_unlock：无码时不只是回 2001，还要置 g_local_otp_pending 让板子本地
- *     弹出动态码页（ADR-4）—— 在入口拦会把本地弹码页吃掉；
- *   · sync_time：要不要码取决于**时钟跳变幅度**（rpc_sync_time_gate，<=3600s 的
- *     常规校时本就不需要码）—— 在入口统一拦会让 NTP 校时直接失效。
- * 详见 dispatch() 里统一门控处的注释。 */
-static bool rpc_cmd_self_escalates_otp(const char *c)
-{
-    if (c == NULL) return false;
-    return strcmp(c, "remote_unlock") == 0 || strcmp(c, "sync_time") == 0;
-}
+/* 注：下面门控用到的三个判定（rpc_cmd_is_known / rpc_cmd_needs_otp /
+ * rpc_cmd_otp_self_escalating）都在 rpc_guard —— 与网络无关的纯字符串逻辑，
+ * 可零依赖单测，且与 OTP 白名单同一处可见（详见 rpc_guard.h）。 */
 
 static void dispatch(const char *payload)
 {
@@ -593,8 +567,9 @@ static void dispatch(const char *payload)
      * 而这两个分支此前根本不校验动态码；将来新增指令更容易漏掉分支里那一行，
      * 漏了就是「免检」—— 失败方向落在不安全的一侧。
      * 现在统一在这里判一次：已登记 && needs_otp && 未带码 → 回 2001 要求补码。
-     * 各分支原有的 rpc_otp_present() 保留（纵深防御，且改动零风险）。 */
-    if (rpc_cmd_is_known(c) && rpc_cmd_needs_otp(c) && !rpc_cmd_self_escalates_otp(c)) {
+     * 各分支原有的 rpc_otp_present() 保留（纵深防御，且改动零风险）。
+     * 未知指令（!is_known）不受本门控影响，继续走末尾的 1003 未知指令。 */
+    if (rpc_cmd_is_known(c) && rpc_cmd_needs_otp(c) && !rpc_cmd_otp_self_escalating(c)) {
         char otpbuf[32];
         if (!rpc_otp_present(root, otpbuf)) {
             ack(req_id, RPC_CODE_NEED_OTP, "需要动态码");

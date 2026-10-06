@@ -124,6 +124,37 @@ bool rpc_cmd_is_debug_hook(const char *cmd);
 bool rpc_cmd_needs_otp(const char *cmd);
 
 /**
+ * 是否为「已实现的指令」—— 即 rpc.c::dispatch() 里确有对应分支的指令。
+ *
+ * 为什么必须有这张表：入口的 OTP 统一门控要区分「未知指令」与「已知但缺码」。
+ * 未知指令必须回 1003 —— 规约（技术路线规约.md 错误码表）把 1003 明确定为
+ * 「未知指令」，若被 OTP 门控拦成 2001 就违反了对端可见的错误码约定。
+ *
+ * ★ 它是同一事实的**第二处表达**（另一处是 dispatch 里的 strcmp 分支），靠人
+ *   记不住。tools/check_rpc_cmd_table.sh 会把两处抽出来比对，不一致即 FAIL。
+ */
+bool rpc_cmd_is_known(const char *cmd);
+
+/**
+ * 是否「自带补码流程」—— 该指令的分支自己决定要不要动态码、怎么提示补码，
+ * 入口的统一 OTP 门控对它**让路**。
+ *
+ * 当前仅两条：
+ *   · remote_unlock —— 无码时不只是回 2001，还要置 g_local_otp_pending 让板子
+ *     本地弹出动态码页（ADR-4）；在入口拦会把本地弹码页吃掉；
+ *   · sync_time     —— 要不要码取决于**时钟跳变幅度**（rpc_sync_time_gate，
+ *     |Δ| <= 3600s 的常规校时本就不需要码）；在入口统一拦会让 NTP 校时直接失效。
+ *
+ * ★ 这是三份 OTP 相关判定里**唯一「漏登记即不安全」**的一份，故必须与
+ *   needs_otp 声明在同一处（改一个就该看见另一个），且必须可单测：
+ *   · 漏登记 needs_otp 豁免 → 新指令默认要码            → 安全侧
+ *   · 漏登记 is_known       → 新指令被当未知指令拒掉      → 安全侧
+ *   · 漏登记本表            → 上面两条指令被入口拦掉，
+ *                            ADR-4 本地弹码页与 NTP 校时**静默失效** → 不安全侧
+ */
+bool rpc_cmd_otp_self_escalating(const char *cmd);
+
+/**
  * sync_time 跳变门控（QA-03 第 2 层防御）。
  *
  *   target   请求要设的目标 Unix 秒（即 params.ts）

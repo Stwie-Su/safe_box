@@ -97,6 +97,38 @@ bool rpc_cmd_needs_otp(const char *cmd)
     return !rpc_cmd_otp_exempt(cmd);
 }
 
+/* 已实现指令清单。
+ * ★ 格式要求：**一行一个字符串** —— tools/check_rpc_cmd_table.sh 按行把本表
+ *   抽出来与 rpc.c::dispatch() 的 strcmp 分支比对；写成一行多个会漏抽。 */
+static const char * const s_known_cmds[] = {
+    "query_status",
+    "query_users",
+    "remote_unlock",
+    "add_user",
+    "del_user",
+    "set_face_enable",
+    "set_face_policy",
+    "sync_time",
+    "submit_otp",
+    "inject_face",
+};
+
+bool rpc_cmd_is_known(const char *cmd)
+{
+    if (cmd == NULL) return false;
+    for (size_t i = 0; i < sizeof(s_known_cmds) / sizeof(s_known_cmds[0]); i++) {
+        if (strcmp(cmd, s_known_cmds[i]) == 0) return true;
+    }
+    return false;   /* 未登记 = 未知指令：由 dispatch 回 1003，不在门控里吃掉 */
+}
+
+bool rpc_cmd_otp_self_escalating(const char *cmd)
+{
+    if (cmd == NULL) return false;
+    return strcmp(cmd, "remote_unlock") == 0
+        || strcmp(cmd, "sync_time")     == 0;
+}
+
 int rpc_sync_time_gate(int64_t target, int64_t now, bool has_otp, int64_t max_jump)
 {
     /* target <= 0：不是合法 Unix 秒（含「未提供 ts」）。时钟是信任根，
