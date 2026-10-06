@@ -16,6 +16,23 @@ echo "== 主线程直连 store 读写接口门禁 (QA-20 防回归) =="
 
 mapfile -t HITS < <(grep -rnE "$STORE_ACCESS" "${SCOPE[@]}" 2>/dev/null)
 
+# ---- GATE-EXEMPT 行内豁免：给一个**显式上限** ----
+# 行内 GATE-EXEMPT 的本意是「作者已确认该处属有意设计」，但它同时是一个
+# **可无限滥用的口子**：在任何 store 调用后面加一句注释就能绕过本门禁，
+# 且不需要经过任何人审查 —— 门禁对新代码实际上形同虚设。
+# 因此这里给它计数上限：当前全工程仅 rpc.c 一处（job 分配失败时的审计日志兜底）。
+# 新增豁免必须**同时上调 GATE_EXEMPT_MAX** —— 把「悄悄绕过」变成一次显式的、
+# 在 diff 里一眼可见的动作（改门禁脚本本身是要过 review 的）。
+GATE_EXEMPT_MAX=1
+mapfile -t EXEMPT_HITS < <(grep -rn 'GATE-EXEMPT' app 2>/dev/null)
+if [ "${#EXEMPT_HITS[@]}" -gt "$GATE_EXEMPT_MAX" ]; then
+    echo "  [违规] GATE-EXEMPT 行内豁免 ${#EXEMPT_HITS[@]} 处，超过上限 ${GATE_EXEMPT_MAX} 处："
+    printf '    %s\n' "${EXEMPT_HITS[@]}"
+    echo "== 门禁失败：GATE-EXEMPT 超额（新增豁免必须同步上调本脚本的 GATE_EXEMPT_MAX）=="
+    exit 1
+fi
+echo "  [OK] GATE-EXEMPT 行内豁免 ${#EXEMPT_HITS[@]} 处（上限 ${GATE_EXEMPT_MAX} 处）"
+
 if [ "${#HITS[@]}" -eq 0 ]; then
     echo "  [OK] 未检出任何直接调用"
     exit 0
