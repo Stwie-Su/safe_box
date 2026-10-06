@@ -489,6 +489,36 @@ static bool inject_hook_enabled(void)
     return rpc_env_flag_on(getenv("SAFE_ALLOW_INJECT"));
 }
 
+/* 已实现的指令清单：与 dispatch() 里的 strcmp 分支一一对应。
+ * 为什么显式列一张表：入口的统一 OTP 门控要区分「未知指令」（回 1003 未知指令，
+ * 保留诊断信息）与「已知但缺码」（回 2001 要求补码）。新增指令必须同时登记到
+ * 这里 + rpc_guard 的 needs_otp 白名单 —— 漏登记的后果是被当未知指令拒掉，
+ * 失败方向落在安全的一侧。 */
+static bool rpc_cmd_is_known(const char *c)
+{
+    static const char * const known[] = {
+        "query_status", "query_users", "remote_unlock", "add_user", "del_user",
+        "set_face_enable", "set_face_policy", "sync_time", "submit_otp", "inject_face",
+    };
+    if (c == NULL) return false;
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+        if (strcmp(c, known[i]) == 0) return true;
+    }
+    return false;
+}
+
+/* 分支**自带补码流程**的指令：入口统一门控对它们让路，由分支按自己的语义承接。
+ *   · remote_unlock：无码时不只是回 2001，还要置 g_local_otp_pending 让板子本地
+ *     弹出动态码页（ADR-4）—— 在入口拦会把本地弹码页吃掉；
+ *   · sync_time：要不要码取决于**时钟跳变幅度**（rpc_sync_time_gate，<=3600s 的
+ *     常规校时本就不需要码）—— 在入口统一拦会让 NTP 校时直接失效。
+ * 详见 dispatch() 里统一门控处的注释。 */
+static bool rpc_cmd_self_escalates_otp(const char *c)
+{
+    if (c == NULL) return false;
+    return strcmp(c, "remote_unlock") == 0 || strcmp(c, "sync_time") == 0;
+}
+
 static void dispatch(const char *payload)
 {
     cJSON *root = cJSON_Parse(payload);
@@ -556,6 +586,23 @@ static void dispatch(const char *payload)
         return;
     }
 
+    /* ---- 动态码统一门控：让 rpc_cmd_needs_otp 白名单成为**唯一真源** ----
+     * 此前 rpc_cmd_needs_otp() 定义了「哪些指令必须带管理员动态码」却**全工程零调用**，
+     * 真正的判定散落在下面各分支里硬编码的 rpc_otp_present()。两份真源可以漂移，
+     * 且**已经漂移**：needs_otp("query_users") / needs_otp("inject_face") 都是 true，
+     * 而这两个分支此前根本不校验动态码；将来新增指令更容易漏掉分支里那一行，
+     * 漏了就是「免检」—— 失败方向落在不安全的一侧。
+     * 现在统一在这里判一次：已登记 && needs_otp && 未带码 → 回 2001 要求补码。
+     * 各分支原有的 rpc_otp_present() 保留（纵深防御，且改动零风险）。 */
+    if (rpc_cmd_is_known(c) && rpc_cmd_needs_otp(c) && !rpc_cmd_self_escalates_otp(c)) {
+        char otpbuf[32];
+        if (!rpc_otp_present(root, otpbuf)) {
+            ack(req_id, RPC_CODE_NEED_OTP, "需要动态码");
+            cJSON_Delete(root);
+            return;
+        }
+    }
+
     /* ---- query_status：立即回状态（只读，主线程） ----
      * ★ QA-21：user_count 取 store_cache 快照，**不在主线程读盘**。 */
     if (strcmp(c, "query_status") == 0) {
@@ -571,7 +618,11 @@ static void dispatch(const char *payload)
      * 权限分级说明：本指令**无副作用**（重放无害），但不进 readonly 豁免名单 ——
      * 因为它的**返回内容**本身敏感（用户名枚举）。走敏感档意味着：
      * 配置了 MQTT 凭据时匿名/未鉴权通道一律 1006 拒绝，且必须带唯一 req_id。
-     * 宁可让轮询方每次换 req_id，也不给匿名连接枚举用户名的口子。 */
+     * 宁可让轮询方每次换 req_id，也不给匿名连接枚举用户名的口子。
+     * ★ 口径收敛（2026-10）：本指令此前**不校验动态码**，与 rpc_guard 的 needs_otp
+     *   白名单（只豁免 query_status / submit_otp，故 query_users 需要码）不一致。
+     *   现**以白名单为准**：入口的统一门控已对本指令要求动态码，本分支不再自行
+     *   决定要不要码。 */
     if (strcmp(c, "query_users") == 0) {
         rpc_job_t *j = calloc(1, sizeof(*j));
         if (!j) { ack(req_id, 1003, "internal"); cJSON_Delete(root); return; }
@@ -806,7 +857,10 @@ static void dispatch(const char *payload)
         return;
     }
 
-    /* ---- inject_face（调试钩子，取代旧 inject_score）---- */
+    /* ---- inject_face（调试钩子，取代旧 inject_score）----
+     * ★ 动态码：本指令能合成 FACE_RES_OK 走 do_unlock（伪造开锁结果），白名单判定
+     *   needs_otp("inject_face") == true，入口统一门控已强制要求管理员动态码；
+     *   此前本分支完全不校验 —— 只有 SAFE_ALLOW_INJECT + 鉴权连接两道门。 */
     if (strcmp(c, "inject_face") == 0) {
         cJSON *rs = params ? cJSON_GetObjectItem(params, "reason") : NULL;
         int fid = params && cJSON_GetObjectItem(params, "face_id") ? cJSON_GetObjectItem(params, "face_id")->valueint : -1;
