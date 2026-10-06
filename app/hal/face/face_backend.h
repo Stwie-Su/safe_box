@@ -83,7 +83,12 @@ typedef struct face_backend {
     safe_err_t (*inject)(int32_t face_id, face_reason_t reason);
 } face_backend_t;
 
-/* 各后端工厂：未编入构建时返回 NULL */
+/* 各后端工厂：未编入构建时返回 NULL。
+ * ★ fake 此前**只有定义没有声明**，且 backend_fake.c 漏编（见 app/hal/CMakeLists.txt），
+ *   于是 face_backend_fake() 全工程零引用、查找表里也补不了 fake ——
+ *   SAFE_FACE_BACKEND=fake 与 RPC inject_face 这条调试/验证通道形同虚设。
+ *   这里补齐声明（配合 CMakeLists 补编入）。 */
+const face_backend_t * face_backend_fake(void);
 const face_backend_t * face_backend_fm225(void);
 const face_backend_t * face_backend_none(void);
 

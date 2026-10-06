@@ -23,6 +23,11 @@
  * 注：tools/check_layers.sh 只校验 core（不碰 LVGL/平台头）与 hal 公共头洁净，未覆盖
  * hal->core 方向 —— 属门禁盲区（QA 发现 C3，待补检查）。 */
 #include "core/event_bus.h"
+/* find_backend(NULL) 的后端名单一来源（规约 §5.11）：app_config()->face_backend
+ * 已合并「环境变量 SAFE_FACE_BACKEND > 编译期默认 SAFE_FACE_BACKEND」，
+ * 因此传 NULL 时不必、也不许在查找表里猜一个默认出来。
+ * 与 event_bus.h 同为 hal->core 的已知分层例外（技术路线规约 §10 架构债）。 */
+#include "core/config.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -50,13 +55,25 @@ static const face_backend_t * find_backend(const char * name)
 {
     struct { const char * n; const face_backend_t * (*f)(void); } table[] = {
         { "fm225", face_backend_fm225 },
+        { "fake",  face_backend_fake  },
         { "none",  face_backend_none  },
     };
 
+    /* ★ name == NULL 时改用配置单一来源，绝不再退化成「取查找表首项」。
+     * 历史缺陷 D2：table[0] 即 fm225，于是 SAFE_FACE_BACKEND=none 的构建一旦
+     * 走到传 NULL 的路径，就**静默启用真人脸模组** —— 这是安全相关的反面默认，
+     * 规约 §5.11 明文禁止「取首项」。 */
+    if(name == NULL) {
+        name = app_config()->face_backend;
+        if(name == NULL) return NULL;     /* 配置缺失：交给调用方退化 none，不猜 */
+    }
+
     for(size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
         const face_backend_t * b = table[i].f();
-        if(b != NULL && (name == NULL || strcmp(name, b->name) == 0)) return b;
+        if(b != NULL && strcmp(name, b->name) == 0) return b;
     }
+    /* 未命中返回 NULL：由 face_service_init 统一退化 none（不让系统起不来），
+     * 本函数不做任何「看起来能用」的兜底。 */
     return NULL;
 }
 

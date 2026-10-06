@@ -24,8 +24,16 @@ safe_err_t hal_actuator_pulse(uint32_t ms)
     if(ms == 0) return SAFE_ERR_PARAM;
     if(ms > HAL_ACTUATOR_PULSE_MAX_MS) ms = HAL_ACTUATOR_PULSE_MAX_MS;   /* NFR-7 */
 
+    /* ★ 先执行、成功才置位。
+     * 旧写法是「先 s_high = true 再 pulse」：pulse 返回 SAFE_ERR_BUSY / SAFE_ERR_FAIL
+     * 时状态位不回滚，而 hal_actuator_state() 被 ui.c:144 与 page_monitor.c:500
+     * 直接当作「是否已开锁」展示 —— 于是一次**失败**的开锁会让界面永久停在
+     * 开锁态（真 bug，P0）。失败必须失败得干净：状态位只在后端确实拉高后置位。 */
+    safe_err_t e = s_backend->pulse(ms);
+    if(e != SAFE_OK) return e;
+
     s_high = true;
-    return s_backend->pulse(ms);
+    return SAFE_OK;
 }
 
 safe_err_t hal_actuator_release(void)
