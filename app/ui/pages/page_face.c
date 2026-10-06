@@ -7,7 +7,6 @@
  *   2) 画面区：**视频矩形**（不是满铺内容区）——画布尺寸 = 4:3 视频矩形，显示放大
  *      上限 1.3×（FACE_MAX_SCALE）。这是 T3 帧率优化的既有结论：满铺时每帧给留白
  *      刷底色会吃掉约 3.7× 帧率，v6 已把画布收缩到视频矩形，**本版不得回归**。
- *      · 四角扫描框 + 扫描光带：四态染色（青=待识别 / 绿=已匹配 / 红=未匹配或活体失败），
  *        颜色走 theme_color(TH_ACCENT / TH_OK / TH_DANGER)；
  *      · 右上角两个 FPS 角标（UI fps / 视频 fps），取实测值；
  *      · 无摄像头 / 后端降级：画面区显示「图标 + 一句话」占位，不留黑块。
@@ -76,7 +75,6 @@ static void rotate_frame(const uint16_t * src, uint16_t * dst,
 #define FACE_USERS_MS  2000
 
 /* ===== 静态对象句柄 ===== */
-static lv_obj_t * s_scan_beam;        // 顶部扫描光带
 static lv_obj_t * s_canvas;           // 预览画布（尺寸 = 视频矩形）
 static lv_obj_t * s_ph;               // 占位容器（图标 + 一句话；首帧后隐藏）
 static lv_obj_t * s_ph_icon;          // 占位图标
@@ -141,13 +139,10 @@ static bool     s_users_busy = false;     /* astore_load_users 在途标记 */
 /* 采集源临时缓冲（画布是显示缓冲，源是摄像头输出；大小固定 = 320×240×2 = 150KB） */
 static uint16_t s_cap_buf[CAP_W * CAP_H];
 
-/* 扫描动画状态 */
-static lv_anim_t s_beam_anim;
 
 /* ----- 私有声明 ----- */
 static lv_obj_t * mk_corner(lv_obj_t * parent, int32_t x, int32_t y,
                             int32_t w, int32_t h, lv_color_t color);
-static void beam_anim_xcb(void * obj, int32_t v);
 static void frame_timer_cb(lv_timer_t * t);
 static void preview_size_changed_cb(lv_event_t * e);
 static void rebuild_canvas(int32_t w, int32_t h);
@@ -175,7 +170,6 @@ static void verify_btn_cb(lv_event_t * e);
 
 /* ================================================================
  *  扫描框状态染色（UI 现代化 spec §3 后半）
- *  四角扫描框（8 段）+ 扫描光带统一按当前状态取主题色。
  * ================================================================ */
 
 /* 按当前状态把颜色刷到 8 个角 + 光带 */
@@ -185,7 +179,6 @@ static void scan_apply_color(void)
     for (int i = 0; i < CORNER_OBJ_COUNT; i++) {
         if (s_corners[i]) lv_obj_set_style_bg_color(s_corners[i], c, 0);
     }
-    if (s_scan_beam) lv_obj_set_style_bg_color(s_scan_beam, c, 0);
 }
 
 /* FAIL 态自动回 IDLE（一次性 timer 到点） */
@@ -476,18 +469,6 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     s_corners[6] = mk_corner(s_preview, init_w - pad - len, init_h - pad - thick, len, thick, theme_color(TH_ACCENT));
     s_corners[7] = mk_corner(s_preview, init_w - pad - thick, init_h - pad - len, thick, len, theme_color(TH_ACCENT));
 
-    /* 扫描光带（按父面板宽度初始放置） */
-    s_scan_beam = lv_obj_create(s_preview);
-    int32_t beam_w = init_w - 2 * pad - SX(80);
-    int32_t beam_h = SY(3);
-    lv_obj_set_size(s_scan_beam, beam_w, beam_h);
-    lv_obj_set_pos(s_scan_beam, pad + SX(40), pad);
-    lv_obj_set_style_bg_color(s_scan_beam, theme_color(TH_ACCENT), 0);
-    lv_obj_set_style_bg_opa(s_scan_beam, LV_OPA_70, 0);
-    lv_obj_set_style_radius(s_scan_beam, beam_h / 2, 0);
-    lv_obj_set_style_border_width(s_scan_beam, 0, 0);
-    lv_obj_set_style_outline_width(s_scan_beam, 0, 0);
-    lv_obj_set_scrollable(s_scan_beam, false);
 
     /* ---------- 底部行：状态文案（左）+ 录入/删除按钮（右） ---------- */
     lv_obj_t * foot = lv_obj_create(root);
@@ -506,16 +487,7 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
 
     /* 状态文案已移入头部行（视频放大些）；foot 容器无子项自然 0 高 */
 
-
-    /* ---------- 启动扫描动画 + 预览拉帧定时器 ---------- */
-    lv_anim_init(&s_beam_anim);
-    lv_anim_set_var(&s_beam_anim, s_scan_beam);
-    lv_anim_set_exec_cb(&s_beam_anim, beam_anim_xcb);
-    lv_anim_set_values(&s_beam_anim, pad, init_h - pad - beam_h);
-    lv_anim_set_time(&s_beam_anim, 1800);
-    lv_anim_set_playback_time(&s_beam_anim, 1800);
-    lv_anim_set_repeat_count(&s_beam_anim, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_start(&s_beam_anim);
+    /* ---------- 预览拉帧定时器（D28：原扫描光带动画已移除） ---------- */
 
     /* 注册 UI 渲染帧率统计：LV_EVENT_REFR_READY 每次渲染周期结束触发一次 */
     lv_display_add_event_cb(lv_display_get_default(), ui_refr_ready_cb,
@@ -676,7 +648,6 @@ static void rebuild_maps(void)
     }
 }
 
-/* 把四角扫描框 + 扫描光带重定位到当前**视频区**（s_vid_*，非整个面板）。 */
 static void reposition_corners_and_beam(int32_t w, int32_t h)
 {
     (void)w; (void)h;
@@ -707,15 +678,6 @@ static void reposition_corners_and_beam(int32_t w, int32_t h)
     lv_obj_set_pos(s_corners[7], x0 + vw - pad - thick, y0 + vh - pad - len);
     lv_obj_set_size(s_corners[7], thick, len);
 
-    /* 扫描光带：在视频区内左右留 2×pad 余量 */
-    int32_t beam_w = vw - 2 * pad;
-    int32_t beam_h = SY(3);
-    if (beam_w < SY(40)) beam_w = SY(40);
-    lv_obj_set_size(s_scan_beam, beam_w, beam_h);
-    lv_obj_set_pos(s_scan_beam, x0 + pad, y0 + pad);
-    lv_anim_set_values(&s_beam_anim, y0 + pad, y0 + vh - pad - beam_h);
-    lv_anim_set_playback_time(&s_beam_anim, 1800);
-    lv_anim_set_time(&s_beam_anim, 1800);
 
     /* 占位重新居中（panel 缩放后位置失效） */
     if (s_ph) lv_obj_center(s_ph);
@@ -877,12 +839,6 @@ static void frame_timer_cb(lv_timer_t * t)
 
     /* 无论有无新帧，都按窗口推进 FPS 标签（UI fps 需要持续更新） */
     fps_label_update_if_due();
-}
-
-/* 扫描动画 y 坐标更新 */
-static void beam_anim_xcb(void * obj, int32_t v)
-{
-    lv_obj_set_y((lv_obj_t *)obj, v);
 }
 
 /* ================================================================
