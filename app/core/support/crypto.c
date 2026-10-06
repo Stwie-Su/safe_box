@@ -73,7 +73,15 @@ static void pbkdf2(const uint8_t *pw, size_t pwlen,
                    const uint8_t *salt, size_t saltlen,
                    uint32_t iter, uint8_t *dk, size_t dklen)
 {
-    uint8_t saltblk[16 + 4];                 /* salt || 32-bit block index(=1) */
+    /* ★ 入参钳制（原写法先 memcpy(saltblk, salt, saltlen) 再写 saltblk[saltlen+3]）：
+     *   · saltlen > 16 → saltblk[saltlen+3] 越界写，覆盖栈上相邻对象；
+     *   · saltlen > 20 → memcpy 本身就已越界。
+     *   现所有调用点都传 CRYPTO_SALTLEN(16)（store.c 的 PIN 盐、本文件的 derive_keys），
+     *   钳制不改变任何既有行为；它的作用是让**将来**新增的长 salt 调用点不会静默
+     *   变成栈溢出 —— 宁可只取前 16 字节，也不写坏栈。
+     *   块索引要占 saltblk[16..19]，故上界是 CRYPTO_SALTLEN（16）而不是 20。 */
+    uint8_t saltblk[CRYPTO_SALTLEN + 4];     /* salt || 32-bit block index(=1) */
+    if (saltlen > CRYPTO_SALTLEN) saltlen = CRYPTO_SALTLEN;
     size_t sb_len = saltlen + 4;
     if (sb_len > sizeof(saltblk)) sb_len = sizeof(saltblk);
     memcpy(saltblk, salt, saltlen);
@@ -168,6 +176,11 @@ size_t crypto_encrypt(const char *plain, uint8_t *out, size_t out_cap)
 /* ----------------------------- 解密 ------------------------------ */
 bool crypto_decrypt(const uint8_t *in, size_t in_len, char *out, size_t out_cap)
 {
+    /* ★ NULL 必须先于任何解引用：in_len >= header 时下面会 memcmp(in, "SFP1", 4)、
+     * 并在 HMAC 段 memcpy(macdata + CRYPTO_IVLEN, ct, ct_len) —— in 为 NULL 即崩；
+     * out 为 NULL 同理（末尾 memcpy(out, plain, plen)）。 */
+    if (in == NULL || out == NULL) return false;
+
     const size_t header = 4 + CRYPTO_IVLEN + CRYPTO_SALTLEN + CRYPTO_MACLEN;
     if (in_len < header) return false;
     if (memcmp(in, "SFP1", 4) != 0) return false;
@@ -178,6 +191,12 @@ bool crypto_decrypt(const uint8_t *in, size_t in_len, char *out, size_t out_cap)
     const uint8_t *ct   = in + header;
     size_t ct_len = in_len - header;
     if (ct_len == 0 || ct_len % CRYPTO_BLOCKLEN != 0) return false;
+    /* ★ 上界校验（原来只查了 16 字节对齐，没查上界）：
+     * 下游的 macdata / pt / plain 都是 CRYPTO_PLAIN_MAX + CRYPTO_BLOCKLEN(=80) 字节的
+     * 栈数组，ct_len 超过它就会越界写栈。当前唯一调用点（store.c 的 net_get_psk）
+     * 只是**侥幸**被 CRYPTO_BLOB_MAX(160) 的入参上界兜住 —— 换任何一个 in_len 更大的
+     * 调用点，这里立刻变成栈溢出。合法密文恒 <= 80（明文上限 64 + 一个填充块）。 */
+    if (ct_len > CRYPTO_PLAIN_MAX + CRYPTO_BLOCKLEN) return false;
 
     uint8_t enc_key[CRYPTO_KEYLEN], mac_key[CRYPTO_KEYLEN];
     derive_keys(salt, enc_key, mac_key);
