@@ -57,6 +57,14 @@ safe_add_test(test_net_parse)
 # OTA 状态契约（D19 回归）：追加式/重写式取最后匹配、截断、CRLF 等
 safe_add_test(test_ota_status)
 
+# QA 补缺（2026-10-06 验收核对）：三个此前零覆盖的模块。
+# rpc_guard 的「提权」子集：needs_otp 白名单 + sync_time 时钟跳变门控。纯逻辑。
+safe_add_test(test_rpc_escalation)
+# worker：后台单线程执行 / 主线程派发 done / shutdown 不丢作业 的线程契约。
+safe_add_test(test_worker)
+# 密码学原语：SHA-1 / HMAC-SHA1（RFC 3174 / RFC 2202 向量）+ PBKDF2 向量 + 认证加密层。
+safe_add_test(test_crypto)
+
 # 分层检查：core 不碰 LVGL/平台头，hal 头文件不带平台实现，ui 不碰底层协议
 find_program(SAFE_BASH bash)
 if(SAFE_BASH)
