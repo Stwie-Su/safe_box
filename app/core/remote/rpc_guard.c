@@ -98,8 +98,15 @@ bool rpc_cmd_needs_otp(const char *cmd)
 }
 
 /* 已实现指令清单。
- * ★ 格式要求：**一行一个字符串** —— tools/check_rpc_cmd_table.sh 按行把本表
- *   抽出来与 rpc.c::dispatch() 的 strcmp 分支比对；写成一行多个会漏抽。 */
+ * ★ 与 tools/check_rpc_cmd_table.sh 的抽取约定：脚本从本表起始行扫到 `};`，
+ *   取其中的引号字符串与 rpc.c::dispatch() 的 strcmp 分支比对。抽取**与一行放
+ *   几个、表有多少条无关**（一行放多个照样抽得到），真正的约束只有两条：
+ *   ① 表以 `};` 收尾；② 指令名字符集 [A-Za-z0-9_]（否则两侧都抽不到 →
+ *   门禁假绿）。别把本表改成用别的结构收尾。
+ * ★ 别为了「少一处重复」把本表删掉：规约（技术路线规约.md 错误码表）把 1003
+ *   定为「未知指令」。没有本表就区分不了「未知指令」与「已知但缺码」，未知指令
+ *   会被入口的 OTP 门控拦成 2001 —— 违反对端可见的错误码约定。
+ *   正确取舍是「保留 + 机械同步」（tools/check_rpc_cmd_table.sh），不是删表。 */
 static const char * const s_known_cmds[] = {
     "query_status",
     "query_users",
