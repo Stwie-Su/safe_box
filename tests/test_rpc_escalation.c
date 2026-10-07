@@ -138,6 +138,7 @@ int main(void)
         static const char * const known[] = {
             "query_status", "query_users", "remote_unlock", "add_user", "del_user",
             "set_face_enable", "set_face_policy", "sync_time", "submit_otp", "inject_face",
+            "ota_update",
         };
         for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
             CHECK(rpc_cmd_is_known(known[i]) == true);
@@ -183,6 +184,7 @@ int main(void)
         CHECK(rpc_cmd_otp_self_escalating("set_face_policy") == false);
         CHECK(rpc_cmd_otp_self_escalating("submit_otp")      == false);
         CHECK(rpc_cmd_otp_self_escalating("inject_face")     == false);
+        CHECK(rpc_cmd_otp_self_escalating("ota_update")      == false);
 
         /* NULL / 空 / 大小写 / 前后缀 */
         CHECK(rpc_cmd_otp_self_escalating(NULL)              == false);

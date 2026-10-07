@@ -193,7 +193,8 @@ typedef enum {
     JOB_REMOTE_UNLOCK,
     JOB_INJECT_FACE_LOG,
     JOB_SET_TIME,           /* QA-03：sync_time —— 校时 + 审计日志都在 worker 段 */
-    JOB_QUERY_USERS         /* P7：只读用户清单 —— 读盘在 ② worker，主线程零阻塞 */
+    JOB_QUERY_USERS,        /* P7：只读用户清单 —— 读盘在 ② worker，主线程零阻塞 */
+    JOB_OTA_UPDATE          /* FR-29：远程固件升级（check + apply 都在 worker） */
 } rpc_job_kind_t;
 
 /* query_users 响应缓冲：**必须 ≤ 上行 PAYLOAD_MAX(512)**，否则 cmdq_push 的
@@ -223,6 +224,8 @@ typedef struct {
     bool    unlock_ok;   /* ② 写（JOB_REMOTE_UNLOCK），③ 读 */
     int64_t target_ts;   /* JOB_SET_TIME：目标 Unix 秒 */
     char    inj_detail[96];  /* JOB_INJECT_FACE_LOG */
+    char    ota_url[128];    /* JOB_OTA_UPDATE：可选，缺省取 env SAFE_OTA_URL */
+    bool    ota_dry;         /* JOB_OTA_UPDATE：true=只检查不安装 */
 
     int     q_offset;           /* JOB_QUERY_USERS：起始下标（分页游标，按值拷入） */
     char    q_buf[RPC_Q_USERS_BUF]; /* ② 拼好的完整响应（含信封），③ 原样上行 */
@@ -350,7 +353,28 @@ static void rpc_job_fn(void *arg)
         j->code = 0; snprintf(j->msg, sizeof(j->msg), "ok");
         break;
     }
-    case JOB_INJECT_FACE_LOG: {
+        case JOB_OTA_UPDATE: {
+        /* ★ 全是秒级阻塞操作（wget / sha256 / HMAC / tar），必须在 worker ——
+         *   放主线程会直接卡死 20ms 泵（单拍预算防不住单条指令内部的耗时）。
+         * ★ dry_run 只跑 ota_check.sh（拉 manifest 写状态文件），不安装。
+         * ★ 安装成功末尾会重启本进程，故此处之后的代码不保证执行；
+         *   回执已在 dispatch 阶段发出，done 不再 ack（见 dispatch 注释）。 */
+        const char * url = j->ota_url[0] ? j->ota_url
+                         : (getenv("SAFE_OTA_URL") ? getenv("SAFE_OTA_URL")
+                                                   : "http://192.168.150.139:8080");
+        char cmd[384];
+        snprintf(cmd, sizeof(cmd),
+                 "sh /usr/share/lvgl/ota_check.sh '%s' '%s' >/dev/null 2>&1",
+                 url, SAFE_VERSION_STRING);
+        /* 失败细节由状态文件承载（STATE=ERR_NET / ERR_ARGS），这里不重复上报 */
+        int rc1 = system(cmd); (void)rc1;
+        if (!j->ota_dry) {
+            snprintf(cmd, sizeof(cmd), "sh /usr/share/lvgl/ota_apply.sh >/dev/null 2>&1");
+            int rc2 = system(cmd); (void)rc2;
+        }
+        break;
+    }
+case JOB_INJECT_FACE_LOG: {
         log_append("inject_face", "remote", 1, j->inj_detail);
         break;
     }
@@ -447,7 +471,9 @@ static void rpc_job_done(void *arg)
         if (j->unlock_ok) auth_fsm_note_unlock("admin");
         ack(j->req_id, j->code, j->msg);
         break;
-    case JOB_INJECT_FACE_LOG:
+    case JOB_OTA_UPDATE:
+        break;  /* 回执已在 dispatch 发出（apply 会重启进程，done 不保证执行） */
+case JOB_INJECT_FACE_LOG:
         break;  /* 仅写盘，无主线程副作用 */
     case JOB_SET_TIME:
         ack(j->req_id, j->code, j->msg);
@@ -862,6 +888,33 @@ static void dispatch(const char *payload)
                                                     * 正常路径的写盘都在 rpc_job_fn（worker 线程） */
         }
         ack(req_id, 0, "injected");
+        cJSON_Delete(root);
+        return;
+    }
+
+    /* ---- ota_update：远程固件升级（FR-29 第一期：远程通道侧的接收/校验/落盘） ----
+     * 参数：url（可选，缺省取 env SAFE_OTA_URL）、dry_run（可选，true=只检查不安装）。
+     *
+     * ★ 为什么**在主线程先 ack**再投 worker：ota_apply.sh 安装成功后末尾会
+     *   killall 并重启本进程 —— worker 的 done 回调可能永远不执行，对端将
+     *   收不到任何回执。故这里立即回 "ota started"；升级结果由状态文件
+     *   （/var/ota/status）与重启后的版本上报来观察，而不是靠这条回执。
+     * ★ 安全：属接管级操作，需管理员动态码 —— 本指令不在 otp_exempt 名单内，
+     *   因此 needs_otp 为真，入口统一门控已强制校验，本分支无需重复判码。
+     * ★ 升级全程本地开锁 / 认证 / 日志不受影响（NFR-1）：下载与校验都在 worker，
+     *   只有末尾替换 + 重启会短暂中断 UI。 */
+    if (strcmp(c, "ota_update") == 0) {
+        cJSON *u = params ? cJSON_GetObjectItem(params, "url")     : NULL;
+        cJSON *d = params ? cJSON_GetObjectItem(params, "dry_run") : NULL;
+        rpc_job_t *j = calloc(1, sizeof(*j));
+        if (!j) { ack(req_id, 1003, "内存不足，未启动升级"); cJSON_Delete(root); return; }
+        j->kind = JOB_OTA_UPDATE;
+        strncpy(j->req_id, req_id, sizeof(j->req_id) - 1);
+        if (cJSON_IsString(u) && u->valuestring)
+            strncpy(j->ota_url, u->valuestring, sizeof(j->ota_url) - 1);
+        j->ota_dry = (d != NULL && cJSON_IsTrue(d));
+        ack(req_id, 0, j->ota_dry ? "ota check started" : "ota started");
+        worker_post(rpc_job_fn, j, rpc_job_done);
         cJSON_Delete(root);
         return;
     }

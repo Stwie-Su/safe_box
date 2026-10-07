@@ -118,6 +118,7 @@ static const char * const s_known_cmds[] = {
     "sync_time",
     "submit_otp",
     "inject_face",
+    "ota_update",   /* FR-29：远程固件升级 */
 };
 
 bool rpc_cmd_is_known(const char *cmd)
