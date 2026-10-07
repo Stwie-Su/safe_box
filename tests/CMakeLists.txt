@@ -87,6 +87,14 @@ if(SAFE_BASH)
     add_test(NAME check_rpc_cmd_table
              COMMAND ${SAFE_BASH} ${CMAKE_SOURCE_DIR}/tools/check_rpc_cmd_table.sh
                      ${CMAKE_SOURCE_DIR})
+
+    # 无头端到端（FR-11/FR-12）：起临时 broker + PC 应用，验「连上 → 下发指令 →
+    # 回执关联 → kill -9 后 LWT」这条最小闭环。这是 §10 里唯一一条此前没有
+    # 自动化载体的验收项（判据只在 R9 文档里，未脚本化）。
+    # 用明文 11883：本用例验的是通道闭环，不是加密（加密由 FR-25 实机验收负责）。
+    add_test(NAME e2e_headless
+             COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/e2e_headless.py --app $<TARGET_FILE:lvglsim>)
+    set_tests_properties(e2e_headless PROPERTIES TIMEOUT 180)
 endif()
 
 # ---- Sanitizer 验证（**不默认开启**）----
