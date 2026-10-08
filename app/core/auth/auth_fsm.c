@@ -16,22 +16,30 @@
  *     - 同时每用户记录 failed_attempts / lock_until（ADR-3，供 PIN 通道单独锁定）。
  *  4) 时间一律走 hal_time()，阶段 5 切 RTC 无需改动此处。
  *
+ * ★ 5) 认证路径零同步落盘（技术路线规约 §3.1，2026-10-07 落地）：
+ *     - **读**：用户表一律走 store_cache 只读快照，不调 user_find_by_*（那会读盘）；
+ *     - **写**：users.json 的改动一律经 worker（astore_auth_side），safe.log 经
+ *       astore_append_log。本文件不再出现任何同步文件 IO。
+ *     唯一的例外是 hal_actuator_pulse()——物理开锁必须当拍执行，不能等落盘。
+ *
  * 状态超时：
  *   DETECTING face_verify_timeout_s（策略，默认 10s）/ WAIT_OTP 60s /
  *   UNLOCKED 30s / DENY 2s / LOCKOUT lock_seconds。
  */
 #include "core/auth/auth_fsm.h"
 #include "core/event_bus.h"
-#include "core/store/store.h"
+#include "core/store/store.h"                 /* 仅 user_policy()（策略已加锁快照，不读盘） */
+#include "core/store/store_cache.h"           /* 只读用户快照：主线程查用户的唯一合法通道 */
 #include "core/auth/totp.h"
 #include "core/auth/unlock_backend.h"
-#include "core/support/worker.h"        /* worker_post：PIN 后台校验（v1.9 异步化 + 世代号） */
+#include "core/support/worker.h"             /* worker_post：PIN / OTP 后台校验 */
+#include "core/support/async_store.h"         /* astore_auth_side / astore_append_log */
 #include "hal/hal_time.h"
 #include "hal/hal_face.h"
 #include "hal/hal_actuator.h"
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>   /* calloc/free：PIN 作业对象 */
+#include <stdlib.h>   /* calloc/free：PIN / OTP 作业对象 */
 #include <time.h>
 
 /* ---------------- 内部状态 ---------------- */
@@ -107,7 +115,7 @@ static void handle_face_result(int32_t face_id, face_reason_t reason, const char
     else if(s_fsm.state == FSM_WAIT_OTP) {
         if(reason == FACE_RES_OK) {
             safe_user_t u;
-            if(face_id >= 0 && user_find_by_face(face_id, &u) == 0) {
+            if(face_id >= 0 && store_cache_find_by_face(face_id, &u) == 0) {
                 /* FR-21 防线 1 同样适用于「等待动态码期间的刷脸放行」这条路 */
                 if(!cred_name_ok(&u, mod_name)) {
                     s_fsm.pending_user[0] = '\0';
@@ -125,7 +133,7 @@ static void handle_face_result(int32_t face_id, face_reason_t reason, const char
         }
         else if(reason == FACE_RES_LIVENESS_FAIL) {
             /* 防伪告警（FR-10）：拒绝并退出等待 */
-            log_append("ALARM", "-", 0, "活体检测失败（防伪）");
+            astore_append_log("ALARM", "-", 0, "活体检测失败（防伪）");
             emit_event("ALARM", "-", "liveness fail", 0);
             if(!bump_fail_streak(NULL, "活体检测失败"))
                 set_state(FSM_DENY, NULL, "活体检测失败");
@@ -170,33 +178,30 @@ static void emit_event(const char *evt, const char *user, const char *detail, in
 }
 
 /* 设备级失败计数 + 锁定判定；user 为失败归属（可为 NULL）。
- * 返回 true 表示已达 max_failed 并进入 LOCKOUT（调用方不应再改状态）。 */
+ * 返回 true 表示已达 max_failed 并进入 LOCKOUT（调用方不应再改状态）。
+ *
+ * ★ 为什么「设备级计数」留在内存、只有「每用户计数」下沉 worker：
+ *   设备级 fail_streak 是**纯内存状态**，不落盘——它必须当拍生效，否则
+ *   LOCKOUT 的 UI 迁移就会晚一帧，而这正是防暴力的即时性所在。
+ *   每用户 failed_attempts / lock_until 要落盘，且是「读→改→写」三步，
+ *   必须整段交给 worker（主线程基于快照做加减会丢失更新，见 async_store.h）。
+ *   worker 单线程 FIFO 保证：本次落盘完成后，后续 PIN 校验作业才会读到新值。 */
 static bool bump_fail_streak(const char *user, const char *detail)
 {
     const safe_policy_t *p = user_policy();
     s_fsm.fail_streak++;
 
-    /* 每用户计数（用于 PIN 通道单独锁定 / 审计） */
-    if (user && *user) {
-        safe_user_t u;
-        if (user_find_by_name(user, &u) == 0) {
-            u.failed_attempts++;
-            if (u.failed_attempts >= p->max_failed) {
-                u.lock_until = (int64_t)hal_time() + p->lock_seconds;
-                u.failed_attempts = 0;
-            }
-            user_update(&u);
-        }
-    }
+    /* 每用户计数（用于 PIN 通道单独锁定 / 审计）→ 读改写下沉 worker */
+    if (user && *user) astore_auth_side(AUTH_SIDE_FAIL_BUMP, user, NULL, NULL);
 
-    log_append("DENY", user ? user : "-", 0, detail ? detail : "");
+    astore_append_log("DENY", user ? user : "-", 0, detail ? detail : "");
     emit_event("DENY", user, detail, 0);
 
     if (s_fsm.fail_streak >= p->max_failed) {
         s_fsm.fail_streak = 0;
         char buf[48];
         snprintf(buf, sizeof(buf), "连续 %d 次失败，锁定 %ds", p->max_failed, p->lock_seconds);
-        log_append("LOCKOUT", "-", 0, buf);
+        astore_append_log("LOCKOUT", "-", 0, buf);
         emit_event("LOCKOUT", "-", buf, 0);
         set_state(FSM_LOCKOUT, NULL, buf);
         return true;
@@ -210,39 +215,32 @@ static void note_fail(const char *user, const char *detail)
         set_state(FSM_DENY, user, detail);
 }
 
+/* 级联删除类作业的完成回调（主线程）：唯一要补做的是「通知 face 线程删模组模板」。
+ * 那是异步投递（不落盘、不阻塞），且必须在主线程——face_service_delete_async 会走
+ * 模组命令队列。result / removed 只影响审计文案，而审计已由 worker 侧写好了。 */
+static void revoke_done(int result, int32_t face_id_rm, bool removed)
+{
+    (void)result; (void)removed;
+    if (face_id_rm >= 0) face_service_delete_async(face_id_rm);
+}
+
 static void do_unlock(const char *user, const char *via)
 {
     safe_user_t u;
-    if (user_find_by_name(user, &u) != 0) { note_fail(user, "用户不存在"); return; }
+    if (store_cache_find_by_name(user, &u) != 0) { note_fail(user, "用户不存在"); return; }
 
     hal_actuator_pulse(500);   /* NFR-7：硬性 500ms 上限，截断在实现里 */
 
     char detail[64];
     snprintf(detail, sizeof(detail), "via=%s", via ? via : "?");
-    log_append("UNLOCK", user, 1, detail);
+    astore_append_log("UNLOCK", user, 1, detail);
     emit_event("UNLOCK", user, detail, 1);
 
-    /* 临时用户次数计数；用完即删（FR-9 v1.6：直接删除用户，保留审计日志） */
-    if (strcmp(u.role, "temp") == 0 && u.use_limit > 0) {
-        u.used_count++;
-        if (u.used_count >= u.use_limit) {
-            {   /* 级联删除模组模板（含 uid 归属核验，见 user_del_cascade） */
-                int32_t fid_rm = -1;
-                user_del_cascade(u.id, &fid_rm);
-                if (fid_rm >= 0) face_service_delete_async(fid_rm);
-            }
-            log_append("ALARM", user, 1, "临时授权次数已用尽，用户已删除");
-            emit_event("ALARM", user, "temp used up, deleted", 1);
-        } else {
-            u.failed_attempts = 0;
-            u.lock_until = 0;
-            user_update(&u);
-        }
-    } else {
-        u.failed_attempts = 0;
-        u.lock_until = 0;
-        user_update(&u);
-    }
+    /* 用户表副作用下沉 worker（FR-9 临时用户计数 / 用尽即删 + 成功清零计数）。
+     * 「次数用尽已删除」的审计日志由 worker 在真正删除后补记 —— 主线程此刻
+     * 只知道快照里的 used_count，不能替 worker 下结论。 */
+    astore_auth_side(AUTH_SIDE_UNLOCK_TOUCH, user,
+                     "临时授权次数已用尽，用户已删除", revoke_done);
 
     s_fsm.fail_streak = 0;
     set_state(FSM_UNLOCKED, user, detail);
@@ -270,7 +268,7 @@ static void face_no_match(safe_user_t *user)
 /* 活体失败：拒绝 + 防伪告警（FR-19 / FR-10） */
 static void liveness_fail(safe_user_t *user)
 {
-    log_append("ALARM", user ? user->name : "-", 0, "活体检测失败（防伪）");
+    astore_append_log("ALARM", user ? user->name : "-", 0, "活体检测失败（防伪）");
     emit_event("ALARM", user ? user->name : "-", "liveness fail", 0);
     if (!bump_fail_streak(user ? user->name : NULL, "活体检测失败"))
         set_state(FSM_DENY, user ? user->name : NULL, "活体检测失败");
@@ -289,15 +287,13 @@ static bool cred_name_ok(const safe_user_t * u, const char * mod_name)
 
     char detail[64];
     snprintf(detail, sizeof(detail), "模组名[%s]≠本地名[%s]", mod_name, u->name);
-    log_append("ALARM", u->name, 0, detail);
+    astore_append_log("ALARM", u->name, 0, detail);
     emit_event("ALARM", u->name, "credential mismatch", 0);
 
-    safe_user_t upd;
-    if(user_find_by_name(u->name, &upd) == 0 && upd.face_enable) {
-        upd.face_enable = false;            /* 本地人脸凭据标记失效（FR-21） */
-        user_update(&upd);
-        log_append("ALARM", u->name, 0, "人脸凭据已标记失效，请管理员重新录入");
-    }
+    /* 本地人脸凭据标记失效（FR-21）。下沉 worker：它在 worker 内判断
+     * face_enable 是否仍为真（幂等，已失效就不写盘），并在真正改写后
+     * 补记「已标记失效」审计 —— 主线程不该替它下这个结论。 */
+    astore_auth_side(AUTH_SIDE_FACE_INVALIDATE, u->name, NULL, NULL);
     return false;
 }
 
@@ -305,7 +301,7 @@ static bool cred_name_ok(const safe_user_t * u, const char * mod_name)
 static void resolve(int32_t face_id, face_reason_t reason, safe_user_t *user,
                     const char * mod_name)
 {
-    (void)face_id;   /* 命中用户已由 user_find_by_face 解析，此处仅保留接口以备审计 */
+    (void)face_id;   /* 命中用户已由调用方按模板号在只读快照里解析，此处仅保留接口以备审计 */
 
     if (!user) {
         /* 模组报 OK 却找不到用户：数据不一致，按陌生人处理 */
@@ -332,12 +328,10 @@ static void resolve(int32_t face_id, face_reason_t reason, safe_user_t *user,
             char why[64];
             snprintf(why, sizeof(why), "临时授权%s，用户已删除",
                      expired ? "已过期" : "次数已用尽");
-            {   /* 级联删除模组模板（含 uid 归属核验，见 user_del_cascade） */
-                int32_t fid_rm = -1;
-                user_del_cascade(user->id, &fid_rm);
-                if (fid_rm >= 0) face_service_delete_async(fid_rm);
-            }
-            log_append("ALARM", user->name, 1, why);
+            /* 级联删除下沉 worker（含 uid 归属核验，见 user_del_cascade）；
+             * 审计文案 why 随作业带过去，由 worker 在真正删除后落盘，
+             * 主线程 done 回调只补「通知 face 线程删模组模板」。 */
+            astore_auth_side(AUTH_SIDE_TEMP_REVOKE, user->name, why, revoke_done);
             emit_event("ALARM", user->name, why, 1);
             return;   /* 授权失效不是暴力尝试，不计设备级失败 */
         }
@@ -371,7 +365,10 @@ void auth_fsm_submit_face_ex(int32_t face_id, face_reason_t reason, const char *
 
     s_fsm.last_reason = reason;
     safe_user_t u;
-    safe_user_t *pu = (face_id >= 0 && user_find_by_face(face_id, &u) == 0) ? &u : NULL;
+    /* 查用户走只读快照：主线程不读盘。快照是「上一次落盘后的状态」，
+     * 用于判「这张脸是谁 / 该用户是否启用 / 通道是否开」——这些不因一帧滞后
+     * 而改变安全结论（真正决定锁定的计数读写已整体下沉 worker）。 */
+    safe_user_t *pu = (face_id >= 0 && store_cache_find_by_face(face_id, &u) == 0) ? &u : NULL;
     /* mod_name 直接穿透给 resolve（本函数在主线程被 event_bus_pump 调用，无并发问题） */
     resolve(face_id, reason, pu, mod_name);
 }
@@ -445,41 +442,92 @@ void auth_fsm_submit_pin(const char *pin)
     worker_post(pin_worker, a, pin_done);
 }
 
+/* ---------------- 动态码（OTP）后台校验（2026-10-07） ----------------
+ * 与 PIN 通道同构：判定下沉 worker，回调带世代号。
+ *
+ * 为什么 OTP 也要下沉：backend_verify_totp 内部会 user_find_by_name + user_update
+ * （回写 last_otp_counter 防重放计数器、累加失败计数）——那是同步读盘 + 整表写盘，
+ * 直接违反规约 §3.1。更要紧的是「读 last_otp_counter → 判重放 → 写回」本身就是
+ * 读改写：拆到两个线程做，同一个码就有机会被用两次。
+ *
+ * ★ 与 PIN 通道刻意不同的两点：
+ *   1) **不新增 FSM 状态**：校验期间仍停在 WAIT_OTP（UI 无需改版），靠世代号
+ *      区分新旧作业；
+ *   2) **不做单飞**：每次提交都自增世代号并覆盖 s_otp_active，最后一次提交生效。
+ *      单飞要求「离开 WAIT_OTP 的每一条路径都复位标志」才不会卡死
+ *      （tick 超时 / 手动取消 / WAIT_OTP 期间刷脸放行……）太散、太易漏；
+ *      世代号覆盖天然不会卡死，且 FIFO 下旧作业先派发、被丢弃，无副作用。
+ *   pending_user 改在回调里清空——提交后还要拿它给 UI 显示、给 note_fail 记名。 */
+typedef struct {
+    uint32_t gen;
+    char     pending[32];   /* 空串 = 身份未定（走 backend_verify_totp_any） */
+    char     code[16];
+    auth_result_t result;
+    char     user[32];      /* 命中的用户名（AUTH_OK 时有效） */
+} otp_job_t;
+
+static uint32_t s_otp_gen    = 0;   /* 提交计数（世代号发生器） */
+static uint32_t s_otp_active = 0;   /* 当前在途作业的世代号；0 = 无 */
+
+/* 后台线程：TOTP 校验（HMAC-SHA1 + 防重放计数器回写 + 失败计数）。绝不触碰 UI。 */
+static void otp_worker(void * p)
+{
+    otp_job_t * a = (otp_job_t *)p;
+    a->user[0] = '\0';
+    if (a->pending[0]) {
+        a->result = backend_verify_totp(a->pending, a->code);
+        if (a->result == AUTH_OK) {
+            strncpy(a->user, a->pending, sizeof(a->user) - 1);
+            a->user[sizeof(a->user) - 1] = '\0';
+        }
+    } else {
+        /* 身份未定：在「任一启用 + TOTP 开启 + 未锁定 + 授权有效」的用户上校验 */
+        a->result = backend_verify_totp_any(a->code, a->user, sizeof(a->user));
+    }
+}
+
+/* 主线程（worker_poll 派发）：双判据同 pin_done —— 世代号挡住「被覆盖的旧作业」，
+ * 状态挡住「其它通道已推进后到达的结果」。任一不符即丢弃，绝不误开锁 / 误计失败。 */
+static void otp_done(void * p)
+{
+    otp_job_t * a = (otp_job_t *)p;
+    const char * who = a->pending[0] ? a->pending : NULL;
+
+    if (a->gen == s_otp_active && s_fsm.state == FSM_WAIT_OTP) {
+        s_otp_active = 0;
+        s_fsm.pending_user[0] = '\0';
+        switch (a->result) {
+        case AUTH_OK:
+            s_fsm.last_reason = FACE_RES_ERROR;   /* 本次开锁与人脸无关 */
+            do_unlock(a->user, "otp");
+            break;
+        case AUTH_REPLAY:       note_fail(who, "动态码已使用");       break;
+        case AUTH_LOCKED:       note_fail(who, "用户已锁定");         break;
+        case AUTH_DISABLED:     note_fail(who, "用户已停用");         break;
+        case AUTH_CHANNEL_OFF:  note_fail(who, "动态码通道未启用");   break;
+        case AUTH_EXPIRED:      note_fail(who, "临时授权已失效");     break;
+        default:                note_fail(who, "动态码错误");         break;
+        }
+    }
+    memset(a->code, 0, sizeof(a->code));   /* 明文动态码不残留（与 rpc.c 同纪律） */
+    free(a);
+}
+
 void auth_fsm_submit_otp(const char *code)
 {
     if (s_fsm.state != FSM_WAIT_OTP) return;
+    if (!code || !*code) return;
 
-    /* NO_MATCH 连续转入时身份未定（pending_user 为空）：
-     * 动态码按「任一启用 TOTP 的用户」校验，通过者开锁。 */
-    if (!s_fsm.pending_user[0]) {
-        char name[32] = {0};
-        auth_result_t r0 = backend_verify_totp_any(code, name, sizeof(name));
-        if (r0 == AUTH_OK) {
-            do_unlock(name, "otp");
-        } else if (r0 == AUTH_REPLAY) {
-            note_fail(NULL, "动态码已使用");
-        } else {
-            note_fail(NULL, "动态码错误");   /* 与指定用户路径一致：错码退出 WAIT_OTP → DENY */
-        }
-        return;
-    }
+    otp_job_t * a = (otp_job_t *)calloc(1, sizeof(*a));
+    if (!a) { note_fail(NULL, "动态码校验任务分配失败"); return; }
+    a->gen = ++s_otp_gen;
+    strncpy(a->pending, s_fsm.pending_user, sizeof(a->pending) - 1);
+    a->pending[sizeof(a->pending) - 1] = '\0';
+    strncpy(a->code, code, sizeof(a->code) - 1);
+    a->code[sizeof(a->code) - 1] = '\0';
+    s_otp_active = a->gen;
 
-    auth_result_t r = backend_verify_totp(s_fsm.pending_user, code);
-    char name[32];
-    strncpy(name, s_fsm.pending_user, sizeof(name) - 1);
-    name[sizeof(name) - 1] = '\0';
-    s_fsm.pending_user[0] = '\0';
-
-    if (r == AUTH_OK) {
-        s_fsm.last_reason = FACE_RES_ERROR;
-        do_unlock(name, "otp");
-    } else if (r == AUTH_REPLAY) {
-        note_fail(name, "动态码已使用");
-    } else if (r == AUTH_LOCKED) {
-        note_fail(name, "用户已锁定");
-    } else {
-        note_fail(name, "动态码错误");
-    }
+    worker_post(otp_worker, a, otp_done);
 }
 
 void auth_fsm_cancel_otp(void)

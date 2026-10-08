@@ -56,3 +56,28 @@ int store_cache_find_by_id(int id, safe_user_t *out)
     }
     return -1;
 }
+
+int store_cache_find_by_name(const char *name, safe_user_t *out)
+{
+    if (name == NULL || *name == '\0') return -1;
+    const int a = g_active;
+    for (int i = 0; i < g_count[a]; i++) {
+        if (g_buf[a][i].name[0] == '\0') continue;
+        if (strncmp(g_buf[a][i].name, name, sizeof(g_buf[a][i].name)) != 0) continue;
+        if (out != NULL) *out = g_buf[a][i];
+        return 0;
+    }
+    return -1;
+}
+
+int store_cache_find_by_face(int face_id, safe_user_t *out)
+{
+    if (face_id < 0) return -1;   /* 与 user_find_by_face 同口径：负号一律不匹配 */
+    const int a = g_active;
+    for (int i = 0; i < g_count[a]; i++) {
+        if (g_buf[a][i].face_id != face_id) continue;
+        if (out != NULL) *out = g_buf[a][i];
+        return 0;
+    }
+    return -1;
+}

@@ -60,6 +60,56 @@ void astore_net_add_wifi(const char * ssid, const char * sec, const char * psk, 
 /* 安全策略落盘（重写 users.json）。 */
 void astore_set_policy(int max_failed, int lock_seconds, astore_int_cb_t cb);
 
+/* ---------------- 认证路径的用户表副作用（2026-10-07） ----------------
+ *
+ * 背景：技术路线规约 §3.1 的并发纪律「认证路径零同步落盘」要求 auth_fsm 的回调与
+ * 判定路径内不得直接调 user_update / log_append。但认证落下的用户表改动**不只是
+ * 写**——它们是「读→改→写」三步：
+ *   - 失败：failed_attempts++，达 max_failed 置 lock_until（ADR-3 用户级锁定）；
+ *   - 开锁：清零 failed_attempts / lock_until；临时用户 used_count++ 并在用尽时删除；
+ *   - FR-21：人脸凭据不一致 → 本地 face_enable 置 false；
+ *   - FR-9：临时授权过期 / 用尽 → 级联删除用户（含模组模板号回填）。
+ *
+ * ★ 为什么必须整段下沉、而不是「主线程读快照 → 算好新值 → worker 写」：
+ *   那样做会**丢失更新**。人脸连续出帧时 bump_fail_streak 可能在一帧内被调多次，
+ *   每次都基于同一份快照算出 failed_attempts = 旧值+1，最终落盘只 +1 —— 失败计数
+ *   形同虚设，max_failed 永远打不满。读改写必须由**同一个线程**一口气做完。
+ *
+ * ★ 顺序保证从哪来：worker 是单线程 FIFO 队列。前一个「失败计数」作业写盘完成后，
+ *   后一个 PIN 校验作业（backend_verify_pin 走 user_load_all 读**真实文件**）才执行，
+ *   因此「已锁定」的判定不会被异步化撕开窗口。这是本设计成立的前提。
+ *
+ * 四类副作用共用一个作业类型 + op 分派（而不是四个独立作业）：它们的输入都是
+ * 「一个用户名」，都是在 worker 内做同一形态的读改写，分开写只会复制四遍样板。 */
+typedef enum {
+    AUTH_SIDE_FAIL_BUMP = 1,     /* 用户级失败计数 +1，达 max_failed 置 lock_until */
+    AUTH_SIDE_UNLOCK_TOUCH,      /* 开锁成功后：清零计数；临时用户计数 / 用尽则删除 */
+    AUTH_SIDE_FACE_INVALIDATE,   /* FR-21：本地人脸凭据标记失效（face_enable=false） */
+    AUTH_SIDE_TEMP_REVOKE,       /* FR-9：临时授权失效，级联删除用户 */
+} auth_side_op_t;
+
+/**
+ * 认证副作用完成回调（**主线程** worker_poll 派发）。
+ *   result     0 = 成功；-1 = 用户不存在或写盘失败（调用方只作提示，不改安全结论）
+ *   face_id_rm >= 0 表示本次级联删除带出了一个模组模板号，调用方应在主线程
+ *                   调 face_service_delete_async(face_id_rm)；< 0 表示无需删
+ *   removed    true = 该用户已被删除（临时授权用尽 / 失效）
+ */
+typedef void (*astore_auth_side_cb_t)(int result, int32_t face_id_rm, bool removed);
+
+/**
+ * 提交一个认证副作用作业。cb 可为 NULL（fire-and-forget，无需回执）。
+ * user 为 NULL 或空串时直接回调 result=-1（无归属对象的副作用无从谈起）。
+ *
+ * revoke_detail：仅当本次作业**真的删除了用户**时（UNLOCK_TOUCH 用尽、
+ * TEMP_REVOKE）由 worker 落一条 ALARM 审计；其余 op 传 NULL。
+ * ★ 为什么这条日志在 worker 里写而不是主线程 done 里写：主线程此刻只知道
+ *   快照里的 used_count，「到底删没删」只有 worker 知道——让判定的那一方
+ *   同时负责记录，才不会出现「没删成却记了审计」的假账。
+ */
+void astore_auth_side(auth_side_op_t op, const char *user, const char *revoke_detail,
+                      astore_auth_side_cb_t cb);
+
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif

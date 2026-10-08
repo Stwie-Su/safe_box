@@ -97,6 +97,17 @@ static void drain_worker_ms(int ms)
     for (int t = 0; t < ms; t += 5) { worker_poll(); usleep(5000); }
 }
 
+/* v2026-10-07：动态码校验也下沉 worker（认证路径零同步落盘）。
+ * 提交后**仍停在 WAIT_OTP**（不新增状态），泵到状态离开为止。 */
+static void pump_otp(void)
+{
+    for (int i = 0; i < 1000; i++) {
+        worker_poll();
+        if (auth_fsm_state() != FSM_WAIT_OTP) return;
+        usleep(5000);
+    }
+}
+
 static void add_expired_temp_user(void)
 {
     /* carol：临时用户，有效期已过（valid_until = now - 10） */
@@ -130,6 +141,24 @@ static void add_fr21_user(void)
     test_salt_to_hex(salt, u.pin_salt);
     u.enabled     = true;
     u.face_id     = 12;
+    u.face_enable = true;
+    CHECK(user_add(&u) == 0);
+}
+
+/* grace：异步落盘「不丢更新」专项用例专用（face_id=21）。
+ * 单建一个用户，避免与前面用例在 alice / frank 身上累积的计数互相污染。 */
+static void add_sidefx_user(void)
+{
+    safe_user_t u;
+    memset(&u, 0, sizeof(u));
+    u.id = user_next_id();
+    strcpy(u.name, "grace");
+    strcpy(u.role, "user");
+    uint8_t salt[16];
+    pin_hash("7777", salt, u.pin_hash);
+    test_salt_to_hex(salt, u.pin_salt);
+    u.enabled     = true;
+    u.face_id     = 21;
     u.face_enable = true;
     CHECK(user_add(&u) == 0);
 }
@@ -169,10 +198,12 @@ int main(void)
     auth_fsm_submit_face(-1, FACE_RES_OK);
     CHECK(auth_fsm_state() == FSM_LOCKOUT);
 
-    /* 已匹配用户的 NO_MATCH 走用户级计数：连续打满触发该用户锁定（ADR-3 双轨） */
+    /* 已匹配用户的 NO_MATCH 走用户级计数：连续打满触发该用户锁定（ADR-3 双轨）
+     * ★ 用户级落盘已下沉 worker：断言**必须**先泵完后台作业，否则读到的还是旧值。 */
     fsm_reset();
     for(int i = 0; i < 5; i++) auth_fsm_submit_face(7, FACE_RES_NO_MATCH);
     CHECK(auth_fsm_state() == FSM_LOCKOUT);         /* 设备级也达 max_failed */
+    drain_worker_ms(300);
     {
         safe_user_t alice;
         CHECK(user_find_by_name("alice", &alice) == 0);
@@ -191,6 +222,7 @@ int main(void)
         uint64_t now = hal_time();
         CHECK(totp_at_time(alice.totp_secret, now, 6, code, sizeof(code)) == 0);
         auth_fsm_submit_otp(code);
+        pump_otp();
         CHECK(auth_fsm_state() == FSM_DENY);        /* alice 被用户级锁定 → 拒绝退出 */
     }
 
@@ -209,6 +241,7 @@ int main(void)
         uint64_t now = hal_time();
         CHECK(totp_at_time(dave.totp_secret, now, 6, code, sizeof(code)) == 0);
         auth_fsm_submit_otp(code);
+        pump_otp();                                 /* 动态码校验已在 worker 线程 */
         CHECK(auth_fsm_state() == FSM_UNLOCKED);
     }
 
@@ -236,15 +269,18 @@ int main(void)
     auth_fsm_submit_face(7, FACE_RES_OK);           /* 随后正常开锁，证明计数未被污染 */
     CHECK(auth_fsm_state() == FSM_UNLOCKED);
 
-    /* ---- 1.7 临时用户次数用尽 → 直接删除（FR-9 v1.6，原为置停用） ---- */
+    /* ---- 1.7 临时用户次数用尽 → 直接删除（FR-9 v1.6，原为置停用） ----
+     * ★ 计数与删除都在 worker 里做读改写：每次断言落盘结果前都要先泵完。 */
     fsm_reset();
     auth_fsm_submit_face(8, FACE_RES_OK);
     CHECK(auth_fsm_state() == FSM_UNLOCKED);
+    drain_worker_ms(300);
     safe_user_t bob;
     CHECK(user_find_by_name("bob", &bob) == 0);
     CHECK(bob.used_count == 1);
 
     auth_fsm_submit_face(8, FACE_RES_OK);
+    drain_worker_ms(300);
     CHECK(user_find_by_name("bob", &bob) != 0);     /* 次数用尽：用户已删除 */
     CHECK(auth_fsm_state() == FSM_UNLOCKED);
 
@@ -257,6 +293,7 @@ int main(void)
     add_expired_temp_user();
     CHECK(user_find_by_name("carol", &bob) == 0);   /* 复用 bob 变量做查询 */
     auth_fsm_submit_face(9, FACE_RES_OK);
+    drain_worker_ms(300);
     CHECK(user_find_by_name("carol", &bob) != 0);   /* 过期：用户已删除 */
     CHECK(auth_fsm_state() == FSM_IDLE);            /* 授权失效不计设备级失败 */
 
@@ -312,6 +349,7 @@ int main(void)
     fsm_reset();
     auth_fsm_submit_face_ex(12, FACE_RES_OK, "mallory"); /* 名字不符 → 拒绝 */
     CHECK(auth_fsm_state() == FSM_DENY);
+    drain_worker_ms(300);                                /* 失效标记由 worker 落盘 */
     safe_user_t chk;
     CHECK(user_find_by_face(12, &chk) == 0);             /* 绑定关系还在… */
     CHECK(chk.face_enable == false);                     /* …但凭据已标记失效 */
@@ -373,6 +411,40 @@ int main(void)
     CHECK(auth_fsm_state() == FSM_IDLE);         /* 不误开锁 */
     CHECK(auth_fsm_fail_streak() == 0);
 
+    /* ---- 1.15 异步落盘「不丢更新」（2026-10-07 认证副作用专项） ----
+     * 把「读→改→写」拆到两个线程时最容易踩的坑：若主线程基于快照算出
+     * failed_attempts+1 再让 worker 去写，一帧内连打 N 次只会落盘 +1，
+     * max_failed 永远打不满 —— 失败锁定形同虚设。
+     * 本用例连打 (max_failed - 1) 次同一用户的 NO_MATCH，断言计数**恰好**
+     * 等于提交次数（少了=丢更新，多了=重复计）。 */
+    fsm_reset();
+    add_sidefx_user();
+    {
+        safe_user_t g;
+        CHECK(user_find_by_name("grace", &g) == 0);
+        CHECK(g.failed_attempts == 0);
+        CHECK(g.lock_until == 0);
+    }
+    for (int i = 0; i < 4; i++) auth_fsm_submit_face(21, FACE_RES_NO_MATCH);
+    drain_worker_ms(300);
+    {
+        safe_user_t g;
+        CHECK(user_find_by_name("grace", &g) == 0);
+        CHECK(g.failed_attempts == 4);      /* 读改写被拆开的话这里会是 1 */
+        CHECK(g.lock_until == 0);           /* 未达 max_failed(5)：不得提前锁定 */
+    }
+    /* 补第 5 次打满：应置 lock_until 并把计数清零（与主体语义一致） */
+    auth_fsm_submit_face(21, FACE_RES_NO_MATCH);
+    CHECK(auth_fsm_state() == FSM_LOCKOUT); /* 设备级同时达 max_failed */
+    drain_worker_ms(300);
+    {
+        safe_user_t g;
+        CHECK(user_find_by_name("grace", &g) == 0);
+        CHECK(g.lock_until > (int64_t)hal_time());
+        CHECK(g.failed_attempts == 0);      /* 打满即清零 */
+    }
+
+    worker_shutdown();   /* 收尾：等后台退出，避免进程退出时作业在途 */
     TEST_RESULT();
 }
 

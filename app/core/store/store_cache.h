@@ -57,6 +57,25 @@ int store_cache_user_count(int *count, uint32_t *stamp);
  */
 int store_cache_find_by_id(int id, safe_user_t *out);
 
+/**
+ * 读侧接口：按用户名查快照（认证路径用）。语义与 store.h 的 user_find_by_name
+ * 一致（0 = 找到），区别只是**不读盘**——数据来自 worker 发布的最新快照。
+ *
+ * ★ 用它的代价必须写清楚：快照是「上一次落盘后的状态」，可能滞后一帧
+ *   （worker 一次写盘 ~毫秒级）。认证路径里凡**决定安全判定**的读写
+ *   （failed_attempts / lock_until / last_otp_counter / used_count）一律
+ *   **不能**基于快照做读改写 —— 那些必须整体下沉 worker（见 async_store 的
+ *   astore_auth_side）。本接口只用于「用户是否存在 / 通道是否启用 /
+ *   角色是什么 / 取用户名写审计」这类**不因滞后而改变安全结论**的查询。
+ */
+int store_cache_find_by_name(const char *name, safe_user_t *out);
+
+/**
+ * 读侧接口：按人脸模板号查快照（face_id >= 0 且已绑定）。
+ * 语义与 user_find_by_face 一致（0 = 找到），同样不读盘。
+ */
+int store_cache_find_by_face(int face_id, safe_user_t *out);
+
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif

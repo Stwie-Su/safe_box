@@ -202,16 +202,41 @@ static void otp_confirm_cb(lv_event_t * e)
         set_msg("请输入 6 位动态密码", true);
         return;
     }
+    /* 2026-10-07：TOTP 校验下沉 worker（认证路径零同步落盘），提交后**不能**立刻读
+     * auth_fsm_state() 判结果——那时作业还在途。结果一律由 ui.c 的 fsm_ui_hook
+     * 回填到 page_otp_on_fsm（与键盘页 page_keypad_on_fsm 同款模式）。 */
     auth_fsm_submit_otp(s_code);
     s_code[0] = '\0';
     update_display();
-    /* 同步反馈：FSM 已同步处理。成功 -> hook 切回主页；失败 -> 留在本页提示。 */
-    if (auth_fsm_state() == FSM_DENY) {
-        set_msg("动态密码错误，请重试", true);
-    } else if (auth_fsm_state() == FSM_LOCKOUT) {
+    set_msg("正在验证…", false);
+}
+
+/* FSM 状态回填（由 ui.c 的 fsm_ui_hook 在本页可见时调用）。
+ * 成功 / 锁定会被 hook 切回主页，这里只需处理「留在本页」的失败分支。 */
+void page_otp_on_fsm(fsm_state_t st, const char *detail)
+{
+    switch (st) {
+    case FSM_DENY:
+        /* detail 是 core 给出的具体原因，直接呈现比统一写「错误」更有用 */
+        if (detail && *detail) {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "%s，请重试", detail);
+            set_msg(buf, true);
+        } else {
+            set_msg("动态密码错误，请重试", true);
+        }
+        break;
+    case FSM_LOCKOUT:
         set_msg("设备已锁定，请稍后再试", true);
-    } else {
+        break;
+    case FSM_UNLOCKED:
         set_msg("验证通过，正在开锁", false);
+        break;
+    case FSM_WAIT_OTP:
+        /* 仍在等待（例如刚被覆盖的旧作业已丢弃、或又转入一次等待）：不刷提示 */
+        break;
+    default:
+        break;
     }
 }
 

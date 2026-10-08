@@ -10,6 +10,7 @@
 #include "core/auth/unlock_backend.h"
 #include "core/event_bus.h"
 #include "core/store/store.h"
+#include "hal/hal_time.h"        /* hal_time()：失败锁定截止时刻（AUTH_SIDE_FAIL_BUMP） */
 
 /* ---------------- 加载失败可观测（S1） ----------------
  * 背景：加载**失败**时回调收到的是 (NULL, 0)，与「真的没有数据」完全一样 ——
@@ -286,4 +287,131 @@ void astore_set_policy(int max_failed, int lock_seconds, astore_int_cb_t cb)
     a->max_failed = max_failed;
     a->lock_seconds = lock_seconds;
     worker_post(sp_worker, a, sp_done);
+}
+
+/* ---------------- 认证路径的用户表副作用 ----------------
+ * 四类「读→改→写」共用一个作业类型 + op 分派。为什么必须整段下沉、
+ * 以及顺序保证从哪来，见 async_store.h 的同名段落（那里是权威说明）。 */
+typedef struct {
+    astore_auth_side_cb_t cb;
+    auth_side_op_t op;
+    char     user[32];
+    char     revoke_detail[96];   /* 删除成功时由本线程落的审计文案；空串 = 不落 */
+    int      result;
+    int32_t  face_id_rm;
+    bool     removed;
+} as_job_t;
+
+/* 删除成功后补一条审计（在 worker 内写盘，主线程不碰文件）。
+ * 与调用方投的 astore_append_log 作业之间是 FIFO 关系，日志次序与提交次序一致。 */
+static void as_log_removed(const as_job_t * a)
+{
+    if (a->revoke_detail[0] == '\0') return;
+    log_append("ALARM", a->user, 1, a->revoke_detail);
+}
+
+static void as_worker(void * p)
+{
+    as_job_t * a = (as_job_t *)p;
+
+    safe_user_t u;
+    if (a->user[0] == '\0' || user_find_by_name(a->user, &u) != 0) {
+        a->result = -1;   /* 无此用户：副作用无从谈起。不是错误路径，调用方只作提示 */
+        return;
+    }
+
+    switch (a->op) {
+    case AUTH_SIDE_FAIL_BUMP: {
+        /* 与 auth_fsm::bump_fail_streak 的原语义一致：达 max_failed 置 lock_until 并清零计数。
+         * ★ 读改写由本线程一口气做完 —— 主线程若基于快照算新值会丢失更新（见头文件）。 */
+        const safe_policy_t *pol = user_policy();
+        u.failed_attempts++;
+        if (u.failed_attempts >= pol->max_failed) {
+            u.lock_until      = (int64_t)hal_time() + pol->lock_seconds;
+            u.failed_attempts = 0;
+        }
+        a->result = (user_update(&u) == 0) ? 0 : -1;
+        break;
+    }
+
+    case AUTH_SIDE_UNLOCK_TOUCH: {
+        /* FR-9：临时用户每开锁一次计一次，用尽即删（v1.6 起直接删除，不再置停用）。
+         * 普通用户（或无次数上限的临时用户）：清零失败计数与锁定。 */
+        if (strcmp(u.role, "temp") == 0 && u.use_limit > 0) {
+            u.used_count++;
+            if (u.used_count >= u.use_limit) {
+                int32_t fid = -1;
+                if (user_del_cascade(u.id, &fid) == 0) {
+                    a->face_id_rm = fid;   /* 仅当模板确实绑在此人身上才回填（FR-21 防误删） */
+                    a->removed    = true;
+                    a->result     = 0;
+                    as_log_removed(a);
+                } else {
+                    a->result = -1;
+                }
+                break;
+            }
+        }
+        u.failed_attempts = 0;
+        u.lock_until      = 0;
+        a->result = (user_update(&u) == 0) ? 0 : -1;
+        break;
+    }
+
+    case AUTH_SIDE_FACE_INVALIDATE: {
+        /* FR-21 防线 1：模组报的名字与本地记录不符 → 本地人脸凭据标记失效。
+         * 幂等：已经失效就不写盘，避免无意义的整表重写（save_users 是整表替换）。 */
+        if (!u.face_enable) { a->result = 0; break; }
+        u.face_enable = false;
+        a->result = (user_update(&u) == 0) ? 0 : -1;
+        break;
+    }
+
+    case AUTH_SIDE_TEMP_REVOKE: {
+        int32_t fid = -1;
+        if (user_del_cascade(u.id, &fid) == 0) {
+            a->face_id_rm = fid;
+            a->removed    = true;
+            a->result     = 0;
+            as_log_removed(a);
+        } else {
+            a->result = -1;
+        }
+        break;
+    }
+
+    default:
+        a->result = -1;
+        break;
+    }
+}
+
+static void as_done(void * p)
+{
+    as_job_t * a = (as_job_t *)p;
+    if (a->cb) a->cb(a->result, a->face_id_rm, a->removed);
+    /* ★ 明文敏感数据不残留：本作业只带用户名，仍统一清一次再释放（与 rpc.c 同纪律）。 */
+    memset(a->user, 0, sizeof(a->user));
+    free(a);
+}
+
+void astore_auth_side(auth_side_op_t op, const char *user, const char *revoke_detail,
+                      astore_auth_side_cb_t cb)
+{
+    as_job_t * a = (as_job_t *)calloc(1, sizeof(*a));
+    if (!a) return;
+    a->cb          = cb;
+    a->op          = op;
+    a->result      = -1;
+    a->face_id_rm  = -1;
+    a->removed     = false;
+    if (user) {
+        strncpy(a->user, user, sizeof(a->user) - 1);
+        a->user[sizeof(a->user) - 1] = '\0';
+    }
+    if (revoke_detail) {
+        strncpy(a->revoke_detail, revoke_detail, sizeof(a->revoke_detail) - 1);
+        a->revoke_detail[sizeof(a->revoke_detail) - 1] = '\0';
+    }
+    worker_post(as_worker, a, as_done);
 }

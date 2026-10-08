@@ -3,7 +3,11 @@ set -u
 ROOT="${1:-.}"
 cd "$ROOT" || exit 1
 
-SCOPE=(app/ui app/core/remote app/core/auth/auth_fsm.c)
+# ★ 2026-10-07：auth_fsm.c 的整文件豁免已摘除（认证路径零同步落盘落地），
+#   并把 unlock_backend.c 纳入扫描 —— 此前它是个盲区：backend_verify_totp 内部
+#   就有 user_find_by_name + user_update（读盘 + 整表写盘），而它曾被主线程
+#   经 auth_fsm_submit_otp 同步调用，门禁完全看不见。
+SCOPE=(app/ui app/core/remote app/core/auth/auth_fsm.c app/core/auth/unlock_backend.c)
 
 # ★ 不变式已升级（QA-20 收尾）：users.json / safe.log 的**读与写**全部由 worker
 #   线程独占持有，主线程不得调用任何 store 读写接口（要数据走 worker_post 三段式，
@@ -65,9 +69,23 @@ enclosing_fn() {
 #   （函数与调用语义零改动，纯搬移）。
 legacy_case() {
     case "$1::$2" in
-        # FSM 的状态迁移与 UI 必须在主线程，其 user_update / log_append 因此仍在
-        # 主线程（含 submit_otp 路径）。与 FSM 状态迁移强耦合，A6 裁定本次不动。
-        app/core/auth/auth_fsm.c::*)                    return 0 ;;
+        # ★ 2026-10-07 摘除：原先 auth_fsm.c 是**整文件豁免**（::*），是这张名单里
+        #   唯一的「按文件」口子，其余都是按函数名精确登记。现在认证路径的读走
+        #   store_cache 快照、写走 astore_auth_side / astore_append_log，
+        #   文件内已无任何直接 store 调用 —— 整文件豁免失去存在理由。
+        #   代价要写清：FSM 状态迁移仍在主线程，落盘结果晚一帧才可见；
+        #   安全判定（失败计数 / 锁定 / 防重放）全部依赖 worker 单线程 FIFO 的顺序保证。
+        # unlock_backend.c 的 backend_* 是「存储层判定封装」：它们内部的 store 调用
+        # 是设计的一部分（PIN / TOTP 校验必须读真实文件、回写防重放计数器）。
+        # ★ 调用方纪律（本条豁免成立的前提，改动时务必复核）：这些函数**只允许在
+        #   worker 线程调用**——PIN 走 astore/pin_worker、TOTP 走 otp_worker、
+        #   管理员二次确认走 astore_verify_admin。新增任何**非 backend_ 前缀**
+        #   的函数若在文件内直连 store，门禁会拦下。
+        app/core/auth/unlock_backend.c::backend_*)      return 0 ;;
+        # backend 层的内部辅助：只被 backend_verify_pin_ex 调用，与调用方同线程（worker）。
+        # 单独登记而不是靠 backend_ 前缀通配——前缀豁免只给**对外接口**，
+        # 内部辅助逐个登记，新增一个就会被门禁拦下要求显式说明。
+        app/core/auth/unlock_backend.c::temp_revoke)    return 0 ;;
         app/ui/pages/page_users_dlg.c::user_is_admin)       return 0 ;;  # 全表读判「是否有管理员」
         app/ui/pages/page_users_dlg.c::face_btn_cb)         return 0 ;;  # 人脸按钮态需当拍拿到 face_id
         app/ui/pages/page_users_dlg.c::face_start_cb)       return 0 ;;

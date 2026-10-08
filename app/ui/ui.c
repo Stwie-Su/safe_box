@@ -221,7 +221,8 @@ void ui_init(void)
 
 /* FSM 状态变化 → UI 切换
  * UNLOCKED/LOCKOUT 回到主页；WAIT_OTP 弹动态码页；DENY/IDLE 不强制切页。
- * v1.9：另行把结果回填给键盘页（校验中 / PIN 错误），仅当键盘页当前可见时。 */
+ * v1.9：另行把结果回填给键盘页（校验中 / PIN 错误），仅当键盘页当前可见时。
+ * 2026-10-07：动态码校验同样下沉 worker，故动态码页也要走同一条回填通道。 */
 static void fsm_ui_hook(fsm_state_t st, const char *user, const char *detail)
 {
     (void)user; (void)detail;
@@ -235,6 +236,10 @@ static void fsm_ui_hook(fsm_state_t st, const char *user, const char *detail)
      * 由键盘页就地更新提示文案。成功/锁定已切回主页，此处不再回填（s_vis_page 已变）。 */
     if (s_vis_page == (int)PAGE_KEYPAD)
         page_keypad_on_fsm(st, detail);
+    /* 动态码异步校验反馈：同上，仅当动态码页仍是当前页。
+     * 成功 / 锁定已由上面的 switch 切回主页，这里只负责「留在本页」的失败提示。 */
+    if (s_vis_page == (int)PAGE_OTP)
+        page_otp_on_fsm(st, detail);
 }
 
 /**

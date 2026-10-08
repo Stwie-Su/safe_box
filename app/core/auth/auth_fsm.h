@@ -79,7 +79,13 @@ void auth_fsm_submit_pin(const char * pin);
  * 仅供单测构造确定性超时场景。0 = 下一次 auth_fsm_tick() 即判超时。 */
 void auth_fsm_set_verify_timeout(uint32_t seconds);
 
-void auth_fsm_submit_otp(const char * code);           /* 动态码页提交 */
+/* 动态码页提交。**2026-10-07 起异步**：与 submit_pin 同构，TOTP 校验下沉 worker
+ * （backend_verify_totp 内部要读盘 + 回写防重放计数器，属规约 §3.1 禁止的主线程
+ * 同步落盘）。提交后**仍停在 WAIT_OTP**（不新增状态），校验完成经 worker_poll()
+ * 回到主线程后才迁移到 UNLOCKED / DENY / LOCKOUT。
+ * ⚠ 调用方不得在调用后立刻读 auth_fsm_state() 判定结果 —— 那时作业还在途；
+ *   结果一律等状态迁移（UI 走 auth_ui_hook，见 page_otp_on_fsm）。 */
+void auth_fsm_submit_otp(const char * code);
 void auth_fsm_cancel_otp(void);
 
 void auth_fsm_note_unlock(const char * user);          /* 其它通道成功后统一走此处（脉冲+日志+UI） */
