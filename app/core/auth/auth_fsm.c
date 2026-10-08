@@ -56,6 +56,11 @@ static fsm_t s_fsm;
 static auth_ui_hook_t   s_ui_hook   = NULL;
 static auth_event_cb_t  s_evt_cb    = NULL;
 
+/* 动态码后台作业的世代号发生器与「在途」标志。
+ * 定义在这里（而非 submit_otp 附近）是因为 set_state() 也要访问它——见那里的注释。 */
+static uint32_t s_otp_gen    = 0;   /* 提交计数（世代号发生器） */
+static uint32_t s_otp_active = 0;   /* 当前在途作业的世代号；0 = 无 */
+
 /* 人脸事件入口：face_service_emit → event_bus(EV_FACE_EVENT) → 本回调（主线程） */
 static void handle_face_result(int32_t face_id, face_reason_t reason, const char * mod_name);
 static void on_face_event(ev_topic_t topic, const void * payload, void * user);
@@ -85,6 +90,13 @@ static void set_state(fsm_state_t st, const char *user, const char *detail)
 {
     s_fsm.state = st;
     s_fsm.ts_enter = hal_time();
+    /* ★ 离开 WAIT_OTP 即作废在途的动态码作业。
+     * 复位**统一放在这里**，而不是散在各条离开路径（tick 超时 / 手动取消 /
+     * WAIT_OTP 期间刷脸放行 / 校验失败……）—— 漏掉任何一条都会让
+     * s_otp_active 永久非 0，submit_otp 从此被永久忽略。
+     * 当初不做单飞正是因为怕这个散落风险；把它收进 set_state 之后，
+     * 单飞就不再有卡死隐患，可以安全启用。 */
+    if (st != FSM_WAIT_OTP) s_otp_active = 0;
     if (user) { strncpy(s_fsm.last_user, user, sizeof(s_fsm.last_user) - 1); s_fsm.last_user[sizeof(s_fsm.last_user)-1] = '\0'; }
     if (s_ui_hook) s_ui_hook(st, user ? user : "", detail ? detail : "");
 }
@@ -93,6 +105,10 @@ void auth_fsm_init(void)
 {    memset(&s_fsm, 0, sizeof(s_fsm));
     s_fsm.state = FSM_IDLE;
     s_fsm.last_reason = FACE_RES_ERROR;
+    /* 在途动态码作业一并作废：否则 init 之后残留的 s_otp_active 会让
+     * submit_otp 被永久忽略（单飞判据读的就是它）。 */
+    s_otp_gen    = 0;
+    s_otp_active = 0;
 
     /* 人脸通道（步骤 3a / R6 接线）：订阅总线 EV_FACE_EVENT。
      * 后端结果由 face_service_emit 广播（主线程 publish 同步派发），
@@ -450,13 +466,15 @@ void auth_fsm_submit_pin(const char *pin)
  * 直接违反规约 §3.1。更要紧的是「读 last_otp_counter → 判重放 → 写回」本身就是
  * 读改写：拆到两个线程做，同一个码就有机会被用两次。
  *
- * ★ 与 PIN 通道刻意不同的两点：
- *   1) **不新增 FSM 状态**：校验期间仍停在 WAIT_OTP（UI 无需改版），靠世代号
- *      区分新旧作业；
- *   2) **不做单飞**：每次提交都自增世代号并覆盖 s_otp_active，最后一次提交生效。
- *      单飞要求「离开 WAIT_OTP 的每一条路径都复位标志」才不会卡死
- *      （tick 超时 / 手动取消 / WAIT_OTP 期间刷脸放行……）太散、太易漏；
- *      世代号覆盖天然不会卡死，且 FIFO 下旧作业先派发、被丢弃，无副作用。
+ * ★ 与 PIN 通道刻意不同的一点：**不新增 FSM 状态**——校验期间仍停在 WAIT_OTP
+ *   （UI 无需改版），靠世代号区分新旧作业。
+ *
+ * ★ 但仍要做**单飞**（这是踩过之后改的）：世代号只能丢弃「结果」，撤销不了
+ *   worker **已经执行的副作用**。若不单飞，连点两次确认会投出两个作业，
+ *   第一个在 worker 里把 last_otp_counter 写回（动态码被消耗），其 done 却因
+ *   世代号不匹配被丢弃 → 不开锁；第二个作业随后判 AUTH_REPLAY → 提示
+ *   「动态码已使用」。净结果：**码被吃掉、门没开**。
+ *   单飞的风险（在途标志卡死）由 set_state 统一复位解决，见那里。
  *   pending_user 改在回调里清空——提交后还要拿它给 UI 显示、给 note_fail 记名。 */
 typedef struct {
     uint32_t gen;
@@ -465,9 +483,6 @@ typedef struct {
     auth_result_t result;
     char     user[32];      /* 命中的用户名（AUTH_OK 时有效） */
 } otp_job_t;
-
-static uint32_t s_otp_gen    = 0;   /* 提交计数（世代号发生器） */
-static uint32_t s_otp_active = 0;   /* 当前在途作业的世代号；0 = 无 */
 
 /* 后台线程：TOTP 校验（HMAC-SHA1 + 防重放计数器回写 + 失败计数）。绝不触碰 UI。 */
 static void otp_worker(void * p)
@@ -517,6 +532,9 @@ void auth_fsm_submit_otp(const char *code)
 {
     if (s_fsm.state != FSM_WAIT_OTP) return;
     if (!code || !*code) return;
+    /* 单飞：上一次校验仍未返回就直接忽略，不投第二个作业。
+     * 理由见本节注释——世代号挡不住「worker 已执行的副作用」。 */
+    if (s_otp_active != 0) return;
 
     otp_job_t * a = (otp_job_t *)calloc(1, sizeof(*a));
     if (!a) { note_fail(NULL, "动态码校验任务分配失败"); return; }

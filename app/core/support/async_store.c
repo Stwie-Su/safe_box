@@ -195,6 +195,45 @@ void astore_verify_admin(const char * pin, astore_int_cb_t cb)
     worker_post(va_worker, a, va_done);
 }
 
+/* ---------------- 管理员动态码二次确认 ----------------
+ * 背景：page_users_dlg 的改管理员密码弹窗原先在 UI 主线程直接调
+ * backend_admin_verify_totp —— 该函数内部是全表读盘 + 整表写盘，
+ * 属主线程同步落盘。而门禁**看不见**：它的正则只匹配 store 接口名，
+ * 经 backend_* 间接调用就绕过去了。故补本包装并把调用点改异步。 */
+typedef struct {
+    astore_int_cb_t cb;
+    char code[16];
+    int  result;
+} avt_job_t;
+
+static void avt_worker(void * p)
+{
+    avt_job_t * a = (avt_job_t *)p;
+    const auth_result_t r = backend_admin_verify_totp(a->code);
+    a->result = (r == AUTH_OK) ? 0 : (r == AUTH_REPLAY ? 2 : 1);
+}
+
+static void avt_done(void * p)
+{
+    avt_job_t * a = (avt_job_t *)p;
+    if (a->cb) a->cb(a->result);
+    memset(a->code, 0, sizeof(a->code));   /* 明文动态码不残留（与 rpc.c 同纪律） */
+    free(a);
+}
+
+void astore_admin_verify_totp(const char * code, astore_int_cb_t cb)
+{
+    avt_job_t * a = (avt_job_t *)calloc(1, sizeof(*a));
+    if (!a) return;
+    a->cb     = cb;
+    a->result = 1;
+    if (code) {
+        strncpy(a->code, code, sizeof(a->code) - 1);
+        a->code[sizeof(a->code) - 1] = '\0';
+    }
+    worker_post(avt_worker, a, avt_done);
+}
+
 /* ---------------- net get psk ---------------- */
 typedef struct {
     astore_str_cb_t cb;
@@ -360,10 +399,19 @@ static void as_worker(void * p)
 
     case AUTH_SIDE_FACE_INVALIDATE: {
         /* FR-21 防线 1：模组报的名字与本地记录不符 → 本地人脸凭据标记失效。
-         * 幂等：已经失效就不写盘，避免无意义的整表重写（save_users 是整表替换）。 */
+         * 幂等：已经失效就不写盘，避免无意义的整表重写（save_users 是整表替换）。
+         * ★「已标记失效」这条审计必须由本线程落：凭据失效是安全相关动作，
+         *   FR-21 要求可追溯。改造时这里漏过一次（只在主线程留了 ALARM，
+         *   没跟着下沉），属于「改异步时丢日志」的典型坑——凡下沉到 worker
+         *   的分支，都要回头核一遍原分支落了几条日志。 */
         if (!u.face_enable) { a->result = 0; break; }
         u.face_enable = false;
-        a->result = (user_update(&u) == 0) ? 0 : -1;
+        if (user_update(&u) == 0) {
+            a->result = 0;
+            log_append("ALARM", a->user, 0, "人脸凭据已标记失效，请管理员重新录入");
+        } else {
+            a->result = -1;
+        }
         break;
     }
 

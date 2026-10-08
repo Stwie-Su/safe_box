@@ -53,6 +53,13 @@ void astore_report_user_event(const char * evt, const char * user, int res, cons
 /* 设置门禁：校验 admin PIN（0=通过 1=错误 2=锁定 -1=无此用户）。 */
 void astore_verify_admin(const char * pin, astore_int_cb_t cb);
 
+/* 管理员**动态码**二次确认（FR-3 敏感操作，如改管理员密码）。
+ * 与 astore_verify_admin 只是一张凭据的区别（PIN vs TOTP），同样必须在 worker 执行：
+ * backend_admin_verify_totp 内部要 user_load_all（全表读盘）+ user_update
+ * （回写 last_otp_counter 防重放计数器、清零失败计数）——整表读写不能在主线程。
+ * 回调 result：0=通过 1=错误 2=该码已使用（防重放） */
+void astore_admin_verify_totp(const char * code, astore_int_cb_t cb);
+
 /* 网络 psk 读取 / 保存（内部 AES + PBKDF2 派生，量级同 PIN 校验）。 */
 void astore_net_get_psk(const char * ssid, astore_str_cb_t cb);
 void astore_net_add_wifi(const char * ssid, const char * sec, const char * psk, astore_int_cb_t cb);

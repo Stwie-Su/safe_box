@@ -163,6 +163,45 @@ static void add_sidefx_user(void)
     CHECK(user_add(&u) == 0);
 }
 
+/* henry：动态码单飞用例专用。alice 已锁定、dave 在 1.3 消耗过当前窗口的码，
+ * 都不能复用（同一个时间片的码会被防重放判 REPLAY）。 */
+static void add_otp_user(void)
+{
+    safe_user_t u;
+    memset(&u, 0, sizeof(u));
+    u.id = user_next_id();
+    strcpy(u.name, "henry");
+    strcpy(u.role, "user");
+    uint8_t salt[16];
+    pin_hash("2468", salt, u.pin_hash);
+    test_salt_to_hex(salt, u.pin_salt);
+    u.enabled     = true;
+    u.face_id     = 31;
+    u.face_enable = true;
+    u.totp_enable = true;
+    CHECK(totp_secret_generate(u.totp_secret) == 0);
+    u.last_otp_counter = 0;
+    CHECK(user_add(&u) == 0);
+}
+
+/* ivan：FR-21 审计用例专用。frank 在 1.11 已被标失效，而失效标记是**幂等**的
+ * （已失效就不写盘、也不记审计），拿它复用会误判成「审计丢失」。 */
+static void add_fr21_audit_user(void)
+{
+    safe_user_t u;
+    memset(&u, 0, sizeof(u));
+    u.id = user_next_id();
+    strcpy(u.name, "ivan");
+    strcpy(u.role, "user");
+    uint8_t salt[16];
+    pin_hash("1357", salt, u.pin_hash);
+    test_salt_to_hex(salt, u.pin_salt);
+    u.enabled     = true;
+    u.face_id     = 41;
+    u.face_enable = true;
+    CHECK(user_add(&u) == 0);
+}
+
 int main(void)
 {
     worker_init();   /* v1.9：PIN 异步校验依赖后台 worker，测试需先起线程 */
@@ -442,6 +481,50 @@ int main(void)
         CHECK(user_find_by_name("grace", &g) == 0);
         CHECK(g.lock_until > (int64_t)hal_time());
         CHECK(g.failed_attempts == 0);      /* 打满即清零 */
+    }
+
+    /* ---- 1.16 动态码单飞：连点两次只投一个作业（2026-10-08 回归） ----
+     * 世代号能丢弃「结果」，却撤销不了 worker **已执行的副作用**：若不单飞，
+     * 连点两次会投出两个作业——第一个在 worker 里把 last_otp_counter 写回
+     * （码被消耗），其 done 因世代号不匹配被丢弃 → 不开锁；第二个随后判
+     * AUTH_REPLAY。净结果：**码被吃掉、门没开**。单飞从源头杜绝第二个作业。 */
+    fsm_reset();
+    add_otp_user();
+    auth_fsm_submit_face(-1, FACE_RES_NO_MATCH);
+    auth_fsm_submit_face(-1, FACE_RES_NO_MATCH);
+    auth_fsm_submit_face(-1, FACE_RES_NO_MATCH);
+    CHECK(auth_fsm_state() == FSM_WAIT_OTP);
+    {
+        safe_user_t henry;
+        CHECK(user_find_by_name("henry", &henry) == 0);
+        char code[8] = {0};
+        uint64_t now = hal_time();
+        CHECK(totp_at_time(henry.totp_secret, now, 6, code, sizeof(code)) == 0);
+        auth_fsm_submit_otp(code);
+        auth_fsm_submit_otp(code);           /* 连点第二次：必须被忽略 */
+        pump_otp();
+        /* 若真投出了第二个作业，终态会是 DENY（REPLAY）而不是 UNLOCKED */
+        CHECK(auth_fsm_state() == FSM_UNLOCKED);
+    }
+
+    /* ---- 1.17 FR-21 凭据失效的审计不丢（2026-10-08 回归） ----
+     * 把同步逻辑下沉 worker 时最易漏的就是「原分支落了几条日志，下沉后少落
+     * 一条」。凭据失效是安全相关动作，FR-21 要求可追溯——这一条曾漏过。 */
+    fsm_reset();
+    add_fr21_audit_user();
+    auth_fsm_submit_face_ex(41, FACE_RES_OK, "mallory");   /* 名字不符 → 标失效 */
+    CHECK(auth_fsm_state() == FSM_DENY);
+    drain_worker_ms(300);
+    {
+        log_entry_t * rows = NULL;
+        int n = 0;
+        CHECK(log_query("ALARM", -1, &rows, &n) == 0);
+        int found = 0;
+        for (int i = 0; i < n; i++) {
+            if (rows[i].detail[0] && strstr(rows[i].detail, "人脸凭据已标记失效") != NULL) found = 1;
+        }
+        free(rows);
+        CHECK(found == 1);   /* 审计必须由 worker 落到 safe.log */
     }
 
     worker_shutdown();   /* 收尾：等后台退出，避免进程退出时作业在途 */

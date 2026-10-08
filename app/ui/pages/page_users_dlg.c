@@ -1587,6 +1587,26 @@ static void pwd_otp_cancel_cb(lv_event_t * e)
     pwd_otp_close();
 }
 
+/* 动态码二次确认的结果回填（主线程 worker_poll 派发）。
+ * ⚠ 结果是**异步**到达的：期间用户可能点了遮罩取消（pwd_otp_close 已把
+ *   s_otp_msg 置 NULL 并销毁弹窗）。此时必须直接返回——否则会往一个已经
+ *   销毁的 LVGL 对象上写文案。这是所有「异步结果回填 UI」都要先判的一步。 */
+static void pwd_otp_verify_done(int result)
+{
+    if (s_otp_msg == NULL) return;   /* 弹窗已取消 / 销毁：丢弃迟到结果 */
+
+    if (result == 0) {
+        pwd_otp_close();
+        post_chg_pwd(s_sel_id, s_pending_old, s_pending_new, s_pending_name,
+                     s_pending_do_pin, s_pending_do_rename);
+        return;
+    }
+    s_otp_pin[0] = '\0';
+    pwd_otp_update_disp();
+    lv_label_set_text(s_otp_msg,
+        (result == 2) ? "该动态码已使用，请等下一周期" : "动态码错误，请重试");
+}
+
 static void pwd_otp_ok_cb(lv_event_t * e)
 {
     (void)e;
@@ -1594,18 +1614,12 @@ static void pwd_otp_ok_cb(lv_event_t * e)
         if (s_otp_msg) lv_label_set_text(s_otp_msg, "动态码为 6 位");
         return;
     }
-    auth_result_t r = backend_admin_verify_totp(s_otp_pin);
-    if (r == AUTH_OK) {
-        pwd_otp_close();
-        post_chg_pwd(s_sel_id, s_pending_old, s_pending_new, s_pending_name, s_pending_do_pin, s_pending_do_rename);
-    } else {
-        s_otp_pin[0] = '\0';
-        pwd_otp_update_disp();
-        if (s_otp_msg) {
-            lv_label_set_text(s_otp_msg,
-                (r == AUTH_REPLAY) ? "该动态码已使用，请等下一周期" : "动态码错误，请重试");
-        }
-    }
+    /* 校验下沉 worker（2026-10-08）：backend_admin_verify_totp 内部是
+     * user_load_all 全表读盘 + user_update 整表写盘（回写防重放计数器），
+     * 主线程同步调用会卡住 UI 泵并违反技术路线规约 §3.1「认证路径零同步落盘」。
+     * 提交后不阻塞，结果由 pwd_otp_verify_done 回填。 */
+    if (s_otp_msg) lv_label_set_text(s_otp_msg, "正在验证…");
+    astore_admin_verify_totp(s_otp_pin, pwd_otp_verify_done);
 }
 
 static void pwd_otp_show(void)

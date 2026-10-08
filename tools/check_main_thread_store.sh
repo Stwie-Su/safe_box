@@ -135,4 +135,34 @@ if [ "$violations" -gt 0 ]; then
     exit 1
 fi
 echo "== 门禁通过：无新增的主线程直连 store 读写接口（遗留白名单命中 $legacy 处，见脚本内注释） =="
+
+# ---- 间接落盘检查：经 backend_* 判定接口绕过主体正则 ----
+# 主体正则只匹配 store 接口名，而 backend_* 判定接口**内部**就会
+# user_load_all（全表读盘）+ user_update（整表写盘，回写防重放计数器）。
+# 经它们间接落盘，主体正则完全看不见 —— 这正是 page_users_dlg 曾长期在
+# UI 主线程调 backend_admin_verify_totp（改管理员密码的动态码二次确认）
+# 却无人发现的原因（2026-10-08 修复，改走 astore_admin_verify_totp）。
+# 故单列一条：UI 层不得直调这些会读写盘的判定接口，一律走 astore_* 异步包装。
+BACKEND_IO='(backend_verify_pin|backend_verify_pin_ex|backend_verify_admin_pin'
+BACKEND_IO+='|backend_verify_totp|backend_verify_totp_any|backend_admin_verify_totp'
+BACKEND_IO+='|backend_is_locked|backend_lock_remaining)[[:space:]]*\('
+
+echo "== UI 层间接落盘门禁（经 backend_* 判定接口绕过主体正则）=="
+b_violations=0
+mapfile -t B_HITS < <(grep -rnE "$BACKEND_IO" app/ui 2>/dev/null)
+for hit in "${B_HITS[@]}"; do
+    f="${hit%%:*}"; rest="${hit#*:}"; ln="${rest%%:*}"; text="${hit#*:*:}"
+    stripped="${text#"${text%%[![:space:]]*}"}"
+    case "$stripped" in
+        '*'*|'/'*|'#'*) continue ;;   # 注释 / 预处理里提到函数名不算
+    esac
+    echo "  [违规] $f:$ln :: $text"
+    b_violations=$((b_violations + 1))
+done
+if [ "$b_violations" -gt 0 ]; then
+    echo "== 门禁失败：UI 层 $b_violations 处直连会读写盘的 backend_* 判定接口 =="
+    echo "   （这些接口内部会 user_load_all / user_update，须改走 astore_* 异步包装）"
+    exit 1
+fi
+echo "  [OK] UI 层无直连 backend_* 判定接口"
 exit 0
