@@ -56,6 +56,9 @@ safe_add_test(test_store_cache)
 safe_add_test(test_net_parse)
 # OTA 状态契约（D19 回归）：追加式/重写式取最后匹配、截断、CRLF 等
 safe_add_test(test_ota_status)
+# 修改用户写通道（FR-9 v1.11 修改入口）：改名/改 PIN/改角色/改限制一次提交；
+# 末位管理员不可降级、上限≤已用次数被拒、临时改非临时清零、被拒时零落盘。
+safe_add_test(test_modify_user)
 
 # QA 补缺（2026-10-06 验收核对）：三个此前零覆盖的模块。
 # rpc_guard 的「提权」子集：needs_otp 白名单 + sync_time 时钟跳变门控。纯逻辑。

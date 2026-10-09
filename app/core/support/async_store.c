@@ -7,6 +7,7 @@
 #include "core/support/worker.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>      /* snprintf：审计详情要拼「前后值」 */
 #include "core/auth/unlock_backend.h"
 #include "core/event_bus.h"
 #include "core/store/store.h"
@@ -232,6 +233,182 @@ void astore_admin_verify_totp(const char * code, astore_int_cb_t cb)
         a->code[sizeof(a->code) - 1] = '\0';
     }
     worker_post(avt_worker, a, avt_done);
+}
+
+/* ---------------- 修改用户（FR-9 v1.11 修改入口） ----------------
+ * 改名 / 改 PIN / 改角色 / 改临时授权限制 —— **一个作业、一次落盘**。
+ * 完整理由见 async_store.h 同名段落（那里是权威说明）。 */
+typedef struct {
+    astore_int_cb_t cb;
+    int      id;
+    char     new_name[32];
+    char     old_pin[16];
+    char     new_pin[16];
+    char     role[16];
+    int64_t  valid_until;
+    int      use_limit;
+    int      result;
+} mu_job_t;
+
+/* pin_hash 给的是 16 字节裸盐，users.json 存的是 hex —— 与 page_users_dlg 的
+ * salt_to_hex 同逻辑，放在这里是因为写盘只发生在本文件，不该再反向依赖 UI。 */
+static void mu_salt_to_hex(const uint8_t salt[16], char out[33])
+{
+    static const char *HEX = "0123456789abcdef";
+    for (int i = 0; i < 16; i++) {
+        out[i * 2]     = HEX[salt[i] >> 4];
+        out[i * 2 + 1] = HEX[salt[i] & 0x0f];
+    }
+    out[32] = '\0';
+}
+
+static void mu_worker(void * p)
+{
+    mu_job_t * a = (mu_job_t *)p;
+
+    safe_user_t * us = NULL;
+    int n = 0;
+    if (user_load_all(&us, &n) != 0) { user_list_free(us); a->result = MODIFY_ERR_STORE; return; }
+
+    safe_user_t u;
+    bool found = false;
+    for (int i = 0; i < n; i++) if (us[i].id == a->id) { u = us[i]; found = true; break; }
+    if (!found) { user_list_free(us); a->result = MODIFY_ERR_STORE; return; }
+
+    /* ---------- 阶段一：只算不写 ----------
+     * 所有判定都在落盘前完成，任何一条不通过就整单作废，绝不产生部分修改。 */
+    const bool do_pin    = (a->new_pin[0] != '\0');
+    const bool do_rename = (a->new_name[0] != '\0' && strcmp(a->new_name, u.name) != 0);
+    const bool do_role   = (a->role[0] != '\0' && strcmp(a->role, u.role) != 0);
+
+    const char * new_role = do_role ? a->role : u.role;
+    if (!user_role_valid(new_role)) { user_list_free(us); a->result = MODIFY_ERR_ROLE; return; }
+
+    /* 边界 ①：至少保留一名启用中的管理员。与删除 / 停用末位管理员同一口径 ——
+     * 系统一旦没有管理员，删用户 / 改策略 / 恢复出厂这些敏感操作就永久锁死了。 */
+    if (do_role && u.enabled && strcmp(u.role, "admin") == 0 && strcmp(new_role, "admin") != 0) {
+        int admin_enabled = 0;
+        for (int i = 0; i < n; i++)
+            if (strcmp(us[i].role, "admin") == 0 && us[i].enabled) admin_enabled++;
+        if (admin_enabled <= 1) { user_list_free(us); a->result = MODIFY_ERR_LAST_ADMIN; return; }
+    }
+
+    /* 改名重名：只与**别人**比，自己改成自己不算（do_rename 已排除同名） */
+    if (do_rename) {
+        for (int i = 0; i < n; i++) {
+            if (us[i].id != u.id && strcmp(us[i].name, a->new_name) == 0) {
+                user_list_free(us); a->result = MODIFY_ERR_DUPNAME; return;
+            }
+        }
+    }
+
+    /* 临时授权限制：新角色为 temp 时采用请求值，否则**清零**（边界 ③）。
+     * 非 temp 用户的这三项不参与任何判定，留着就是脏数据 —— 改回 temp 时会
+     * 「惊喜过期 / 惊喜耗尽」。 */
+    int64_t new_until = 0;
+    int     new_limit = 0;
+    int     new_used  = 0;
+    if (strcmp(new_role, "temp") == 0) {
+        new_until = a->valid_until;
+        new_limit = a->use_limit;
+        new_used  = u.used_count;
+        /* 边界 ②：上限 ≤ 已用次数 → 该用户下次认证即命中「次数已用尽」被删除
+         * （含人脸凭据）。改配置绝不能等价于删号，这里直接拒绝。 */
+        if (new_limit > 0 && new_used >= new_limit) {
+            user_list_free(us); a->result = MODIFY_ERR_LIMIT; return;
+        }
+    }
+
+    /* 旧 PIN 校验放在最后、且用**改名前的**名字 —— 顺序无关紧要（都还没落盘），
+     * 但用哪个名字有讲究：改名一旦先落盘，后续校验就会拿新名字去查旧记录。 */
+    if (do_pin && user_verify_pin(u.name, a->old_pin) != 0) {
+        user_list_free(us); a->result = MODIFY_ERR_OLDPIN; return;
+    }
+
+    /* ---------- 阶段二：一次落盘 ---------- */
+    char  old_name[32];
+    char  old_role[16];
+    int   old_limit = u.use_limit;
+    snprintf(old_name, sizeof(old_name), "%s", u.name);
+    snprintf(old_role, sizeof(old_role), "%s", u.role);
+
+    if (do_rename) {
+        strncpy(u.name, a->new_name, sizeof(u.name) - 1);
+        u.name[sizeof(u.name) - 1] = '\0';
+    }
+    if (do_role) {
+        strncpy(u.role, new_role, sizeof(u.role) - 1);
+        u.role[sizeof(u.role) - 1] = '\0';
+    }
+    u.valid_until = new_until;
+    u.use_limit   = new_limit;
+    u.used_count  = new_used;
+
+    if (do_pin) {
+        uint8_t salt[16];
+        pin_hash(a->new_pin, salt, u.pin_hash);
+        mu_salt_to_hex(salt, u.pin_salt);
+        u.failed_attempts = 0;    /* 改密即解锁：凭据已换人，旧失败计数不再有意义 */
+        u.lock_until      = 0;
+    }
+
+    if (user_update(&u) != 0) { user_list_free(us); a->result = MODIFY_ERR_STORE; return; }
+    user_list_free(us);
+
+    /* ---------- 阶段三：审计（本地留痕 + 远程上报成对） ----------
+     * detail 一律带「前后值」：事后要能回答「谁把什么改成了什么」，
+     * 只有 "updated" 这种文案等于没记。 */
+    char det[96];
+    if (do_rename) {
+        snprintf(det, sizeof(det), "%s -> %s", old_name, u.name);
+        log_append("user_rename", u.name, 1, det);
+        astore_report_user_event("user_rename", u.name, 1, det);
+    }
+    if (do_role) {
+        snprintf(det, sizeof(det), "role %s -> %s", old_role, u.role);
+        log_append("user_modify", u.name, 1, det);
+        astore_report_user_event("user_modify", u.name, 1, det);
+    }
+    if (strcmp(u.role, "temp") == 0 && (new_until != 0 || new_limit != old_limit || do_role)) {
+        snprintf(det, sizeof(det), "until=%lld limit=%d -> %d (used %d)",
+                 (long long)new_until, old_limit, new_limit, new_used);
+        log_append("user_modify", u.name, 1, det);
+        astore_report_user_event("user_modify", u.name, 1, det);
+    }
+    if (do_pin) {
+        snprintf(det, sizeof(det), "pin updated");
+        log_append("pwd_change", u.name, 1, det);
+        astore_report_user_event("pwd_change", u.name, 1, det);
+    }
+
+    a->result = MODIFY_OK;
+}
+
+static void mu_done(void * p)
+{
+    mu_job_t * a = (mu_job_t *)p;
+    if (a->cb) a->cb(a->result);
+    /* 明文凭据不残留（与 rpc.c / avt_done 同纪律） */
+    memset(a->old_pin, 0, sizeof(a->old_pin));
+    memset(a->new_pin, 0, sizeof(a->new_pin));
+    free(a);
+}
+
+void astore_modify_user(const modify_user_req_t * req, astore_int_cb_t cb)
+{
+    if (!req) return;
+    mu_job_t * a = (mu_job_t *)calloc(1, sizeof(*a));
+    if (!a) return;
+    a->cb          = cb;
+    a->id          = req->id;
+    a->valid_until = req->valid_until;
+    a->use_limit   = req->use_limit;
+    a->result      = MODIFY_ERR_STORE;
+    strncpy(a->new_name, req->new_name, sizeof(a->new_name) - 1);
+    strncpy(a->old_pin,  req->old_pin,  sizeof(a->old_pin)  - 1);
+    strncpy(a->new_pin,  req->new_pin,  sizeof(a->new_pin)  - 1);
+    strncpy(a->role,     req->role,     sizeof(a->role)     - 1);
+    worker_post(mu_worker, a, mu_done);
 }
 
 /* ---------------- net get psk ---------------- */

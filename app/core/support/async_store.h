@@ -60,6 +60,46 @@ void astore_verify_admin(const char * pin, astore_int_cb_t cb);
  * 回调 result：0=通过 1=错误 2=该码已使用（防重放） */
 void astore_admin_verify_totp(const char * code, astore_int_cb_t cb);
 
+/* ---------------- 修改用户（FR-9 v1.11「修改入口」） ----------------
+ *
+ * 背景：用户类别（角色）与临时授权的两项限制原先只有「创建入口」——一旦设错只能
+ * 删号重建，而删号会连带删除人脸凭据。故把改名 / 改 PIN / 改角色 / 改限制收敛成
+ * **同一个作业、一次落盘**。
+ *
+ * ★ 为什么必须合并成一次提交（对应历史缺陷 B3）：原实现是「先改名落盘并记审计，
+ *   再验旧 PIN」，旧 PIN 错时名字已经改了、审计也记了，UI 却报「旧 PIN 错误」——
+ *   部分成功的副作用撤不回来。现在所有校验在**落盘之前**做完，任何一条不通过
+ *   就整单作废：**要么全改，要么一个字段都不改**。
+ *
+ * ★ 为什么在 worker 里做（而不是主线程读快照 → 算好 → worker 写）：与
+ *   astore_auth_side 同理，「读→改→写」必须由同一个线程一口气做完，否则丢失更新。
+ *
+ * 结果码见 modify_result_t（UI 直接映射成文案，不要把负数当成功）。 */
+typedef enum {
+    MODIFY_OK            =  0,   /* 成功 */
+    MODIFY_ERR_OLDPIN    =  1,   /* 旧 PIN 错误（沿用 user_verify_pin 的语义） */
+    MODIFY_ERR_DUPNAME   =  2,   /* 新用户名已存在 */
+    MODIFY_ERR_LAST_ADMIN=  3,   /* 至少保留一名启用中的管理员 */
+    MODIFY_ERR_ROLE      =  4,   /* 角色非法 */
+    MODIFY_ERR_LIMIT     =  5,   /* 次数上限须大于已用次数（否则等于改配置即删号） */
+    MODIFY_ERR_STORE     = -1,   /* 无此用户 / 读盘或写盘失败 */
+} modify_result_t;
+
+typedef struct {
+    int     id;
+    char    new_name[32];   /* 空串 = 不改（原样保留） */
+    char    old_pin[16];    /* do_pin 时必填：改 PIN 必须先证明知道旧 PIN */
+    char    new_pin[16];    /* 空串 = 不改 PIN */
+    char    role[16];       /* 空串 = 不改角色；合法值 admin / user / temp */
+    int64_t valid_until;    /* 新角色为 temp 时生效（0 = 不限）；非 temp 一律清零 */
+    int     use_limit;      /* 同上 */
+    int     result;         /* 输出：modify_result_t */
+} modify_user_req_t;
+
+/* 提交一个「修改用户」作业。req 内的字符串会被拷进作业，调用后可立即复用/释放。
+ * cb 在主线程 worker_poll 派发，收到的是 req->result 同值的 result。 */
+void astore_modify_user(const modify_user_req_t * req, astore_int_cb_t cb);
+
 /* 网络 psk 读取 / 保存（内部 AES + PBKDF2 派生，量级同 PIN 校验）。 */
 void astore_net_get_psk(const char * ssid, astore_str_cb_t cb);
 void astore_net_add_wifi(const char * ssid, const char * sec, const char * psk, astore_int_cb_t cb);

@@ -11,6 +11,7 @@
 #include "ui/icons.h"               /* icon_label_colored：图标一律走图标字体 + theme token */
 #include "ui/ui_scale.h"
 #include "core/store/store.h"
+#include "core/store/store_cache.h"     /* 主线程读用户快照（不直连 store，满足门禁） */
 #include "core/support/async_store.h"
 #include "core/support/worker.h"
 #include "core/event_bus.h"
@@ -65,12 +66,30 @@ static char s_auth_pin[16]    = {0};
 
 /* 修改管理员密码 — 动态码二次确认（FR-3 敏感操作）状态 */
 static bool s_pwd_is_admin    = false;   /* 当前操作目标是否为管理员 */
-static char s_pending_old[16] = {0};     /* 暂存：管理员改密跨弹窗的 旧PIN */
-static char s_pending_new[16] = {0};     /* 暂存：管理员改密跨弹窗的 新PIN */
-static char s_pending_name[32]= {0};     /* 暂存：跨 OTP 弹窗的新用户名 */
-static bool s_pending_do_pin  = false;   /* 跨 OTP 弹窗：是否改 PIN */
-static bool s_pending_do_rename = false; /* 跨 OTP 弹窗：是否改名 */
 static char s_cur_name[32]    = {0};     /* 弹窗打开时的原始用户名，用于判定是否改名 */
+
+/* ---- 「修改信息」弹窗（FR-9 v1.11：可改角色与临时授权限制）----
+ * s_auth_for_modify：本次管理员 PIN 二次确认是**为修改信息**发起的（auth_result 里分叉）。
+ *   与 s_face_op 是同一套模式：二次确认弹窗是共用的，得知道「验完去干哪件事」。
+ * s_pending_mod：跨二次确认弹窗要透传的修改请求（异步结果回来时原弹窗已关）。
+ * s_ta_*：弹窗输入框的**显式句柄**。原先靠 dlg_get_tas() 按子对象创建顺序收集，
+ *   字段一多（现在 6 个）顺序就极易错位且不报错 —— 保存时会把次数写进 PIN。 */
+static bool              s_auth_for_modify = false;
+static modify_user_req_t s_pending_mod;
+
+static lv_obj_t * s_ta_name  = NULL;   /* 姓名 */
+static lv_obj_t * s_ta_old   = NULL;   /* 旧 PIN */
+static lv_obj_t * s_ta_new   = NULL;   /* 新 PIN */
+static lv_obj_t * s_ta_new2  = NULL;   /* 确认新 PIN */
+static lv_obj_t * s_ta_days  = NULL;   /* 有效期（天），仅临时用户 */
+static lv_obj_t * s_ta_limit = NULL;   /* 次数上限，仅临时用户 */
+
+static char      s_cur_role[16] = {0};   /* 弹窗打开时的角色，用于判定「是否真改了角色」 */
+
+/* 打开弹窗时该用户的临时授权现值（预填用，来自 store_cache 快照） */
+static int64_t   s_edit_until = 0;
+static int       s_edit_limit = 0;
+static int       s_edit_used  = 0;
 
 
 
@@ -126,12 +145,12 @@ static lv_obj_t * dlg_textarea_ex(lv_obj_t * parent, const char *label, bool pas
                                   bool number, int idx, int32_t w);
 static void dlg_role_row(void);
 static void dlg_temp_row(void);
-static void dlg_btn_row(void);
+static void dlg_btn_row(lv_event_cb_t save_cb);
 static void dlg_sync_role(void);
 static void role_btn_cb(lv_event_t * e);
 static void kb_focus_cb(lv_event_t * e);
 static void save_add_cb(lv_event_t * e);
-static void save_pwd_cb(lv_event_t * e);
+static void save_modify_cb(lv_event_t * e);
 static void do_del_cb(lv_event_t * e);
 static void dlg_cancel_cb(lv_event_t * e);
 static void dlg_ok_cb(lv_event_t * e);
@@ -153,9 +172,8 @@ static void pwd_otp_update_disp(void);
 static void pwd_otp_key_cb(lv_event_t * e);
 static void pwd_otp_ok_cb(lv_event_t * e);
 static void pwd_otp_cancel_cb(lv_event_t * e);
-static bool user_is_admin(int id);
-static void post_chg_pwd(int id, const char *oldp, const char *newp,
-                         const char *name, bool do_pin, bool do_rename);
+static void modify_done(int result);
+static void post_modify_user(const modify_user_req_t * r);
 
 /* 后台 worker 类型 */
 typedef struct {
@@ -166,27 +184,18 @@ typedef struct {
     int     use_limit;      /* 临时用户开锁次数上限（0 = 不限） */
     int     result;
 } add_user_job_t;
-typedef struct {
-    int  id;
-    char oldpin[16];
-    char newpin[16];
-    char newname[32];   /* 新用户名（改名时非空） */
-    bool do_pin;        /* 是否改 PIN */
-    bool do_rename;     /* 是否改名 */
-    int  result;
-} chg_pwd_job_t;
+/* 修改用户不再自己定义作业结构：改名 / 改 PIN / 改角色 / 改临时限制统一走
+ * async_store 的 modify_user_req_t（见 astore_modify_user 注释），
+ * 目的就是「一次落盘」——早期版本先改名落盘再验旧 PIN，旧 PIN 错时名字已经改了。 */
 /* del_face_id：仅「删除用户」路径使用 —— 待联动删除的模组侧模板号（-1 = 无需联动）。
  * 放在这里是因为 user_del 之后本地记录就没了，模板号必须在删之前取好。 */
 typedef struct { int id; int result; int del_face_id; } user_op_job_t;
 
-static void users_list_loaded(safe_user_t * list, int count);
-static void add_group_header(lv_obj_t * parent, const char * title, int count);
-static void add_user_row(const safe_user_t * u, bool is_admin, bool last_admin);
-static void fmt_temp_sub(const safe_user_t * u, char * out, size_t cap);
+/* （D24 拆分的遗留：下面 4 个函数在 page_users_rows.c 里各有自己的 static 定义，
+ * 本文件的这几行前向声明是拆文件时没清干净的死代码 —— 声明了却永不定义，
+ * 每次编译都刷 4 条 -Wunused-function。2026-10-09 清理。） */
 static void add_user_worker(void * p);
 static void add_user_done(void * p);
-static void chg_pwd_worker(void * p);
-static void chg_pwd_done(void * p);
 static void tog_worker(void * p);
 static void tog_done(void * p);
 static void del_check_loaded(safe_user_t * list, int count);
@@ -235,10 +244,14 @@ static lv_obj_t * dlg_open(const char *title, int w, int h)
     (void)h;   /* 兼容既有调用方签名；高度已由内容决定 */
     lv_obj_add_style(s_win, &st_panel, 0);
     lv_obj_set_style_radius(s_win, 16, 0);
-    /* 窗口同样关滚动：各弹窗内部一律用 flex 排布 + 定高，从不依赖滚动；
-     * 万一某天内容超高，应表现为「布局问题被看见」而不是「偷偷变成内部滚动、
-     * 按钮跑到折叠线以下」（这正是 SYSTEM 页历史缺陷的形态）。 */
-    lv_obj_set_scrollable(s_win, false);
+    /* ★ 2026-10-09 改为【可滚动】——这里是在推翻上面的旧注释，理由要写清楚：
+     *   「修改信息」自 FR-9 v1.11 起从 4 个字段涨到 6 个（姓名 / 旧 PIN / 新 PIN /
+     *   确认 / 角色分段 / 临时限制行），内容高度已超过 max_height（avail，板端
+     *   ≈360px）。不滚动的后果不是「布局问题被看见」，而是**保存按钮被裁到窗口外
+     *   根本点不到**——功能直接不可用，比悄悄滚动严重得多。折中：保留 max_height
+     *   夹紧（窗口不会顶到键盘下面），超高时允许纵向滚动，按钮至少可达。
+     *   「添加用户」等短表单内容不超高，开着滚动也毫无影响。 */
+    lv_obj_set_scrollable(s_win, true);
     /* ★ 修复：弹窗顶部距屏顶 SY(10)，底部 ≈ 360+10=370；1.0x 板键盘从 y=380 起，
      *      留 10px 缝隙；1.8x PC 同样不挡。 */
     lv_obj_align(s_win, LV_ALIGN_TOP_MID, 0, SY(10));
@@ -252,6 +265,10 @@ static lv_obj_t * dlg_open(const char *title, int w, int h)
     for (int i = 0; i < DLG_TA_MAX; i++)    s_dlg_tas[i] = NULL;
     for (int i = 0; i < ROLE_SEL_CNT; i++)  s_role_btns[i] = NULL;
     s_temp_row = NULL;
+    /* 「修改信息」的显式句柄同样要清：不清会在 save 回调里读到上一轮弹窗
+     * （已被 lv_obj_delete）的悬垂指针 —— 与上面 s_dlg_tas 是同一个坑。 */
+    s_ta_name = NULL; s_ta_old = NULL; s_ta_new = NULL; s_ta_new2 = NULL;
+    s_ta_days = NULL; s_ta_limit = NULL;
 
     lv_obj_t * t = lv_label_create(s_win);
     lv_label_set_text(t, title);
@@ -427,7 +444,10 @@ static void dlg_temp_row(void)
 
 /* 底部按钮行：保存 / 取消 同行并排（原来上下堆叠多占一行，弹窗被迫拉高，
  * 在 1.0x 板端会顶到软键盘）。 */
-static void dlg_btn_row(void)
+/* 弹窗底部「保存 + 取消」行。save_cb 由调用方传入（添加用户 / 修改信息共用）。
+ * ★ 带取消按钮：与「遮罩点击关闭」并不重复 —— 遮罩关闭是手势兜底，
+ *   明确的取消按钮是可见的退出路径（原「修改信息」只有保存，属遗漏）。 */
+static void dlg_btn_row(lv_event_cb_t save_cb)
 {
     lv_obj_t * row = lv_obj_create(s_win);
     lv_obj_set_size(row, SX(300), SY(44));
@@ -439,9 +459,11 @@ static void dlg_btn_row(void)
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(row, false);
 
+    /* save_cb 由调用方给：「添加用户」与「修改信息」共用这一行按钮，
+     * 只有保存回调不同（见 dlg_add_user / dlg_change_pwd）。 */
     lv_obj_t * save = ui_icon_text_button(row, LV_SYMBOL_SAVE, "保存",
                                           SX(150), SY(44), &st_accent_btn,
-                                          theme_color(TH_ACCENT_INK), save_add_cb, NULL);
+                                          theme_color(TH_ACCENT_INK), save_cb, NULL);
     lv_obj_add_style(save, &st_accent_btn_pr, LV_STATE_PRESSED);
 
     /* 取消按钮 — ★ 不用 st_ghost_btn（实测该样式的 text_color 有时不级联到 label，
@@ -507,7 +529,7 @@ static void dlg_add_user(void)
     dlg_textarea("确认 PIN",          true,  true,  2);
     dlg_role_row();
     dlg_temp_row();
-    dlg_btn_row();
+    dlg_btn_row(save_add_cb);
     dlg_sync_role();
 }
 
@@ -681,174 +703,214 @@ void pwd_btn_cb(lv_event_t * e)
     dlg_change_pwd();
 }
 
+/* role 字符串 → 分段按钮下标。
+ * ★ 打开「修改信息」时**必须**用它反查当前角色：s_role_sel 是全局单份状态，
+ *   「添加用户」把它初始化成 ROLE_SEL_USER（line 附近 dlg_add_user），编辑弹窗若
+ *   沿用这个默认值，会把管理员显示成「普通用户」——用户只是打开看一眼再点保存，
+ *   管理员就被降级了（写路径是整记录覆盖）。这是本轮最该防的一条。 */
+static role_sel_t role_from_key(const char * role)
+{
+    for (int i = 0; i < ROLE_SEL_CNT; i++)
+        if (strcmp(role, ROLE_KEY[i]) == 0) return (role_sel_t)i;
+    return ROLE_SEL_USER;
+}
+
 static void dlg_change_pwd(void)
 {
-    /* 改的是管理员吗？仅当真正改 PIN 时，保存前才强制走动态码二次确认 */
-    s_pwd_is_admin = user_is_admin(s_sel_id);
-
-    /* 记住弹窗打开时的原始用户名，保存时据其与输入框比对判断是否改名。
-     * 从行构建缓存取（主线程读内存，不直连 store，满足 QA-20 主线程门禁）。 */
-    const char * cur = name_cache_get(s_sel_id);
-    if (cur) {
-        strncpy(s_cur_name, cur, sizeof(s_cur_name) - 1);
-        s_cur_name[sizeof(s_cur_name) - 1] = '\0';
-    } else {
-        s_cur_name[0] = '\0';
+    /* 现值一律从 store_cache 快照读（主线程可读、不落盘、不阻塞）。
+     * ⚠ 不能用 user_load_all —— 那是同步读盘，违反「认证路径零同步落盘」纪律，
+     *   目前只是靠门禁白名单里的历史豁免活着，新代码不该再走老路。 */
+    safe_user_t cur;
+    memset(&cur, 0, sizeof(cur));
+    if (store_cache_find_by_id(s_sel_id, &cur) != 0) {
+        /* 快照还没发布（启动后首次加载未回）——此时拿不准当前角色，
+         * 与其显示一个可能是错的默认值让人点保存，不如直接不开。 */
+        dlg_tip("用户数据尚未加载，请稍候重试");
+        return;
     }
+
+    /* 改的是管理员吗？仅当真正改 PIN 时，保存前才强制走动态码二次确认（FR-3） */
+    s_pwd_is_admin = (strcmp(cur.role, "admin") == 0);
+
+    s_cur_name[0] = '\0';
+    const char * nm = name_cache_get(s_sel_id);          /* 行构建缓存（显示名） */
+    if (nm && nm[0])        strncpy(s_cur_name, nm, sizeof(s_cur_name) - 1);
+    else if (cur.name[0])   strncpy(s_cur_name, cur.name, sizeof(s_cur_name) - 1);
+    s_cur_name[sizeof(s_cur_name) - 1] = '\0';
+
+    strncpy(s_cur_role, cur.role, sizeof(s_cur_role) - 1);
+    s_cur_role[sizeof(s_cur_role) - 1] = '\0';
+    s_edit_until = cur.valid_until;
+    s_edit_limit = cur.use_limit;
+    s_edit_used  = cur.used_count;
+
+    s_role_sel = role_from_key(cur.role);      /* ★ 按当前角色反查，不用「添加」的默认值 */
 
     lv_obj_t * win = dlg_open("修改信息", SX(380), SY(470));  /* 修改信息 */
     (void)win;
 
     /* 姓名：置顶，预填当前用户名；文字键盘。留空或与原名相同 = 不改名 */
-    lv_obj_t * ta_name = dlg_textarea_ex(win, "姓名", false, false, 3, SX(300));
-    lv_textarea_set_text(ta_name, s_cur_name);
+    s_ta_name = dlg_textarea_ex(win, "姓名", false, false, 3, SX(300));
+    lv_textarea_set_text(s_ta_name, s_cur_name);
 
-    dlg_textarea("旧 PIN",             true, true, 0);
-    dlg_textarea("新 PIN(留空则只改名)", true, true, 1);  /* 默认焦点（数字键盘） */
-    dlg_textarea("确认新 PIN",           true, true, 2);
+    s_ta_old  = dlg_textarea("旧 PIN",             true, true, 0);
+    s_ta_new  = dlg_textarea("新 PIN(留空则只改名)", true, true, 1);  /* 默认焦点（数字键盘） */
+    s_ta_new2 = dlg_textarea("确认新 PIN",           true, true, 2);
 
-    lv_obj_t * save = ui_icon_text_button(s_win, LV_SYMBOL_SAVE, "保存",
-                                          SX(160), SY(44), &st_accent_btn,
-                                          theme_color(TH_ACCENT_INK), save_pwd_cb, NULL);
-    lv_obj_add_style(save, &st_accent_btn_pr, LV_STATE_PRESSED);
+    /* FR-9 v1.11：角色分段 + 临时授权限制（有效期 / 次数上限）。
+     * 与「添加用户」复用同一组控件，区别只在**初值来自当前用户**。 */
+    dlg_role_row();
+    dlg_temp_row();
+
+    /* 预填现值：次数上限直接填数字；有效期按「剩余天数」折算（向上取整）。
+     * 不预填的话，用户改个名字也会把「不限」覆盖上去 —— 那是静默的授权变更。 */
+    if (s_ta_limit && s_edit_limit > 0) {
+        char buf[12];
+        snprintf(buf, sizeof(buf), "%d", s_edit_limit);
+        lv_textarea_set_text(s_ta_limit, buf);
+    }
+    if (s_ta_days && s_edit_until > 0) {
+        int64_t left = s_edit_until - (int64_t)hal_time();
+        int days = (int)((left + 86399) / 86400);
+        if (days > 0 && days <= 365) {
+            char buf[12];
+            snprintf(buf, sizeof(buf), "%d", days);
+            lv_textarea_set_text(s_ta_days, buf);
+        }
+    }
+    /* 已用次数必须让用户看见：改上限要知道基线（上限 ≤ 已用 = 下次认证即删号） */
+    if (s_edit_used > 0 && s_msg) {
+        char tip[64];
+        snprintf(tip, sizeof(tip), "该用户已开锁 %d 次，上限需大于此值", s_edit_used);
+        lv_label_set_text(s_msg, tip);
+    }
+
+    dlg_sync_role();          /* 刷新选中态 + 按角色显示/隐藏限制行 */
+    dlg_btn_row(save_modify_cb);
 }
 
-static void chg_pwd_worker(void * p)
+/* 提交（二次确认已通过，或本次不需要确认）。
+ * ★ 改名 / 改 PIN / 改角色 / 改限制是**同一次提交**：全部校验在 worker 里
+ *   落盘之前完成，要么全改，要么一个字段都不改（详见 astore_modify_user）。 */
+static void post_modify_user(const modify_user_req_t * r)
 {
-    chg_pwd_job_t * a = (chg_pwd_job_t *)p;
-    safe_user_t * us = NULL;
-    int n = 0;
-    if (user_load_all(&us, &n) != 0) { user_list_free(us); a->result = -1; return; }
-    bool found = false;
-    for (int i = 0; i < n; i++) if (us[i].id == a->id) { found = true; break; }
-    user_list_free(us);
-    if (!found) { a->result = -1; return; }
-
-    int res = 0;
-    /* —— 改名优先：复用 store 层 user_rename（内部 save_users 原子写） —— */
-    if (a->do_rename) {
-        int rr = user_rename(a->id, a->newname);
-        if (rr == -2)      { a->result = 2;  return; }  /* 重名 */
-        else if (rr == -1) { a->result = -1; return; }   /* 写盘失败 */
-        log_append("user_rename", a->newname, 1, "name updated");
-        astore_report_user_event("user_rename", a->newname, 1, "name updated");
-    }
-    /* —— 改 PIN：沿用原流程（原 PIN 校验 + 重算哈希 + 整记录覆盖） —— */
-    if (a->do_pin) {
-        safe_user_t * us2 = NULL; int n2 = 0;
-        if (user_load_all(&us2, &n2) != 0) { user_list_free(us2); a->result = -1; return; }
-        safe_user_t u2; bool f2 = false;
-        for (int i = 0; i < n2; i++) if (us2[i].id == a->id) { u2 = us2[i]; f2 = true; break; }
-        user_list_free(us2);
-        if (!f2) { a->result = -1; return; }
-        if (user_verify_pin(u2.name, a->oldpin) != 0) { a->result = 1; return; }
-        uint8_t salt[16];
-        pin_hash(a->newpin, salt, u2.pin_hash);
-        salt_to_hex(salt, u2.pin_salt);
-        u2.failed_attempts = 0;
-        u2.lock_until = 0;
-        res = (user_update(&u2) == 0) ? 0 : -1;
-        if (res == 0) log_append("pwd_change", u2.name, 1, "pin updated");
-        /* 改 PIN 是最该被远程看见的变更之一：谁在什么时候改了自己的凭据，
-         * 只有本地日志的话，云端侧完全无感。 */
-        if (res == 0) astore_report_user_event("pwd_change", u2.name, 1, "pin updated");
-    }
-    a->result = res;
+    astore_modify_user(r, modify_done);
 }
 
-static void chg_pwd_done(void * p)
+/* 修改结果回填（主线程 worker_poll 派发）。
+ * ★ 失败也要 rebuild_list()：早期实现只在成功时刷列表，「改名已落盘、界面还显示
+ *   旧名」的不一致就出在这里（部分提交 + 不刷新）。现在失败是零落盘，刷新只是
+ *   把界面拉回真实状态，代价极小、收益是永不出现幽灵界面。 */
+static void modify_done(int result)
 {
-    chg_pwd_job_t * a = (chg_pwd_job_t *)p;
-    if (a->result == 0) {
+    rebuild_list();
+    if (result == MODIFY_OK) {
         close_dlg();
-        rebuild_list();
-    } else if (a->result == 1) {
-        dlg_set_msg("旧 PIN 错误");  /* 旧 PIN 错误 */
-    } else if (a->result == 2) {
-        dlg_set_msg("用户名已存在");  /* 用户名已存在 */
-    } else {
-        dlg_set_msg("保存失败");  /* 保存失败 */
-    }
-    free(a);
-}
-
-static void save_pwd_cb(lv_event_t * e)
-{
-    (void)e;
-    lv_obj_t * tas[4];
-    int ti = dlg_get_tas(tas, 4);
-    if (ti < 4) return;
-
-    const char * name  = lv_textarea_get_text(tas[0]);  /* 姓名 */
-    const char * oldp  = lv_textarea_get_text(tas[1]);  /* 旧 PIN */
-    const char * newp  = lv_textarea_get_text(tas[2]);  /* 新 PIN */
-    const char * newp2 = lv_textarea_get_text(tas[3]);  /* 确认新 PIN */
-
-    bool do_pin    = (newp[0] != '\0');                 /* 新 PIN 非空 → 走改密 */
-    bool do_rename = (name[0] != '\0' && strcmp(name, s_cur_name) != 0);
-
-    if (!do_pin && !do_rename) {
-        dlg_set_msg("姓名与新 PIN 均未改动");  /* 无改动 */
         return;
     }
+    const char * msg = "保存失败";
+    switch (result) {
+    case MODIFY_ERR_OLDPIN:     msg = "旧 PIN 错误";            break;
+    case MODIFY_ERR_DUPNAME:    msg = "用户名已存在";           break;
+    case MODIFY_ERR_LAST_ADMIN: msg = "至少保留一名管理员";     break;
+    case MODIFY_ERR_ROLE:       msg = "角色非法";               break;
+    case MODIFY_ERR_LIMIT:      msg = "次数上限需大于已用次数"; break;
+    default:                                                    break;
+    }
+    /* 走二次确认的路径上，信息弹窗在确认前就已经关了（s_msg == NULL）——
+     * 此时文案要落到独立提示弹窗，否则用户只看到什么都没发生。 */
+    if (s_msg) dlg_set_msg(msg);
+    else       dlg_tip(msg);
+}
 
+static void save_modify_cb(lv_event_t * e)
+{
+    (void)e;
+    if (s_sel_id < 0) return;
+    /* 句柄来自上一行 dlg_change_pwd：任一为空说明弹窗被重建过，不猜字段顺序 */
+    if (!s_ta_name || !s_ta_old || !s_ta_new || !s_ta_new2) return;
+
+    modify_user_req_t r;
+    memset(&r, 0, sizeof(r));
+    r.id = s_sel_id;
+
+    const char * name  = lv_textarea_get_text(s_ta_name);
+    const char * oldp  = lv_textarea_get_text(s_ta_old);
+    const char * newp  = lv_textarea_get_text(s_ta_new);
+    const char * newp2 = lv_textarea_get_text(s_ta_new2);
+
+    /* 姓名：非空且与原名不同才改名（留空 = 不改） */
+    if (name[0] && strcmp(name, s_cur_name) != 0)
+        strncpy(r.new_name, name, sizeof(r.new_name) - 1);
+
+    /* PIN：新 PIN 非空即视为要改密，旧 PIN 为凭据 */
+    const bool do_pin = (newp[0] != '\0');
     if (do_pin) {
         const safe_policy_t * pol = user_policy();
         size_t plen = strlen(newp);
         if (plen < (size_t)pol->pin_min_len || plen > (size_t)pol->pin_max_len) {
-            dlg_set_msg("新 PIN 长度需 4-8 位");  /* 新 PIN 长度需 4-8 位 */
+            dlg_set_msg("新 PIN 长度需 4-8 位");
             return;
         }
         if (strcmp(newp, newp2) != 0) {
-            dlg_set_msg("两次新 PIN 不一致");  /* 两次新 PIN 不一致 */
+            dlg_set_msg("两次新 PIN 不一致");
             return;
         }
+        strncpy(r.old_pin, oldp, sizeof(r.old_pin) - 1);
+        strncpy(r.new_pin, newp, sizeof(r.new_pin) - 1);
     }
 
-    /* ★ 敏感操作（管理员改 PIN）：先过动态码二次确认，通过后才提交 */
+    /* 角色：与打开时的角色不同才算改动（不是「与默认不同」） */
+    const char * cur_role = ROLE_KEY[s_role_sel];
+    const bool do_role = (strcmp(cur_role, s_cur_role) != 0);
+    if (do_role) strncpy(r.role, cur_role, sizeof(r.role) - 1);
+
+    /* 临时授权限制：仅当角色为临时用户时读取；与现值不同才算改动。
+     * 语义与「添加用户」一致：留空 = 不限。 */
+    bool do_limit = false;
+    if (strcmp(cur_role, "temp") == 0) {
+        const char * ds = s_ta_days  ? lv_textarea_get_text(s_ta_days)  : "";
+        const char * ls = s_ta_limit ? lv_textarea_get_text(s_ta_limit) : "";
+        int64_t until = 0;
+        int     lim   = 0;
+        if (ds[0]) {
+            int days = atoi(ds);
+            if (days <= 0 || days > 365) { dlg_set_msg("有效期需 1-365 天"); return; }
+            until = (int64_t)hal_time() + (int64_t)days * 86400;
+        }
+        if (ls[0]) {
+            lim = atoi(ls);
+            if (lim <= 0 || lim > 9999) { dlg_set_msg("次数上限需 1-9999 次"); return; }
+        }
+        r.valid_until = until;
+        r.use_limit   = lim;
+        if (until != s_edit_until || lim != s_edit_limit) do_limit = true;
+    }
+
+    if (!r.new_name[0] && !do_pin && !do_role && !do_limit) {
+        dlg_set_msg("姓名、PIN、类别与限制均未改动");
+        return;
+    }
+
+    /* ★ 敏感操作二次确认（FR-1「角色分配等敏感操作」/ FR-7「在操作处验证」）：
+     *   - 改角色 / 改临时授权限制 → 管理员 PIN 二次确认（与删除用户同一套）；
+     *   - 管理员改自己 PIN      → 动态码（FR-3，最强）；
+     *   两者同时发生时取动态码（它覆盖了管理员 PIN 的强度，且不重复打扰）。 */
     if (s_pwd_is_admin && do_pin) {
-        strncpy(s_pending_old, oldp, sizeof(s_pending_old) - 1);
-        strncpy(s_pending_new, newp, sizeof(s_pending_new) - 1);
-        strncpy(s_pending_name, name, sizeof(s_pending_name) - 1);
-        s_pending_do_pin = do_pin;
-        s_pending_do_rename = do_rename;
+        memcpy(&s_pending_mod, &r, sizeof(r));
         close_dlg();          /* 收起信息弹窗 */
         pwd_otp_show();       /* 弹动态码键盘 */
         return;
     }
-
-    post_chg_pwd(s_sel_id, oldp, newp, name, do_pin, do_rename);
-}
-
-/* 提交（管理员已通过动态码，或非管理员直接走这里）。
- * name/do_pin/do_rename 透传：改名与改 PIN 可独立或组合。 */
-static void post_chg_pwd(int id, const char *oldp, const char *newp,
-                         const char *name, bool do_pin, bool do_rename)
-{
-    chg_pwd_job_t * a = (chg_pwd_job_t *)calloc(1, sizeof(*a));
-    if (!a) return;
-    a->id = id;
-    strncpy(a->oldpin,  oldp,  sizeof(a->oldpin)  - 1);
-    strncpy(a->newpin,  newp,  sizeof(a->newpin)  - 1);
-    strncpy(a->newname, name,  sizeof(a->newname) - 1);
-    a->newname[sizeof(a->newname) - 1] = '\0';
-    a->do_pin    = do_pin;
-    a->do_rename = do_rename;
-    worker_post(chg_pwd_worker, a, chg_pwd_done);
-}
-
-/* 目标用户是否为管理员（同步读 users.json，文件小、无阻塞感） */
-static bool user_is_admin(int id)
-{
-    safe_user_t * us = NULL;
-    int n = 0;
-    if (user_load_all(&us, &n) != 0) { user_list_free(us); return false; }
-    bool r = false;
-    for (int i = 0; i < n; i++) {
-        if (us[i].id == id) { r = (strcmp(us[i].role, "admin") == 0); break; }
+    if (do_role || do_limit) {
+        memcpy(&s_pending_mod, &r, sizeof(r));
+        s_auth_for_modify = true;
+        close_dlg();
+        auth_show_ctx("修改用户类别 / 授权限制需管理员验证");
+        return;
     }
-    user_list_free(us);
-    return r;
+
+    post_modify_user(&r);
 }
 
 /* ================================================================
@@ -941,6 +1003,9 @@ static void auth_cancel_cb(lv_event_t * e)
     s_face_op = FACE_OP_NONE;
     s_face_pending_uid = -1;
     s_face_pending_tpl = -1;
+    /* 「修改信息」的待提交请求同样作废：标志不清，下一次删除用户的二次确认
+     * 通过后会错误地把上一条修改请求提交出去。 */
+    s_auth_for_modify = false;
 }
 
 /* PBKDF2 校验在后台线程跑，结果回主线程 */
@@ -955,6 +1020,13 @@ static void auth_result(int r)
         }
         if (s_face_op == FACE_OP_DELETE) {
             dlg_confirm_face("确定删除该用户已绑定的人脸？\n删除后该用户将无法刷脸开锁。", "确认删除");
+            return;
+        }
+        /* 本次二次确认是为「修改信息」（改角色 / 改临时授权限制）发起的 ——
+         * 与上面人脸分叉同一套模式：验完回到该干的那件事。 */
+        if (s_auth_for_modify) {
+            s_auth_for_modify = false;
+            post_modify_user(&s_pending_mod);
             return;
         }
         astore_load_users(del_check_loaded);   /* 校验通过 → 进入删除确认 */
@@ -1597,8 +1669,8 @@ static void pwd_otp_verify_done(int result)
 
     if (result == 0) {
         pwd_otp_close();
-        post_chg_pwd(s_sel_id, s_pending_old, s_pending_new, s_pending_name,
-                     s_pending_do_pin, s_pending_do_rename);
+        /* s_pending_mod 在保存时已整包暂存（含角色与限制），动态码通过即原样提交 */
+        post_modify_user(&s_pending_mod);
         return;
     }
     s_otp_pin[0] = '\0';
@@ -1729,10 +1801,12 @@ void page_users_test_open_auth_dlg(void)
     auth_show();
 }
 
-/* ★ 测试钩子：SAFE_TEST_DLG=change_pwd 直接打开"修改密码"弹窗 */
+/* ★ 测试钩子：SAFE_TEST_DLG=change_pwd 直接打开"修改信息"弹窗。
+ * s_sel_id 取 1（store_init 建的默认管理员）—— 取 0 是历史写法，但 0 不是真实
+ * 用户 id：弹窗改从 store_cache 读现值后会取不到人而拒绝打开，钩子必须给真 id。 */
 void page_users_test_open_change_pwd_dlg(void)
 {
-    s_sel_id = 0;
+    s_sel_id = 1;
     dlg_change_pwd();
 }
 
