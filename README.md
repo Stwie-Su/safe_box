@@ -58,7 +58,7 @@ lv_port_linux/
 ├─ cmake/          工具链与平台 CMake 片段
 ├─ tests/          ctest 用例（纯逻辑、可确定性验证）
 ├─ tools/          构建/部署/排查脚本（含 OTA、证书、抓屏、服务发现）
-├─ 规约/           导航 README + 需求 / 技术路线 / 开发进度 / Bug台账 + 案例 / 参考 / 归档
+├─ 规约/           需求规约 / 技术路线规约 / Bug案例集 + 归档/（全量 Bug 台账）
 ├─ lvgl/           LVGL 子模块（63M，**不要 grep**）
 ├─ ports/          LVGL 官方移植层头文件（platform/CMakeLists 引用）
 ├─ third_party/    第三方源码：stb_image / aes / sha256（camera 与 crypto 使用）
@@ -68,8 +68,9 @@ lv_port_linux/
 
 **构建**：`./build_pc.sh`（PC/SDL）；
 交叉构建 `cmake -B build_board --toolchain cmake/arm-linux.cmake -DPython3_EXECUTABLE=/usr/bin/python3 && cmake --build build_board -j4`。
-**测试**：`ctest --test-dir build_pc`（19 项）。
+**测试**：`ctest --test-dir build_pc`（24 项）。
 **文档入口**：面向人看 README；面向 agent 看 `CLAUDE.md`（含目录禁区与省上下文纪律）；
-需求/设计看 `规约/`（先看 `规约/README.md` 导航）；排错先查 `规约/Bug台账.md`。
+需求/设计看 `规约/需求规约.md` + `规约/技术路线规约.md`；排错先看 `规约/Bug案例集.md`（定位方法论），
+缺陷清单查 `规约/归档/Bug台账_全量.md`。
 
 厂商资料（PDF）不入库，已移至 `~/桌面/中间产物/06_资料/`。
