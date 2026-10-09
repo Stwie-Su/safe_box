@@ -98,6 +98,16 @@ if(SAFE_BASH)
     add_test(NAME e2e_headless
              COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/e2e_headless.py --app $<TARGET_FILE:lvglsim>)
     set_tests_properties(e2e_headless PROPERTIES TIMEOUT 180)
+
+    # FR-29 OTA 期① 无头验收（需求 §10 集成层）：自带支持 Range/206 的 HTTP server，
+    # 在临时目录里跑完整 check → apply 链路，覆盖 正常升级 / 摘要错 / 签名错 /
+    # 剥 hmac 字段 / 版本不符（均要求拒绝且不留残余）/ 断点续传 / kill -9 断电续传。
+    # 此前 OTA 只在真机上手测过一次（reports/device.log），**无可复跑载体**——
+    # 脚本把板端路径写死后，PC 上跑就会往真实系统路径写。加路径 env 覆盖后才可能有
+    # 这条用例；它因此也是「板端默认行为未变」的回归闸门。
+    add_test(NAME ota_acceptance
+             COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/ota_acceptance.py)
+    set_tests_properties(ota_acceptance PROPERTIES TIMEOUT 600)
 endif()
 
 # ---- Sanitizer 验证（**不默认开启**）----
