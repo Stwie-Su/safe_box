@@ -5,7 +5,7 @@
 >
 > **编号规则**：`D##` 全局递增，**不复用、不重排**（另有少量 `QA-##` 为早期编号，保留原样）。
 > ⚠ **新增前必做**：`grep -rn '^| D' Bug台账_全量.md | tail -20` 确认下一个可用编号 —— 本项目撞号撞过两次。
-> 当前已用到 **D32**，下一个是 **D33**。
+> 当前已用到 **D37**，下一个是 **D38**。
 
 ## 更新规则（写清楚才不会漏）
 
@@ -38,6 +38,8 @@
 | D27b | OTA 本地回退永远失败 | 回退旧包却拿新包 manifest 的 sha/hmac 校验 | 回退时切到 LOCAL manifest 自带摘要 | 校验对象必须与被校物一致 |
 | D34 | 断电 / 断网后**断点续传形同虚设**：残片被自己的失败处理删掉 | `ota_apply.sh` 只要 `ota_pkg` 非空就往下走 sha 终验 —— 半截残片必然 ERR_SHA，而 ERR_SHA 分支 `rm -f ota_pkg` 把残片删了 → 下次永远从头下 | 下载未完成（`wait` 非 0 或 `GOT < TOTAL`）单独判 `ERR_DOWNLOAD` 并**保留残片**；只有下满后 sha 不符才是坏包，才删 | **「没下完」与「下完了但是坏的」是两件事**，失败处理必须分开：前者要保留进度（续传），后者要清除（安全）。一条 `if` 覆盖两种失败态，就会用安全的处理方式干掉可用的进度 |
 | D35 | OTA 无法无头验收（只能上板手测一次） | `ota_check.sh` / `ota_apply.sh` 把 `/tmp`、`/var/ota`、`/usr/share/lvgl`、`/etc/safe/ota.key` 全写死 → PC 上跑会往真实系统路径写 | 两个脚本加路径 env 覆盖（默认值与板端完全一致，板端行为零变化）；新增 `tools/ota_acceptance.py`（自带支持 Range 的 HTTP server）并挂进 ctest | **不可验收即不可复现**。写死路径 = 把验收绑死在唯一一台设备上；加 env 覆盖时默认值必须是原值，否则就变成改板端行为 |
+| D36 | 部署后日志版本串不可追溯：二进制是 HEAD 构建却自称 4 天前的 `31d4f92-dirty` | `SafeVersion.cmake` 用 `configure_file` 生成版本头，只在 CMake **configure 阶段**执行；增量 `cmake --build` 不重新 configure → 版本头冻结在首次 configure 时刻 | 临时处置：部署前重跑 `cmake .` 刷新版本头（本次验收已这样做）；根治待办：版本头生成改为 build 时自定义命令（每次链接前刷新） | **版本号是日志的一部分——不可追溯的版本号等于没有**。`configure_file` 静态生成的东西不会随增量构建更新，凡「编译期固化动态事实（git 描述/时间）」的文件都必须挂在 build 时序里刷新 |
+| D37 | MQTT 重连后 broker retained 状态仍是 `online:0`，新订阅者先误判设备离线 | LWT 以 qos1 retain=1 发 `safe/status {online:0}`，断线时覆盖 retain；但重连成功后从未发布 `online:1` 的 retained 消息 → 离线遗嘱永久留在 broker，仅靠 5s 周期 status(qos0 retain0) 纠正 | 待修：连接成功（connack 后）立即发布一条 `online:1` retained 状态，或周期 status 带 retain 标志 | **遗嘱只管「死了」，不管「活过来了」**。配对状态（online/offline）双方必须用相同的 retain 策略，否则最后一印象永远是死前的状态 |
 
 ## 三、并发 / 线程层
 
@@ -66,6 +68,7 @@
 | D29 | 换 WiFi 后 MQTT 永久断线 | Windows DHCP 地址漂移，板端写死 IP | `find_broker.py` 服务发现（TLS 握手 + CA 校验为判据） | 写死 IP 的契约在 DHCP 环境必碎 |
 | D29b | 换网段后 TLS verify 失败 | broker 证书 SAN 不含新 IP | SAN 多 IP 余量 + 重签 | 证书 SAN 与「板端连接字符串」是同一份契约，网段变化必须同时改两处 |
 | — | 新网段 TCP refused | 防火墙按接口 / 配置文件拦截 | `netsh advfirewall` 放行规则 | 同机多地址对照测试可瞬间排除防火墙 |
+| D36 | 接 RTC 电池后**间歇性无法开机**：屏幕全黑、串口零输出；拔电池则正常 | 电池**无隔离二极管直连 `VDD_SNVS_IN`**：上电窗口（3V3 未建立）内电池经内部 ESD 管向主域倒灌，CR1220 内阻压降把 SNVS 拉低 → 跌破 POR 阈值 → 复位循环（串口抓到 1.5s 间隔的三连 `Reset cause: POR`）。踩中 NXP 明令禁止的 back-voltage | 硬件：J18 并 100µF 电容 / 电池正极串肖特基（同官方 EVK 的 BAT54C 或门）/ 换新电池；操作：**先插电池再插 12V**，黑屏按 POWER 键再等满 40s | ①**电路事实（原理图+datasheet）优先于现象**，没这步后面全是猜；②「间歇性」故障靠**连续记录**（后台串口带毫秒时间戳）变可复现——肉眼抓不到 1.5s 的三连 POR；③`Reset cause: POR/WDOG` 是**硬件掉电 vs 软件死机**的分水岭；④「黑屏」要分两型：串口零输出=CPU 没跑，串口正常=系统在跑只是屏没亮/等待不足；⑤用户 A/B 对比是切割变量最快的路径；⑥假设必须绑定可证伪判据，错了公开撤回（本例撤回 3 个） |
 
 ---
 
