@@ -172,7 +172,7 @@ lv_obj_t * page_settings_create(lv_obj_t * parent)
 
     lv_obj_t * v_src = NULL;
     info_row(left, "时钟源", &v_src);
-    if (v_src) lv_label_set_text(v_src, hal_time_source() == TIME_SRC_RTC ? "rtc（DS3231）" : "sys（系统时间）");
+    if (v_src) lv_label_set_text(v_src, hal_time_source() == TIME_SRC_RTC ? "rtc（硬件 RTC，断电保持）" : "sys（系统时间，断电丢失）");
 
     lv_obj_t * v_theme = NULL;
     info_row(left, "当前主题", &v_theme);
