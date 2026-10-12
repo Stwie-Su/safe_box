@@ -5,7 +5,7 @@
 >
 > **编号规则**：`D##` 全局递增，**不复用、不重排**（另有少量 `QA-##` 为早期编号，保留原样）。
 > ⚠ **新增前必做**：`grep -rn '^| D' Bug台账_全量.md | tail -20` 确认下一个可用编号 —— 本项目撞号撞过两次。
-> 当前已用到 **D37**，下一个是 **D38**。
+> 当前已用到 **D38**，下一个是 **D39**。
 
 ## 更新规则（写清楚才不会漏）
 
@@ -38,6 +38,7 @@
 | D27b | OTA 本地回退永远失败 | 回退旧包却拿新包 manifest 的 sha/hmac 校验 | 回退时切到 LOCAL manifest 自带摘要 | 校验对象必须与被校物一致 |
 | D34 | 断电 / 断网后**断点续传形同虚设**：残片被自己的失败处理删掉 | `ota_apply.sh` 只要 `ota_pkg` 非空就往下走 sha 终验 —— 半截残片必然 ERR_SHA，而 ERR_SHA 分支 `rm -f ota_pkg` 把残片删了 → 下次永远从头下 | 下载未完成（`wait` 非 0 或 `GOT < TOTAL`）单独判 `ERR_DOWNLOAD` 并**保留残片**；只有下满后 sha 不符才是坏包，才删 | **「没下完」与「下完了但是坏的」是两件事**，失败处理必须分开：前者要保留进度（续传），后者要清除（安全）。一条 `if` 覆盖两种失败态，就会用安全的处理方式干掉可用的进度 |
 | D35 | OTA 无法无头验收（只能上板手测一次） | `ota_check.sh` / `ota_apply.sh` 把 `/tmp`、`/var/ota`、`/usr/share/lvgl`、`/etc/safe/ota.key` 全写死 → PC 上跑会往真实系统路径写 | 两个脚本加路径 env 覆盖（默认值与板端完全一致，板端行为零变化）；新增 `tools/ota_acceptance.py`（自带支持 Range 的 HTTP server）并挂进 ctest | **不可验收即不可复现**。写死路径 = 把验收绑死在唯一一台设备上；加 env 覆盖时默认值必须是原值，否则就变成改板端行为 |
+| D38 | 换网后 MQTT 持续断链且**零报错**（表象像「MQTT 崩了」） | ①启动脚本只跑一次 `find_broker`，而 WiFi 要到 **~27s** 才 link ready、`S05lvgl` 几秒就起 → 那次扫描必然失败并回退陈旧 hint 地址 `10.123.24.51`（几个月前的地址）；②HOST 只在启动时取一次：`config.c` 读 env → `mqtt_start` 拷进 `g_host`，**运行期无法订正**。两因叠加 = 连错机器且永远不重试，`connects=0 reconnects=0` | ①新增 `tools/broker_watch.sh` 后台周期扫描，结果 `tmp + rename` **原子写入** `/etc/safe/broker_host`；②`mqtt_client.c` 每次建连前读该文件并更新 `g_host`（文件不存在则跳过，PC 无头行为零变化）。实证：watch 订正 `10.123.24.51 → 10.106.222.51`，`connected` 且上报 `mqtt_online=1` | **「一次性发现」不等于「自愈」——发现动作必须挂在会被重复触发的路径上**（这里是「每次建连」），否则环境一变就永久失效；通知渠道要用原子替换，否则读者会撞上半截内容；「零报错」是最危险的故障形态，重试计数全零就是它的指纹 |
 | D36 | 部署后日志版本串不可追溯：二进制是 HEAD 构建却自称 4 天前的 `31d4f92-dirty` | `SafeVersion.cmake` 用 `configure_file` 生成版本头，只在 CMake **configure 阶段**执行；增量 `cmake --build` 不重新 configure → 版本头冻结在首次 configure 时刻 | 临时处置：部署前重跑 `cmake .` 刷新版本头（本次验收已这样做）；根治待办：版本头生成改为 build 时自定义命令（每次链接前刷新） | **版本号是日志的一部分——不可追溯的版本号等于没有**。`configure_file` 静态生成的东西不会随增量构建更新，凡「编译期固化动态事实（git 描述/时间）」的文件都必须挂在 build 时序里刷新 |
 | D37 | MQTT 重连后 broker retained 状态仍是 `online:0`，新订阅者先误判设备离线 | LWT 以 qos1 retain=1 发 `safe/status {online:0}`，断线时覆盖 retain；但重连成功后从未发布 `online:1` 的 retained 消息 → 离线遗嘱永久留在 broker，仅靠 5s 周期 status(qos0 retain0) 纠正 | 待修：连接成功（connack 后）立即发布一条 `online:1` retained 状态，或周期 status 带 retain 标志 | **遗嘱只管「死了」，不管「活过来了」**。配对状态（online/offline）双方必须用相同的 retain 策略，否则最后一印象永远是死前的状态 |
 
