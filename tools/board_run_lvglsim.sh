@@ -43,6 +43,12 @@ printf '\033[9;0]' > /dev/tty1 2>/dev/null
 # insmod ch341（已加载时静默失败，无害）
 insmod /lib/modules/4.9.88/extra/ch341.ko 2>/dev/null
 
+# broker 地址守护：后台周期性订正代理主机（换网自愈，见 D38）
+if ! kill -0 "$(cat /var/run/broker_wd.pid 2>/dev/null)" 2>/dev/null; then
+    setsid /usr/share/lvgl/broker_watch.sh >> /tmp/broker_watch.log 2>&1 &
+    echo $! > /var/run/broker_wd.pid
+fi
+
 # OTA 健康标记 + 回滚看门狗：应用 20s 后清标记；45s 未清 -> 看门狗回滚 .old
 date +%s > /usr/share/lvgl/.ota_pending
 if ! kill -0 "$(cat /var/run/ota_wd.pid 2>/dev/null)" 2>/dev/null; then

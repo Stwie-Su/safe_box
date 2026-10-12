@@ -118,6 +118,37 @@ typedef struct {
 /* ---------------- 全局状态 ---------------- */
 
 static char g_host[HOST_MAX];
+
+/* broker 地址热更新（换网自愈）：
+ * 后台 broker_watch.sh 周期性扫描可用代理，把结果**原子写入**地址文件；
+ * 这里在**每次建连前**读一次 —— 于是换网后无需重启进程即可连上新 broker。
+ *
+ * 为什么必须放在建连前而不是只在 mqtt_start 取一次：实测板子 WiFi 要到 ~27s 才
+ * link ready，而 S05lvgl 几秒就起来了，启动那一次扫描必然失败并回退到一个陈旧
+ * 的 hint 地址，此后**再也不重试** —— 表象是「MQTT 一直断链且零报错」（D38）。
+ *
+ * 路径可用 SAFE_BROKER_HOST_FILE 覆盖；文件不存在时直接返回
+ * （PC 无头环境没有这个文件，行为与加之前完全一致）。 */
+static void mqtt_refresh_host_from_file(void)
+{
+    const char * path = getenv("SAFE_BROKER_HOST_FILE");
+    if(path == NULL || *path == '\0') path = "/etc/safe/broker_host";
+
+    FILE * fp = fopen(path, "r");
+    if(fp == NULL) return;                      /* 未启用热更新：保持原地址 */
+
+    char buf[HOST_MAX];
+    if(fgets(buf, sizeof(buf), fp) == NULL) { fclose(fp); return; }
+    fclose(fp);
+
+    buf[strcspn(buf, "\r\n")] = '\0';
+    if(buf[0] == '\0') return;
+    if(strcmp(buf, g_host) == 0) return;
+
+    printf("[MQTT] broker 地址热更新：%s -> %s（换网自愈）\n", g_host, buf);
+    snprintf(g_host, sizeof(g_host), "%s", buf);
+}
+
 static int  g_port = 1883;
 static char g_client_id[CID_MAX];
 static mqtt_msg_cb_t g_cb = NULL;
@@ -304,6 +335,9 @@ static void do_open(uint32_t now_ms)
             return;
         }
     }
+    /* ★ 每次建连前刷新一次 broker 地址（换网自愈，见函数注释） */
+    mqtt_refresh_host_from_file();
+
     int fd = tls_stream_connect(g_ts, g_host[0] ? g_host : "127.0.0.1",
                                 g_port > 0 ? g_port : 1883);
     if (fd < 0) {
