@@ -79,8 +79,8 @@ legacy_case() {
         # 是设计的一部分（PIN / TOTP 校验必须读真实文件、回写防重放计数器）。
         # ★ 调用方纪律（本条豁免成立的前提，改动时务必复核）：这些函数**只允许在
         #   worker 线程调用**——PIN 走 astore/pin_worker、TOTP 走 otp_worker、
-        #   管理员二次确认走 astore_verify_admin。新增任何**非 auth_verify_ 前缀**
-        #   的函数若在文件内直连 store，门禁会拦下。
+        #   管理员二次确认走 astore_verify_admin。新增函数若在文件内直连 store
+        #   且未登记，门禁会拦下。
         app/core/auth/auth_verify.c::auth_verify_*)      return 0 ;;
         # 同为对外判定接口（原 backend_ 前缀族；v1.7 随文件更名后改为逐个登记）。
         app/core/auth/auth_verify.c::auth_admin_verify_totp) return 0 ;;
