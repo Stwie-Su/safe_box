@@ -1,6 +1,6 @@
 /**
  * @file page_users_internal.h
- * 用户管理页拆分契约（D24）：page_users.c（页面骨架）+ page_users_rows.c
+ * 用户管理页拆分接口约定（D24）：page_users.c（页面骨架）+ page_users_rows.c
  * （列表/行渲染）+ page_users_dlg.c（弹窗族与业务操作）。
  * 仅三文件之间共享的符号放这里；页面对外接口仍在 page_users.h。
  * 拆分原则：纯搬移零逻辑改动；共享状态集中定义在骨架文件（page_users.c）。

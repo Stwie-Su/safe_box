@@ -29,7 +29,7 @@
 #include "core/store/store.h"
 #include "core/config.h"
 #include "core/support/async_store.h"
-#include "core/support/ota_status.h"  /* 状态契约解析（纯函数，ctest 锁定） */
+#include "core/support/ota_status.h"  /* 状态接口约定解析（纯函数，ctest 锁定） */
 #include "core/support/worker.h"
 #include "core/event_bus.h"      /* 订阅 EV_FACE_EVENT：识别「全清完成」 */
 #include "hal/hal_face.h"        /* face_service_delete_all_async */
@@ -911,7 +911,7 @@ static void ota_status_read(char * buf, size_t cap)
 static const char * ota_status_get(const char * buf, const char * key)
 {
     /* 解析已剥离到 core/support/ota_status.c（纯函数 + test_ota_status 锁定，
-     * 契约：同名 KEY 取最后一次匹配 —— 兼容追加式与重写式两种写方）。 */
+     * 接口约定：同名 KEY 取最后一次匹配 —— 兼容追加式与重写式两种写方）。 */
     static char val[80];
     if (ota_status_query(buf, key, val, sizeof(val)) != 0) return NULL;
     return val;

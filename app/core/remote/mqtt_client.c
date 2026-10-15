@@ -22,7 +22,7 @@
  *   QoS1 未确认后重投（DUP=1）。★ 绝不静默丢指令。且背压**绝不能**靠「停止读套接字」
  *   实现 —— 那会关死 TCP 窗口 → 读不到 PINGRESP → keepalive 超时 → 重连风暴。
  *
- * 对外契约：mqtt_client.h 的既有 8 个签名一个字没改（rpc.c / ui.c 依赖）。
+ * 对外接口：mqtt_client.h 的既有 8 个签名一个字没改（rpc.c / ui.c 依赖）。
  */
 #include "platform/thread_util.h"      /* ★ 必须第一个 include：它要在 <pthread.h> 前定义 _GNU_SOURCE */
 

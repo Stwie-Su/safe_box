@@ -174,8 +174,8 @@ size_t fm225_proto_stats(const fm225_proto_ctx_t * ctx,
     return ctx->frames;
 }
 
-/* GET_ALL_USERID(0x24) 应答载荷解析（纯函数，见头文件契约）。
- * 契约核心：data 是【已剥掉 mid/result】的 Data 区，data[0] = user_counts。 */
+/* GET_ALL_USERID(0x24) 应答载荷解析（纯函数，见头文件接口约定）。
+ * 接口约定核心：data 是【已剥掉 mid/result】的 Data 区，data[0] = user_counts。 */
 int fm225_parse_userid_list(const uint8_t * data, uint16_t data_len,
                             int32_t * ids, int32_t cap)
 {

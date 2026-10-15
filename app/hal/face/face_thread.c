@@ -55,6 +55,29 @@ static volatile bool s_running;                /* 线程主体是否在跑 */
 /* FM225 UART fd：-1 = 未接入（poll 忽略负 fd）。仅 start 前可设置。 */
 static int         s_uart_fd = -1;
 
+/* ==================================================================
+ * 【双帧缓冲（本模块的核心数据结构）】—— 「单生产者 + 单消费者」经典解法
+ *
+ *    s_fb[0]        s_fb[1]          两块各 320×240×2 = 150KB
+ *   ┌────────┐    ┌────────┐
+ *   │  帧 N  │    │ (空闲) │        s_fb_pub = 0 表示「0 号是当前可读的」
+ *   └────────┘    └────────┘
+ *       ▲              ▲
+ *       │读（fb 锁）    │写（无锁）
+ *   主线程（消费者）   face 线程（生产者）
+ *
+ * 规则三条：
+ *   1) 生产者永远写 `s_fb_pub ^ 1`（另一块），绝不碰消费者正在读的那块
+ *      → 拷贝/转换期间不需要持锁，锁只在「翻 s_fb_pub 指针」那一瞬间持有；
+ *   2) 消费者（get_preview）在 fb 锁下 memcpy 走 s_fb[s_fb_pub]，然后置
+ *      s_fb_consumed = s_fb_seq，表示「这块我读过了」；
+ *   3) 若消费者还没来读，生产者又产出新帧 → 直接覆盖再下一块 = **丢最旧帧**。
+ *      这是刻意设计：预览宁可丢帧，也绝不让采集阻塞（阻塞会导致延迟累积）。
+ *
+ * 对比「环形队列 + 条件变量」：这里只有 2 块、且允许丢帧，
+ * 故用「双缓冲 + 序号」比用队列 + 信号量更轻，也不会有唤醒抖动。
+ * ================================================================== */
+
 /* 双帧缓冲：主线程在 fb 锁下读 s_fb[s_fb_pub]；本线程把新帧写进另一块（锁外），
  * 写完再上锁发布（s_fb_pub 翻到新块）。生产者永不写消费者正在读的那块，故无需在
  * 转换/拷贝期间持锁；未被消费的旧帧在下一帧发布时被覆盖——即「满则丢最旧」。 */
@@ -75,8 +98,26 @@ static unsigned s_warn_h = 0;
 
 /* ---------------- 采集 ---------------- */
 
-/* 取一帧：camera 后端内部完成 DQBUF(只转最新) + YUYV->RGB565；
- * 拷贝到双帧缓冲的非发布块后发布。整段在 io 锁内，保证 request_stop 能等到它收尾。 */
+/* ------------------------------------------------------------------
+ * 函数：face_capture_once（文件内私有）★生产者侧核心
+ * 功能：取一帧、拷进双帧缓冲的空闲块、发布。一次调用 = 一帧。
+ * 调用者：face_thread_main()（poll 检测到相机 fd 可读时）。
+ *
+ * 【数据流】
+ *   hal_camera_frame()          ← 后端内部已完成 DQBUF + YUYV/MJPG→RGB565
+ *        │ src 指向后端内部缓冲（**非拷贝**，靠 release 归还）
+ *        ├─ 分辨率 == 320×240？
+ *        │    ├─ 是 → memcpy 到 s_fb[s_fb_pub ^ 1] → release() → 持 fb 锁翻 s_fb_pub、++s_fb_seq
+ *        │    └─ 否 → release() 后**丢弃**（不拷贝，防止按定长 FB_BYTES 读穿 src 末端）
+ *        ▼
+ *   发布完成，主线程下一次 get_preview 就能取到
+ *
+ * 【并发要点】整段包在 io 锁内：request_stop() 会「抢一次 io 锁再放开」，
+ *   那次加锁会一直等到本函数退出临界区，从而保证「关 fd 时没有人在读 mmap」。
+ * 【纪律】临界区内不做重计算、不调用可能阻塞的外部函数（printf 就属于此类，
+ *   它可能因 stdio 锁或缓冲区 flush 而阻塞）——本函数把告警 printf 留到解锁之后，
+ *   正是这条纪律的体现。
+ * ------------------------------------------------------------------ */
 static void face_capture_once(void)
 {
     bool     warn   = false;            /* 本次是否需要打印「分辨率不符」告警 */
@@ -105,7 +146,7 @@ static void face_capture_once(void)
                 s_fb_seq++;
                 pthread_mutex_unlock(&s_fb_lock);
             } else {
-                /* 不符：先按 §5.13 契约释放帧（不释放后端会停更），丢弃该帧（不拷贝，
+                /* 不符：先按 §5.13 接口约定释放帧（不释放后端会停更），丢弃该帧（不拷贝，
                  * 杜绝越界读）。去重状态 s_warn_w/s_warn_h 只在临界区内更新（仅本线程写，
                  * 无竞态），但告警 printf 本身留到解锁之后执行——§3.1 明文要求「临界区内
                  * 不做重计算、不持锁调用外部函数」：printf 可能因 stdio 锁/缓冲 flush 阻塞，
@@ -137,6 +178,16 @@ static void face_capture_once(void)
  * emit 识别结果（event_bus_post 交主线程）。fd 只借用，归后端所有。 */
 void fm225_backend_feed(const uint8_t * buf, size_t n);
 
+/* ------------------------------------------------------------------
+ * 函数：face_uart_drain（文件内私有）
+ * 功能：把串口里当前可读的字节**一次读干净**，喂给 FM225 协议状态机。
+ * 调用者：face_thread_main()（poll 检测到串口 fd 可读时）。
+ * 数据流：read(s_uart_fd) → 256 字节栈缓冲 → fm225_backend_feed() → 后端状态机
+ *         → 识别结果经 event_bus_post 交回主线程。**本函数不解析协议**。
+ * 为什么用循环读到 n<=0：一次 poll 可读可能对应多帧串口数据；循环读空才能
+ *   避免「数据来了却只处理一半、剩下的要等下一次事件」造成的延迟。
+ *   n<=0 涵盖 EAGAIN（非阻塞读完）、EINTR（被信号打断）、EOF 三种情况，统一退出。
+ * ------------------------------------------------------------------ */
 static void face_uart_drain(void)
 {
     if (s_uart_fd < 0) return;
@@ -150,6 +201,27 @@ static void face_uart_drain(void)
 
 /* ---------------- 线程主体 ---------------- */
 
+/* ------------------------------------------------------------------
+ * 函数：face_thread_main ★线程主体（pthread 入口）
+ * 功能：一个循环，用 poll() 同时等「相机来帧」和「串口来字节」，来谁处理谁。
+ * 调用者：pthread_create（由 face_thread_start() 拉起）。
+ *
+ * 【循环结构】
+ *     ① 检查 s_quit → 退出
+ *     ② 组装 pollfd 数组：[0]=相机 fd（非前台时置 -1）/ [1]=串口 fd
+ *     ③ poll(…, 20ms)   ← 超时是兜底节拍，保证退出标志最迟 20ms 内被感知
+ *     ④ 再检查一次 s_quit → 退出（关键：poll 返回后立刻查，
+ *        确保退出期间不再碰 fd——这是「关 fd 的前置条件」）
+ *     ⑤ 哪个 fd 可读就调对应处理函数（face_capture_once / face_uart_drain）
+ *
+ * 【为什么用 poll 而不是两个线程各阻塞读】
+ *   两路 IO 节拍完全不同（相机 20fps 连续流、串口事件驱动），
+ *   一个线程 + IO 复用 就是标准解法：线程数不涨、无需在两路间加锁、退出可控。
+ *   （本工程线程数封顶 4，见 face_thread.h 文件头。）
+ *
+ * 【Duty-cycle 处理】非前台时把相机 fd 设成 -1 移出 pollset：
+ *   STREAMOFF 后该 fd 会持续 POLLERR 立即返回，不摘除就退化成 100% CPU 忙轮询。
+ * ------------------------------------------------------------------ */
 static void * face_thread_main(void * arg)
 {
     safe_thread_setname("safe-face");
@@ -187,6 +259,9 @@ static void * face_thread_main(void * arg)
 
 /* ---------------- 对外接口 ---------------- */
 
+/* 函数头见 face_thread.h。此处只说实现要点：
+ * 启动前把双帧缓冲与序号**全部清零**，是为了让消费端的 s_fb_seq != s_fb_consumed
+ * 判据在线程重启后依然成立（否则可能误判「没有新帧」而永远不显示）。 */
 safe_err_t face_thread_start(void)
 {
     if (s_created) return SAFE_OK;
@@ -207,6 +282,9 @@ safe_err_t face_thread_start(void)
     return SAFE_OK;
 }
 
+/* 函数头见 face_thread.h。最后那两行「加锁立刻解锁」不是笔误：
+ * 它会阻塞到当前持有 io 锁的采集临界区跑完，返回时即可保证「无在途采集」，
+ * 主线程才能安全地 close(fd)。这是一种**用互斥量做 rendezvous（会合）**的写法。 */
 void face_thread_request_stop(void)
 {
     if (!s_created) return;
@@ -236,6 +314,10 @@ void face_thread_set_uart_fd(int fd)
     s_uart_fd = fd;
 }
 
+/* 函数头见 face_thread.h。实现要点：
+ * 判据 `s_fb_seq != s_fb_consumed` 是「有比上次更新的帧吗」的全部依据——
+ * 生产者每发布一帧 ++s_fb_seq，消费者取走后置 s_fb_consumed = s_fb_seq。
+ * 注意消费者**不比较帧内容**，只比较序号，因此不存在「两帧看起来一样」的歧义。 */
 bool face_thread_get_preview(uint16_t * dst, hal_camera_frame_info_t * info)
 {
     if (dst == NULL) return false;

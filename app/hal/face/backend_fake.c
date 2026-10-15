@@ -82,7 +82,7 @@ static void fake_tick(uint32_t now_ms)
             if(s_detect_reason == FACE_RES_OK) {
                 strncpy(r.user_name, s_enroll_name, sizeof(r.user_name) - 1);
             }
-            /* 契约（hal_face.h）：timestamp = hal_time()（Unix 秒），不是"进程/开机起算秒"。
+            /* 接口约定（hal_face.h）：timestamp = hal_time()（Unix 秒），不是"进程/开机起算秒"。
              * 消费方 page_face 用 hal_time() 判新鲜度，用 tick 时钟会让结果恒判过期（D12）。 */
             r.timestamp = hal_time();
             face_service_emit(FACE_EV_DETECT, &r);

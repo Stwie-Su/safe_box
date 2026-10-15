@@ -22,6 +22,12 @@ set(SAFE_HAL_SRC
     camera/camera_service.c
     camera/camera_null.c
     camera/camera_v4l2.c
+    # 看门狗：Linux 真狗（/dev/watchdog）+ null 占位 + 服务门面。
+    # 与相机/时间同构：SAFE_WATCHDOG_BACKEND 运行期选择，打不开设备自动降级 null，
+    # 因此 PC（无 /dev/watchdog）与板子编同一份主循环代码。
+    watchdog/watchdog_service.c
+    watchdog/watchdog_linux.c
+    watchdog/watchdog_null.c
     # WLAN：wpa_supplicant ctrl_iface 后端 + 降级后端 + 服务门面。
     # 依赖只有 libc 与 POSIX socket，板子与 PC 编同一份代码（不引入任何第三方库）。
     net/net_service.c

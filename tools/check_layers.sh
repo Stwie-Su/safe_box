@@ -35,7 +35,7 @@ out=$(grep -rniE 'MQTTAsync|MQTTClient|paho-mqtt|libpaho' app --include='*.c' --
 [ -n "$out" ] && { report "app 出现第三方 MQTT 库依赖" "$out"; } || echo "  [OK] app 不依赖第三方 MQTT 库"
 
 # 4. hal 公共头文件不含平台实现头
-for h in app/hal/hal_face.h app/hal/hal_time.h app/hal/hal_actuator.h app/hal/hal_camera.h app/hal/hal_storage.h app/hal/hal_net.h; do
+for h in app/hal/hal_face.h app/hal/hal_time.h app/hal/hal_actuator.h app/hal/hal_camera.h app/hal/hal_storage.h app/hal/hal_net.h app/hal/hal_watchdog.h; do
     out=$(grep -nE '#include\s+["<](linux/|SDL2/|sys/|termios|unistd\.h)' "$h")
     [ -n "$out" ] && { report "$h 含平台头文件" "$out"; } || echo "  [OK] $h 干净"
 done

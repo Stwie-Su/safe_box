@@ -25,7 +25,7 @@ typedef struct face_backend {
 
     /* 主线程周期驱动。now_ms 必须与 hal_time_ms() 同源（单调毫秒）——后端内部
      * 一律用 hal_time_ms() 记时刻；跨时钟基会让「now_ms - 记录时刻」无符号回绕、
-     * 超时判定恒真（D1）。这是契约，不许改。 */
+     * 超时判定恒真（D1）。这是接口约定，不许改。 */
     void (*tick)(uint32_t now_ms);
 
     /* 异步录入：返回 SAFE_OK 表示已受理，结果由 face_service_emit(FACE_EV_ENROLL_DONE) 上报。

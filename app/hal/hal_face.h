@@ -7,7 +7,7 @@
  *  2. 异步事件驱动，业务层不轮询硬件；
  *  3. 后端可替换：模拟后端与 FM225 后端实现同一张 vtable，
  *     由构建选项 SAFE_FACE_BACKEND 决定编哪个，业务代码零改动；
- *  4. 业务层只认 {face_id, reason} 这一个数据契约，不关心数据从哪来。
+ *  4. 业务层只认 {face_id, reason} 这一个数据接口约定，不关心数据从哪来。
  *     FM225 模组不输出置信度分数，识别结果只按失败原因分流（需求 v1.6 FR-19）。
  *
  * FM225 到货后只需补 app/hal/face/backend_fm225.c 里的 UART 解析，
@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-/* ---------------- 数据契约 ---------------- */
+/* ---------------- 数据接口约定 ---------------- */
 
 /* 识别结果按失败原因分流（FM225 无分数；auth_fsm 依赖本类型） */
 typedef enum {
@@ -100,7 +100,7 @@ safe_err_t face_service_init(const char * backend_name);
 safe_err_t face_service_deinit(void);
 
 /* 主线程周期驱动（20ms 级）。后端需要轮询硬件时在此处理。
- * now_ms 必须与 hal_time_ms() 同源（单调毫秒）——见 face_backend_t.tick 契约。 */
+ * now_ms 必须与 hal_time_ms() 同源（单调毫秒）——见 face_backend_t.tick 行为约定。 */
 void face_service_tick(uint32_t now_ms);
 
 /* ---------------- 查询与控制 ---------------- */

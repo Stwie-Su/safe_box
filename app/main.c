@@ -7,12 +7,14 @@
 
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include "lvgl.h"
 
 #include "app.h"
 #include "app_version.h"
+#include "hal/hal_watchdog.h"
 #include "platform/debug_hooks.h"
 #include "platform/perf_probe.h"
 #include "platform/platform.h"
@@ -42,6 +44,18 @@ int main(int argc, char ** argv)
 
     perf_probe_init_from_env();
 
+    /* 看门狗：开设备并设定喂狗超时（默认 15s，SAFE_WATCHDOG_TIMEOUT_MS 可覆盖）。
+     * 排在 app_main() 之前——这样后续初始化若卡死也能被硬件复位；
+     * 无 /dev/watchdog 的环境（PC）自动降级 null 后端，接口照常调用但不产生复位能力。 */
+    {
+        const char * wd = getenv("SAFE_WATCHDOG_TIMEOUT_MS");
+        uint32_t wd_ms = (wd != NULL && *wd != '\0')
+                             ? (uint32_t)strtoul(wd, NULL, 10)
+                             : HAL_WATCHDOG_DEFAULT_TIMEOUT_MS;
+        hal_watchdog_init(wd_ms);
+        hal_watchdog_start();
+    }
+
     app_main();
 
     /* PC 调试钩子（指定起始页/主题/截图）。板子构建下为空实现。 */
@@ -57,6 +71,9 @@ int main(int argc, char ** argv)
         uint32_t t0 = perf_probe_enabled() ? lv_tick_get() : 0;
         uint32_t ms = lv_timer_handler();
         if(perf_probe_enabled()) perf_probe_record(lv_tick_get() - t0);
+        /* 心跳喂狗：只有主循环真正跑完这一拍才喂——卡死/死循环时停喂 → 硬件在超时后复位设备。
+         * 分发层内部按 SAFE_WATCHDOG_KICK_MS（默认 1s）节流，20ms 一拍也不会把系统调用打满。 */
+        hal_watchdog_kick();
         if(ms == LV_NO_TIMER_READY) ms = LV_DEF_REFR_PERIOD;
         usleep(ms * 1000);
     }
@@ -64,6 +81,10 @@ int main(int argc, char ** argv)
     /* 主循环检测 g_quit 跳出 -> 优雅退出（§3.2）。 */
     printf("[main] 收到退出信号，开始优雅退出\n");
     app_shutdown();
+
+    /* 退出链最后一环：停止看门狗计时（magic close）——漏掉会让关闭/重启应用时被硬件误复位。 */
+    hal_watchdog_stop();
+    hal_watchdog_deinit();
 
     return 0;
 }

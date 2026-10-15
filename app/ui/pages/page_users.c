@@ -2,7 +2,7 @@
  * @file page_users.c
  * 用户管理 — 页面骨架（D24 拆分后）：页面创建/导航/共享状态定义与事件订阅；
  * 列表渲染在 page_users_rows.c，弹窗族与业务操作在 page_users_dlg.c
- * （契约见 page_users_internal.h）。
+ * （接口约定见 page_users_internal.h）。
  */
 #include "page_users.h"
 #include "ui/ui.h"

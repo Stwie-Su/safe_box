@@ -1,7 +1,7 @@
 /**
  * @file ota_status.c
- * OTA 状态契约解析（纯函数：无 IO、无堆分配、不改入参）。
- * 契约见 ota_status.h 头注释；行为由 tests/test_ota_status.c 确定性锁定。
+ * OTA 状态接口约定解析（纯函数：无 IO、无堆分配、不改入参）。
+ * 接口约定见 ota_status.h 头注释；行为由 tests/test_ota_status.c 确定性锁定。
  */
 #include "core/support/ota_status.h"
 

@@ -1,6 +1,6 @@
 /**
  * @file net_scan_parse.c
- * wpa_supplicant 应答的纯解析实现（契约见 net_scan_parse.h）。
+ * wpa_supplicant 应答的纯解析实现（接口约定见 net_scan_parse.h）。
  *
  * 实现纪律：
  *  - 全程只在调用方给的缓冲区里写，不 malloc——HAL 层可能在没有 MMU 压力之外

@@ -22,7 +22,7 @@
  *   - 画布缓冲尺寸 = 视频矩形（非整面板），映射表 SIZE_CHANGED 时重建一次，
  *     绘制期查表代替除法（见 v5/v6 注释，未改动）；
  *   - 页面隐藏时拉帧 timer 空转返回，不拉帧不重绘；
- *   - 契约（§5.13）：frame()/release() 成对；预览帧归 face 线程所有，主线程只取最新帧；
+ *   - 接口约定（§5.13）：frame()/release() 成对；预览帧归 face 线程所有，主线程只取最新帧；
  *   - 颜色 100% 走 theme_color(TH_*) / st_* 样式，零硬编码 hex。
  */
 #include "page_face.h"
@@ -524,14 +524,30 @@ lv_obj_t * page_face_create(lv_obj_t * parent)
     return root;
 }
 
-/* ===== UI 渲染帧率：LV_EVENT_REFR_READY 每个渲染周期触发一次 ===== */
+/* ------------------------------------------------------------------
+ * 函数：ui_refr_ready_cb（文件内私有）
+ * 功能：UI fps 的计数源——LVGL 每完成一轮渲染就回调一次，这里只做「加一」。
+ * 调用者：LVGL 的 LV_EVENT_REFR_READY 事件（渲染驱动）。
+ * 数据流：无入参出参；副作用 = s_ui_frames++（由 fps_label_update_if_due 结算）。
+ * ------------------------------------------------------------------ */
 static void ui_refr_ready_cb(lv_event_t * e)
 {
     (void)e;
     s_ui_frames++;
 }
 
-/* ===== SIZE_CHANGED 回调：重建画布 + 视频矩形 + 映射表 + 重定位 ===== */
+/* ------------------------------------------------------------------
+ * 函数：preview_size_changed_cb（文件内私有）
+ * 功能：面板尺寸变化时，把「依赖尺寸的东西」一次性全部重算。
+ * 调用者：① LVGL 的 LV_EVENT_SIZE_CHANGED 事件（面板尺寸真变了）；
+ *         ② page_face 创建流程末尾手动调一次（**首次建画布**靠它）。
+ * 数据流：读当前面板宽高 → 按顺序调用下面四个函数 → 重摆 FPS 角标。
+ * ★ 调用顺序不能乱（每一步都吃上一步的结果）：
+ *     compute_video_rect()  → 算出 s_vid_*（视频矩形）
+ *   → rebuild_maps()        → 按 s_vid_* 建缩放映射表
+ *   → rebuild_canvas()      → 按 s_vid_* 分配画布缓冲并定位
+ *   → reposition_corners_and_beam() → 四角扫描框跟着视频矩形走
+ * ------------------------------------------------------------------ */
 static void preview_size_changed_cb(lv_event_t * e)
 {
     (void)e;
@@ -550,7 +566,15 @@ static void preview_size_changed_cb(lv_event_t * e)
     }
 }
 
-/* 重建画布缓冲：**尺寸 = 视频矩形**（不是整个面板），并把画布定位到居中位置。
+/* ------------------------------------------------------------------
+ * 函数：rebuild_canvas（文件内私有）
+ * 功能：按视频矩形尺寸分配画布缓冲，并把画布对象摆到居中位置。
+ * 调用者：preview_size_changed_cb()。
+ * 数据流：入参 (w,h) 面板尺寸（本实现已不使用）→ 取 s_vid_w/h 作为画布尺寸
+ *         → malloc 新缓冲（预填面板底色）→ lv_canvas_set_buffer() 挂给 LVGL
+ *         → 更新 s_canvas_buf / s_canvas_w / s_canvas_h。
+ * ------------------------------------------------------------------
+ * 重建画布缓冲：**尺寸 = 视频矩形**（不是整个面板），并把画布定位到居中位置。
  * 为什么不再满铺面板：满铺时「视频区之外」的留白每帧都要重新刷一次底色，而这块
  * 区域只要在尺寸/主题变化时才需要刷。改成画布 = 视频矩形后，留白交给 s_preview
  * 自己的底色承担，每帧零额外开销，画布缓冲也从约 827KB 降到约 259KB。
@@ -592,7 +616,18 @@ static void rebuild_canvas(int32_t w, int32_t h)
     s_canvas_h   = ch;
 }
 
-/* 计算 4:3 视频矩形：等比缩放取最大（放大封顶 FACE_MAX_SCALE），居中（不拉伸变形）。 */
+/* ------------------------------------------------------------------
+ * 函数：compute_video_rect（文件内私有）
+ * 功能：在给定的面板尺寸 (cw,ch) 里算出「视频该占多大、放哪里」——等比缩放 + 居中。
+ * 调用者：preview_size_changed_cb()（**必须最先调用**，后面三件事都依赖它的结果）。
+ * 数据流：入参面板宽高 → 计算缩放千分比（取宽高方向较小者，保证不变形）→
+ *         写入文件内静态量 s_vid_x/y/w/h（视频矩形的位置与大小）。
+ * 两个约束：
+ *   1) 放大封顶 FACE_MAX_SCALE（默认 1.3×）：放大只增加显示像素**不增加细节**，
+ *      而 LVGL 软件渲染的耗时与显示像素数近似成正比——不封顶会直接吃掉帧率
+ *      （实测 223k 像素 → 8fps，130k 像素 → 21.6fps，见 preview_cfg.h）。
+ *   2) 不拉伸：宽高方向各算一个缩放比，取**较小**的那个，画面比例保持 4:3。
+ * ------------------------------------------------------------------ */
 static void compute_video_rect(int32_t cw, int32_t ch)
 {
     int32_t avail_h = ch;                     /* 视频最大化 */
@@ -619,7 +654,18 @@ static void compute_video_rect(int32_t cw, int32_t ch)
     if (s_vid_y < 0) s_vid_y = 0;
 }
 
-/* 重建最近邻映射表（查表代替逐像素除法，绘制期零除法） */
+/* ------------------------------------------------------------------
+ * 函数：rebuild_maps（文件内私有）
+ * 功能：预计算「缩放映射表」——目标第 x 列对应源的第几列、第 y 行对应源的第几行。
+ * 调用者：preview_size_changed_cb()（尺寸变化时重建一次，绘制期只读）。
+ * 数据流：无入参；分配并填充 s_map_x[]（s_vid_w 项）、s_map_y[]（s_vid_h 项）。
+ * 为什么（性能考点）：缩放若写成 `src_x = x * src_w / dst_w`，则每个像素要做一次
+ *   64 位除法；ARMv7 上整数除法是**软件模拟**的，几十条指令。320×240 放大到
+ *   ~416×312 就是 13 万次除法/帧。
+ *   预计算成查找表后，绘制期只剩一次数组取下标——这就是典型的「预计算换帧率」。
+ * 降级：分配失败时 s_map_x/y 保持 NULL，frame_timer_cb() 本帧不绘制
+ *   （保持上一帧），与「无新帧」行为一致。
+ * ------------------------------------------------------------------ */
 static void rebuild_maps(void)
 {
     free(s_map_x);
@@ -633,7 +679,8 @@ static void rebuild_maps(void)
     if (s_map_x == NULL || s_map_y == NULL) {
         free(s_map_x); free(s_map_y);
         s_map_x = NULL; s_map_y = NULL;
-        printf("[FACE] 映射表分配失败，回退逐像素除法\n");
+        printf("[FACE] 映射表分配失败（%d+%d 项），本帧暂停绘制，保持上一帧\n",
+               (int)s_vid_w, (int)s_vid_h);
         return;
     }
     for (int32_t x = 0; x < s_vid_w; x++) {
@@ -686,7 +733,17 @@ static void reposition_corners_and_beam(int32_t w, int32_t h)
     scan_apply_color();
 }
 
-/* ===== 双 FPS 窗口更新：每 500ms 各算一次，更新两个角标 ===== */
+/* ------------------------------------------------------------------
+ * 函数：fps_label_update_if_due（文件内私有）
+ * 功能：每 500ms 结算一次「视频 fps」与「UI fps」，刷新右上角两个徽章。
+ * 调用者：frame_timer_cb() 末尾（**无论有没有新帧都调**，这样 UI fps 会一直更新）。
+ * 数据流：读 s_video_frames / s_ui_frames 两个计数器 → 除以窗口实际时长 →
+ *         写入 s_video_fps / s_ui_fps → 更新两个 label 文本 → 计数器清零。
+ * 为什么要两个 fps 分开统计（性能排查要点）：
+ *   视频 fps 低 = 相机侧或采集线程的问题（掉流、USB 带宽、转换太慢）；
+ *   UI fps 低 = 渲染侧的问题（绘制面积过大、软件渲染扛不住）。
+ *   两者分开，一眼就能定位瓶颈在「采」还是在「画」。
+ * ------------------------------------------------------------------ */
 static void fps_label_update_if_due(void)
 {
     uint32_t now = hal_time_ms();
@@ -711,7 +768,18 @@ static void fps_label_update_if_due(void)
     }
 }
 
-/* ===== 预览 env 开关 + 旋转（PC 联调；板上不设 env 行为不变） ===== */
+/* ------------------------------------------------------------------
+ * 函数：preview_env_init（文件内私有）
+ * 功能：读两个调试用环境变量，确定「预览旋转角度」与「放大上限」，
+ *       并按角度分配旋转缓冲、更新等效源尺寸。
+ * 调用者：page_face 创建流程（页面建好时一次）。
+ * 数据流：env SAFE_CAMERA_ROT / SAFE_FACE_PREVIEW_SCALE
+ *         → s_rot_deg / s_scale_max / s_src_w / s_src_h，并按需分配 s_rot_buf。
+ * 为什么旋转角度默认值放在 preview_cfg.h 而不是写死在这里：
+ *   它是**设备的固定几何属性**（摄像头在整机上的装配方向），page_face 与
+ *   page_enroll 两个页面共用；分散写死会分叉（历史上就因此出过一次「录入页
+ *   放大上限为 0 → 预览空白」的缺陷）。
+ * ------------------------------------------------------------------ */
 static void preview_env_init(void)
 {
     const char * er = getenv("SAFE_CAMERA_ROT");
@@ -748,8 +816,20 @@ static void preview_env_init(void)
     if (s_rot_deg != 0) printf("[FACE] 预览旋转 %d°，放大上限 %d‰\n", s_rot_deg, (int)s_scale_max);
 }
 
-/* 把 sw×sh 的 RGB565 帧旋转 deg 后写入 dst（90 = 顺时针）。7.7 万像素/帧，
- * 15fps 下约 1~2ms，可忽略；识别链路用模组自身传感器，与此处无关。 */
+/* ------------------------------------------------------------------
+ * 函数：rotate_frame（文件内私有）
+ * 功能：把 sw×sh 的 RGB565 帧整体旋转 deg 后写入 dst（**90 = 顺时针**）。
+ * 调用者：frame_timer_cb()（仅当 s_rot_deg != 0 且旋转缓冲分配成功时）。
+ * 数据流：入参 src（源帧）→ 逐像素重新计算下标 → 出参 dst（旋转后帧）。
+ *   注意 90/270 会交换宽高，dst 必须按交换后的尺寸分配（本页统一按 CAP_W*CAP_H 分配，
+ *   两者乘积相同所以够用）；旋转后的等效尺寸由 preview_env_init() 记入 s_src_w/h。
+ * 成本：320×240 = 7.7 万像素/帧，实测约 1~2ms，可接受。
+ * 方向语义（**改这个值时极易搞反，务必按实测走**）：
+ *   本函数 deg==90 走 `dst[x*sh + (sh-1-y)] = src[y*sw + x]`，即源的 +x 方向映射到
+ *   目标的 +y 方向 ⇒ 画面**顺时针**转 90°。deg==270 则反之（逆时针 90°）。
+ *   ⚠️ 联想记忆时别和 CSS/Pillow 混：CSS rotate 正角度是顺时针，但 Pillow 的
+ *      rotate(90) 是**逆时针**——两者方向相反，跨工具对照时最容易搞反。
+ * ------------------------------------------------------------------ */
 static void rotate_frame(const uint16_t * src, uint16_t * dst, int32_t sw, int32_t sh, int deg)
 {
     if (deg == 90) {
@@ -767,7 +847,36 @@ static void rotate_frame(const uint16_t * src, uint16_t * dst, int32_t sw, int32
     }
 }
 
-/* ===== 拉帧定时器：拉帧 → 最近邻缩放 → invalidate 视频区 ===== */
+/* ==================================================================
+ * 函数：frame_timer_cb ★整条预览链路的「最后一公里」（消费者 + 渲染）
+ * 功能：每 50ms 被 LVGL 定时器唤起一次 —— 取最新帧 → 旋转 → 缩放进画布 → 标脏重绘。
+ * 调用者：**LVGL 定时器**（lv_timer_create(frame_timer_cb, PREVIEW_MS, NULL)，
+ *         见本文件 page_face 创建流程），运行在 **LVGL 主线程**。
+ *
+ * 【数据流（一帧的一生，到此结束）】
+ *
+ *   face_thread.c 的双帧缓冲
+ *            │  face_thread_get_preview(s_cap_buf, &info)   ← ① 拷进本页私有缓冲
+ *            ▼
+ *      s_cap_buf（320×240 RGB565，本页私有）
+ *            │  rotate_frame()                              ← ② 补偿摄像头装配方向
+ *            ▼
+ *      s_rot_buf（仅 rot≠0 时；90/270 后变成 240×320）
+ *            │  最近邻缩放（查 s_map_x / s_map_y，零除法）  ← ③ 缩放到显示尺寸
+ *            ▼
+ *      s_canvas_buf（画布缓冲，= 居中视频矩形大小）
+ *            │  lv_obj_invalidate(s_canvas)                 ← ④ 告诉 LVGL「这块脏了」
+ *            ▼
+ *      LVGL 下一轮渲染 → 屏幕
+ *
+ * 【关键设计：为什么不是「相机回调直接画」】
+ *   LVGL **只允许主线程操作**（非线程安全），而取帧在 face 线程。
+ *   所以这里用「双缓冲 + 定时器轮询」跨线程交接：face 线程只管往缓冲里写，
+ *   主线程按自己的节拍来取。代价是最多 50ms 的显示延迟，换来的是零跨线程 LVGL 调用。
+ *
+ * 【没有新帧时怎么办】get_preview 返回 false → 什么都不做，屏幕保持上一帧。
+ *   这样即使相机掉流，画面也是「定格」而不是「闪黑」。
+ * ================================================================== */
 static void frame_timer_cb(lv_timer_t * t)
 {
     (void)t;
@@ -803,24 +912,23 @@ static void frame_timer_cb(lv_timer_t * t)
         }
 
         /* 2. 最近邻缩放 源(320×240 或旋转后) → 画布（画布 == 居中视频矩形），查表，
-         *    绘制期零除法。画布已收缩到视频矩形，因此**没有留白要填**。 */
+         *    绘制期零除法。画布已收缩到视频矩形，因此**没有留白要填**。
+         *    2026-10-14 删除「映射表分配失败 → 回退逐像素除法」的疤痕分支：
+         *    同帧两套绘制算法让行为不可预测，而映射表只占
+         *    (s_vid_w + s_vid_h) 个 uint16（约 1.5KB），512MB 板子上几乎不可能
+         *    分配失败。现在分配失败就**本帧不绘制**（保持上一帧），与「无新帧」
+         *    行为一致，用户与调用方都无需区分原因。 */
+        if (s_map_x == NULL || s_map_y == NULL) {
+            fps_label_update_if_due();   /* 不绘制也要推进 FPS 窗口，UI fps 才不断 */
+            return;
+        }
         int32_t dst_stride = s_canvas_w;
         uint16_t * buf = s_canvas_buf;
         for (int32_t y = 0; y < s_canvas_h; y++) {
             uint16_t * dst_row = &buf[(size_t)y * dst_stride];
-            if (s_map_x && s_map_y) {
-                const uint16_t * src_row = &src[(size_t)s_map_y[y] * s_src_w];
-                for (int32_t x = 0; x < s_canvas_w; x++) {
-                    dst_row[x] = src_row[s_map_x[x]];
-                }
-            } else {
-                /* 映射表分配失败时回退：逐像素整型除法（此回退不旋转） */
-                int32_t sy = (int32_t)(((int64_t)y * s_src_h) / s_canvas_h);
-                const uint16_t * src_row = &src[sy * s_src_w];
-                for (int32_t x = 0; x < s_canvas_w; x++) {
-                    int32_t sx = (int32_t)(((int64_t)x * s_src_w) / s_canvas_w);
-                    dst_row[x] = src_row[sx];
-                }
+            const uint16_t * src_row = &src[(size_t)s_map_y[y] * s_src_w];
+            for (int32_t x = 0; x < s_canvas_w; x++) {
+                dst_row[x] = src_row[s_map_x[x]];
             }
         }
 

@@ -1,6 +1,6 @@
 /**
  * @file storage_service.c
- * 存储容量门面：把 statvfs(3) 收进 hal，供 ui 层无平台依赖地查询。
+ * 存储容量分发层：把 statvfs(3) 收进 hal，供 ui 层无平台依赖地查询。
  *
  * 为什么单独一层：UI 监控页要显示真实文件系统使用率，但 ui/ 不得直接 include
  * <sys/statvfs.h>（平台实现头，tools/check_layers.sh 禁止）。目标路径由调用方

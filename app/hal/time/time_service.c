@@ -1,6 +1,6 @@
 /**
  * @file time_service.c
- * 时间源门面：按 SAFE_TIME_BACKEND 在运行期选择后端（sys / rtc），上层无感知。
+ * 时间源分发层：按 SAFE_TIME_BACKEND 在运行期选择后端（sys / rtc），上层无感知。
  *
  * 选择结果只在启动时算一次（time_service_init，幂等）；未被编排层调用的路径
  * （单测等）在首次取时时懒选择一次，默认 sys——与加后端之前的行为完全一致。

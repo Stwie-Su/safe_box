@@ -1,6 +1,6 @@
 /**
  * @file actuator_service.c
- * 执行器门面：NFR-7 的 500ms 上限在这里强制截断，后端不必重复防御。
+ * 执行器分发层：NFR-7 的 500ms 上限在这里强制截断，后端不必重复防御。
  *
  * 阶段 3 接 GPIO 时：实现 actuator_gpio.c 并把默认后端换掉，
  * auth_fsm 与 UI 调用的接口不变。

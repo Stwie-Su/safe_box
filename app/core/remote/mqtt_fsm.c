@@ -601,7 +601,7 @@ void mqtt_fsm_on_event(mqtt_fsm_t *f, mqtt_fsm_ev_t ev, const void *arg,
             f->pending_puback = 0;
             f->last_tx_ms     = now_ms;
             /* clean_session=1：会话不保留，重连后旧 pkt_id 无意义 → 清空 inflight。
-             * 代价：上行事件在重连窗口内会丢，与规约 §5.10.1 的契约边界一致
+             * 代价：上行事件在重连窗口内会丢，与规约 §5.10.1 的行为保证边界一致
              * （上行的权威记录是本地 safe.log，不是 MQTT 通道）。 */
             if (f->inflight != NULL) mqtt_inflight_init(f->inflight);
             /* ★ 每次建连都必须把"上一次连接"的授予 QoS 清掉（缺陷 #13）。

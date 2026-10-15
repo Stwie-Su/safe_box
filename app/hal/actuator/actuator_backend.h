@@ -9,11 +9,11 @@
 typedef struct {
     const char * name;
     safe_err_t (*init)(void);
-    /* 拉高 ms 毫秒后自动拉低；时长上限已由门面截断 */
+    /* 拉高 ms 毫秒后自动拉低；时长上限已由分发层截断 */
     safe_err_t (*pulse)(uint32_t ms);
     /* 立即拉低 */
     safe_err_t (*release)(void);
 } hal_actuator_backend_t;
 
-/* 后端在脉冲结束/强制拉低时调用，用于同步门面状态 */
+/* 后端在脉冲结束/强制拉低时调用，用于同步分发层状态 */
 void hal_actuator_notify_low(void);
