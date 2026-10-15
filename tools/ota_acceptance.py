@@ -142,7 +142,7 @@ def write_manifest(version, filename, sha, size, hm, drop_hmac=False):
         m["hmac"] = hm
     # ★ 必须紧凑格式（无空格）：板端脚本用 `grep -o '"file":"[^"]*"'` 取值，
     #   json.dump 默认在 ":" 后加空格会让它**匹配不到** → 直接 ERR_ARGS。
-    #   这里与 tools/make_ota_pkg.sh 的 printf 输出形态保持一致（契约的一部分）。
+    #   这里与 tools/make_ota_pkg.sh 的 printf 输出形态保持一致（接口约定的一部分）。
     with open(os.path.join(SRV, "manifest.json"), "w") as f:
         json.dump(m, f, separators=(",", ":"))
 

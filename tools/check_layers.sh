@@ -56,12 +56,12 @@ out=$(grep -nE 'user_|log_append|backend_verify|totp_' app/main.c)
 #    ⚠️ 为什么先只 WARNING：
 #      · 存量违规不少，一次性 FAIL 会直接阻塞 CI，而现实反应通常是「把门禁关掉」，
 #        那比没有门禁更糟 —— 门禁必须保持在「绿了就能合」的可信状态。
-#      · ui->hal **门面头**（hal/hal_*.h）有 25 处历史现状，且规约 §1.1 与 §5.19
-#        对「ui 能否直接用 hal 门面头」表述本身矛盾，属**待定项**，不适合现在判死。
+#      · ui->hal **对外接口头文件**（hal/hal_*.h）有 25 处历史现状，且规约 §1.1 与 §5.19
+#        对「ui 能否直接用 hal 对外接口头文件」表述本身矛盾，属**待定项**，不适合现在判死。
 #    故：所有方向先按 WARNING 输出（前 5 条 + 总数）。其中「ui 引用 hal **内部子目录
-#    头**」是明确的违规档（门面头之约已存在，内部头不该被 UI 直接看见），
+#    头**」是明确的违规档（对外接口头文件之约已存在，内部头不该被 UI 直接看见），
 #    待逐项收敛后把 DIR_SCAN_ENFORCE 置 1 即转为 FAIL。
-#    TODO(架构债)：ui->hal 门面头 / hal->core / core->platform 逐项收敛后转 FAIL。
+#    TODO(架构债)：ui->hal 对外接口头文件 / hal->core / core->platform 逐项收敛后转 FAIL。
 DIR_SCAN_ENFORCE=0      # 1 = FAIL-worthy 方向直接判失败（存量收敛后再开）
 
 warn_dir() {
@@ -97,14 +97,14 @@ warn_dir "core -> platform（例外 platform/thread_util.h）" "WARN" "$d"
 d=$(grep -rnE '#include[[:space:]]*"(ui|core|hal)/' app/platform --include='*.c' --include='*.h' 2>/dev/null | grep -vE '^app/platform/debug_hooks\.c:')
 warn_dir "platform -> ui|core|hal（例外 platform/debug_hooks.c）" "WARN" "$d"
 
-# (d) ui -> hal **门面头**（hal/hal_*.h）：25 处历史现状 + 规约表述矛盾（待定项）
+# (d) ui -> hal **对外接口头文件**（hal/hal_*.h）：25 处历史现状 + 规约表述矛盾（待定项）
 #     → 只 WARNING，**不得 FAIL**
 d=$(grep -rnE '#include[[:space:]]*"hal/hal_[^/]*\.h"' app/ui --include='*.c' --include='*.h' 2>/dev/null)
-warn_dir "ui -> hal 门面头（hal/hal_*.h，规约待定项）" "WARN" "$d"
+warn_dir "ui -> hal 对外接口头文件（hal/hal_*.h，规约待定项）" "WARN" "$d"
 
-# (e) ui -> hal **内部子目录头**（hal/face/face_thread.h 这类）：门面之外，明确违规
+# (e) ui -> hal **内部子目录头**（hal/face/face_thread.h 这类）：对外接口头文件之外，明确违规
 # ★ 正则必须写成 [^"/]+ 而不是 [^/]+：后者会一路吃到行尾块注释里的 '/'
-#   （`#include "hal/hal_time.h"   /* 说明 */`），把**门面头**误算成内部子目录头。
+#   （`#include "hal/hal_time.h"   /* 说明 */`），把**对外接口头文件**误算成内部子目录头。
 d=$(grep -rnE '#include[[:space:]]*"hal/[^"/]+/' app/ui --include='*.c' --include='*.h' 2>/dev/null)
 warn_dir "ui -> hal 内部子目录头" "FAIL-worthy" "$d"
 

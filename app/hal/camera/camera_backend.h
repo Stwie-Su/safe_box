@@ -2,7 +2,7 @@
  * @file camera_backend.h
  * 相机后端接口（**内部头文件，业务层 / UI 层禁止包含**；请用 hal/hal_camera.h）。
  *
- * 【这是什么】一张函数指针表（vtable），两种经典用法：
+ * 【这是什么】一张函数指针表，两种经典用法：
  *   1) 可替换实现：真摄像头（camera_v4l2.c）与占位（camera_null.c）对上同一套接口，
  *      上层只认接口不认实现 —— 这就是「面向接口编程」在 C 里的写法（结构体 + 函数指针）。
  *   2) 可测试：单测里塞一个假后端，不需要真硬件就能跑通上层逻辑。
@@ -19,7 +19,7 @@
 
 #include "hal/hal_camera.h"
 
-/* 后端 vtable：每个字段的语义与 hal_camera.h 同名函数一一对应，
+/* 后端函数表：每个字段的语义与 hal_camera.h 同名函数一一对应，
  * 详细的功能 / 调用者 / 数据流说明见 hal_camera.h，这里不再重复。 */
 typedef struct {
     const char * name;                  /* 后端名，用于 SAFE_CAMERA_BACKEND 环境变量匹配 */

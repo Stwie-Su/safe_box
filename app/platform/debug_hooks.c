@@ -79,7 +79,7 @@ static bool page_from_name(const char * name, ui_page_t * out)
     return false;   /* 非法名字：由 page_required 响亮失败，绝不静默回落 */
 }
 
-/* 夹具用：名字非法时打印错误与合法取值后以非 0 退出。
+/* 供截图专用入口使用：名字非法时打印错误与合法取值后以非 0 退出。
  * 为什么不能静默回落 HOME（D16）：错值（如把 FACE 写成 FAC）会产出一张
  * 「看起来正常」的主页截图，验收者据此得出的结论是假的——
  * 宁可不出图，也不出假图。 */

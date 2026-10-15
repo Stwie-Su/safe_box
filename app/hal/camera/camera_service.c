@@ -40,7 +40,7 @@ static bool s_inited;
  * 函数：find_backend（文件内私有）
  * 功能：按名字在后端注册表里查一个后端；name 为 NULL 时返回表里第一个（表序即优先级）。
  * 调用者：仅 hal_camera_init()。
- * 数据流：入参 name（如 "v4l2"）→ 遍历静态表 → 返回后端 vtable 指针，找不到返回 NULL。
+ * 数据流：入参 name（如 "v4l2"）→ 遍历静态表 → 返回后端函数表指针，找不到返回 NULL。
  * 扩展方式：新增后端时，把新后端的 extern 声明加到文件头、实例指针加进 table 即可。
  * ------------------------------------------------------------------ */
 static const hal_camera_backend_t * find_backend(const char * name)
@@ -169,7 +169,7 @@ safe_err_t hal_camera_frame(const uint8_t ** rgb565, hal_camera_frame_info_t * i
  * 功能：归还帧所有权（纯转发）。
  * 调用者：face_thread.c 的 face_capture_once()，与 hal_camera_frame() 成对。
  * 数据流：无入参出参；转发到后端 release()（翻转 s_held 标志）。
- * 注意：null 后端的 release 是 NULL，故此处必须判空——这是 vtable 里唯一可空字段。
+ * 注意：null 后端的 release 是 NULL，故此处必须判空——这是函数表里唯一可空字段。
  * ------------------------------------------------------------------ */
 void hal_camera_release_frame(void)
 {

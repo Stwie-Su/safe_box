@@ -2,7 +2,7 @@
  * @file watchdog_backend.h
  * 看门狗后端接口（**内部头文件，业务层 / UI 层禁止包含**；请用 hal/hal_watchdog.h）。
  *
- * 【这是什么】一张函数指针表（vtable）：把「一个看门狗后端要具备哪些能力」声明成
+ * 【这是什么】一张函数指针表：把「一个看门狗后端要具备哪些能力」声明成
  * 数据类型。与 camera / time / face 等模块同构——上层只认接口不认实现。
  *
  * 【谁用它】只有 watchdog_service.c：它持有 `const hal_watchdog_backend_t * s_backend`，

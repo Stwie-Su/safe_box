@@ -2,7 +2,7 @@
  * @file face_backend.h
  * 人脸后端接口（内部头文件，业务层不要包含）。
  *
- * 每个后端实现同一张 vtable，由构建选项 SAFE_FACE_BACKEND 决定编哪一个。
+ * 每个后端实现同一张函数表，由构建选项 SAFE_FACE_BACKEND 决定编哪一个。
  * 后端完成异步作业后，调用 face_service_emit() 把结果抛回服务层。
  */
 #pragma once

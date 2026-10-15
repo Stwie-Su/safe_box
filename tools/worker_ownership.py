@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""worker_post 的 arg 所有权契约检查。
+"""worker_post 的 arg 所有权约定检查。
 
-契约（worker.c 实现）：
+约定（worker.c 实现）：
   - done == NULL（Fire-and-Forget）：框架在 poll 时 free(arg) + free(job)；
   - done != NULL：回调**必须**自己释放 arg，框架只释放 job 节点。
 因此：done 回调里没有 free(arg) => 内存泄漏；arg 是栈/静态地址却 free => 崩溃。

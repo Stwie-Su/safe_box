@@ -30,7 +30,7 @@
  *  ④ 开流（重头戏）→ v4l2_start()：协商格式 → 申请缓冲 mmap → 入队 → STREAMON
  *  ⑤ 取帧（重头戏）→ v4l2_frame()：DQBUF 排空队列 → 只转最新一帧 → QBUF 还回
  *  ⑥ 像素转换      → v4l2_frame() 内的 MJPG 软解（stb_image）+ pack565() 打包
- *  ⑦ 出口          → 文件末尾 hal_camera_backend_v4l2（把自己登记成 vtable 供上层取用）
+ *  ⑦ 出口          → 文件末尾 hal_camera_backend_v4l2（把自己登记成函数表供上层取用）
  *
  * 【V4L2 采集的通用套路】（换任何 Linux 摄像头都适用，这 8 步就是考点）
  *   open → QUERYCAP → S_FMT → S_PARM → REQBUFS → QUERYBUF+mmap → QBUF → STREAMON
@@ -213,7 +213,7 @@ static int open_camera_dev(char * path_out, size_t path_cap)
 /* ------------------------------------------------------------------
  * 函数：v4l2_init
  * 功能：后端初始化——打开设备节点 + 确认它是采集设备。**不开流**。
- * 调用者：camera_service.c 的 hal_camera_init()（经 vtable 转发）。
+ * 调用者：camera_service.c 的 hal_camera_init()（经函数表转发）。
  * 数据流：无入参；副作用 = 置 s_fd（成功）或保持 -1（失败）。
  * 设计取舍：fd 的生命周期 = init..deinit；start/stop 只负责「开流 / 停流」。
  *   这样反复进出人脸页（duty-cycle）不会反复 open/close，减少 USB 重枚举风险。
@@ -500,7 +500,7 @@ static safe_err_t v4l2_stop(void)
 /* ------------------------------------------------------------------
  * 函数：v4l2_frame ★本文件最核心的函数
  * 功能：取出「最新一帧」并转成 RGB565 交给调用方（不是队列里最旧的那帧）。
- * 调用者：face_thread.c 的 face_capture_once()（经 hal_camera_frame → vtable 转发）。
+ * 调用者：face_thread.c 的 face_capture_once()（经 hal_camera_frame →函数表转发）。
  *
  * 【数据流（一张图看懂）】
  *
@@ -617,7 +617,7 @@ static void v4l2_release(void)
 /* ------------------------------------------------------------------
  * 函数：v4l2_fd
  * 功能：把底层采集 fd 交出去，供调用方做 IO 复用（poll / select）。
- * 调用者：face_thread.c 线程主体（经 hal_camera_fd → vtable 转发），
+ * 调用者：face_thread.c 线程主体（经 hal_camera_fd →函数表转发），
  *        每轮 poll 前问一次。
  * 数据流：无入参；返回 s_fd。未 init / 已 deinit 时 s_fd 为 -1，
  *        poll() 会忽略负 fd（revents 恒 0），调用方无需为此写分支。
@@ -630,7 +630,7 @@ static int v4l2_fd(void)
 }
 
 /* ------------------------------------------------------------------
- * 本后端对外的唯一出口：把自己登记成一张 vtable。
+ * 本后端对外的唯一出口：把自己登记成一张函数表。
  * 谁用它：camera_service.c 文件头 extern 声明了它，并放进 find_backend() 的注册表。
  * 为什么用 const：整张表编译期定好、放只读段，运行期不会被改，也就没有并发问题。
  * 成员顺序必须与 camera_backend.h 的 hal_camera_backend_t 定义**严格一致**

@@ -22,7 +22,7 @@
 /* ------------------------------------------------------------------
  * 函数：null_ok（文件内私有）
  * 功能：什么都不做、直接返回成功。
- * 调用者：无（本文件内）——它被填进 vtable 的 init / deinit / stop 三个槽位，
+ * 调用者：无（本文件内）——它被填进函数表的 init / deinit / stop 三个槽位，
  *        因此实际调用者是 camera_service.c 里转发 hal_camera_init/deinit/stop 的地方。
  * 数据流：无入参；返回 SAFE_OK。
  * 为什么可以复用同一个函数：这三个动作对「没有相机」而言本就无事可做，
@@ -72,7 +72,7 @@ static int null_fd(void)
     return -1;   /* 无采集 fd：face 线程 poll 时跳过 */
 }
 
-/* null 后端实例：注意 release 槽位是 NULL —— vtable 中唯一允许为空的字段，
+/* null 后端实例：注意 release 槽位是 NULL ——函数表中唯一允许为空的字段，
  * 因此 camera_service.c 的 hal_camera_release_frame() 里必须判空后再调用。 */
 const hal_camera_backend_t hal_camera_backend_null = {
     "null",
