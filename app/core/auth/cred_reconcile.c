@@ -8,11 +8,11 @@
      * 不自动删（「模组上有脸、本地暂未绑定」可能是用户的临时状态）。
  *
  * 落点说明（为什么放在 core/auth，触发点放在 app.c）：
- *   - 对账的输入（模组清单）来自 hal/hal_face.h 的 face_service_module_users()，
+ *   - 对账的输入（模组清单）来自 hal/hal_face.h 的 hal_face_module_users()，
  *     输出（本地 users.json 的 face_enable）属凭据域，与 auth_fsm 的「凭据失效」判定
  *     （cred_name_ok 也把 face_enable 置 false）同属一处职责；core→hal 是架构允许方向。
  *   - 周期性触发点放在编排层 app.c 的 app_tick_fast（主线程 20ms 泵）：那里既是
- *     face_service_module_users() 的合法调用点，也是 worker_post() 的合法调用点，
+ *     hal_face_module_users() 的合法调用点，也是 worker_post() 的合法调用点，
  *     且不引入新线程（全机常驻线程 <= 4 硬约束）。
  *
  * 纪律：
@@ -161,7 +161,7 @@ void cred_reconcile_tick(void)
     if(s_done) return;                                   /* 只跑一次（幂等） */
 
     /* 一次性取「数量 + 清单」——**必须单次调用**：此前分两次调用（先以
-     * face_service_module_users(NULL,0) 取 count，再取 ids）之间存在竞态
+     * hal_face_module_users(NULL,0) 取 count，再取 ids）之间存在竞态
      * （QA 复核 低危#4）——首次取完 count 后，face 线程若收到 NOTE READY 会把
      * s_mod_id_count 复位成 -1，第二次取 ids 即返回 -2 且**不写** job->ids（全 0）；
      * 于是 job->count >= 0 而 ids 全 0，对账把所有已绑定用户误判成孤儿、整片标失效。
@@ -169,7 +169,7 @@ void cred_reconcile_tick(void)
     cred_recon_job_t * job = (cred_recon_job_t *)calloc(1, sizeof(*job));
     if(job == NULL) return;                              /* 分配失败：下个 tick 再试，不算已跑 */
 
-    int32_t count = face_service_module_users(job->ids, CRED_RECON_MAX_IDS);
+    int32_t count = hal_face_module_users(job->ids, CRED_RECON_MAX_IDS);
     if(count < 0) {                                      /* -1 无此概念 / -2 尚未取得：不触发 */
         free(job);
         return;

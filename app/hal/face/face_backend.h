@@ -3,7 +3,7 @@
  * 人脸后端接口（内部头文件，业务层不要包含）。
  *
  * 每个后端实现同一张函数表，由构建选项 SAFE_FACE_BACKEND 决定编哪一个。
- * 后端完成异步作业后，调用 face_service_emit() 把结果抛回服务层。
+ * 后端完成异步作业后，调用 hal_face_emit() 把结果抛回服务层。
  */
 #pragma once
 
@@ -28,7 +28,7 @@ typedef struct face_backend {
      * 超时判定恒真（D1）。这是接口约定，不许改。 */
     void (*tick)(uint32_t now_ms);
 
-    /* 异步录入：返回 SAFE_OK 表示已受理，结果由 face_service_emit(FACE_EV_ENROLL_DONE) 上报。
+    /* 异步录入：返回 SAFE_OK 表示已受理，结果由 hal_face_emit(FACE_EV_ENROLL_DONE) 上报。
      * user_name（v1.4）：本地用户名，后端应写入模组侧模板名（FM225 的 ENROLL 载荷
      * 带 user_name[32] 字段），使 VERIFY 应答能带回该名供 FR-21 核对。后端可以忽略
      * 该参数（不支持写名的后端），此时模组返回用户名为空、核对自动跳过。 */
@@ -37,18 +37,18 @@ typedef struct face_backend {
     /* 清空模组侧**全部**人脸模板（FM225 的 DELETE_ALL 0x21）。
      * 用途：模组被外部工具单独写过之后，本地与模组会长期不一致（编号空间被两方
      * 共用，见 preview/uid 相关记录）—— 这条命令是唯一的「拖回一致」手段。
-     * 应答经 face_service_emit(FACE_EV_DELETE_DONE) 上报，且该事件的 face_id
+     * 应答经 hal_face_emit(FACE_EV_DELETE_DONE) 上报，且该事件的 face_id
      * 恒为 **-1**（没有具体模板号），调用方据此与单条删除区分。
      * 可为 NULL（后端不支持 → SAFE_ERR_UNSUP）。 */
     safe_err_t (*delete_all)(void);
 
     /* 单次识别（FR-27 拍板：识别由界面按钮触发，不再自动循环）。受理后结果经
-     * face_service_emit(FACE_EV_DETECT) 上报，会话结束即静默（低功耗）。
+     * hal_face_emit(FACE_EV_DETECT) 上报，会话结束即静默（低功耗）。
      * 忙返回 SAFE_ERR_BUSY；可为 NULL（视为不支持，SAFE_ERR_UNSUP）。 */
     safe_err_t (*verify_once)(void);
 
     /* 模组侧已注册用户清单（FR-21 防线 3「启动对账」用）。语义同 hal_face.h 的
-     * face_service_module_users：>=0 = 清单数量；-1 = 该后端无此概念；-2 = 尚未取得。
+     * hal_face_module_users：>=0 = 清单数量；-1 = 该后端无此概念；-2 = 尚未取得。
      * 可为 NULL（视为 -1）。 */
     int32_t (*module_users)(int32_t * ids, int32_t cap);
 
@@ -57,7 +57,7 @@ typedef struct face_backend {
     face_module_health_t (*module_health)(void);
 
     /* 模组实时人脸状态（FR-19 引导，NOTE NID_FACE_STATE 的 state 字段）。
-     * 语义见 hal_face.h 的 face_service_face_state()。
+     * 语义见 hal_face.h 的 hal_face_face_state()。
      * 可为 NULL（视为 -1 未知，如 fake / none）。 */
     int32_t (*face_state)(void);
     /* 姿态快照（五向录入引导的数据源）：yaw/pitch/roll，任一输出参数可为 NULL。
@@ -95,7 +95,7 @@ const face_backend_t * face_backend_none(void);
 /* 后端向服务层上报结果（只有后端实现可以调用）。
  * 事件经 event_bus(EV_FACE_EVENT) 广播（步骤 3a）；FACE_EV_ERROR 的
  * const char* 描述由 emit 拷进 ev_face_event_t.msg[64] 定长数组，无跨线程悬空。 */
-void face_service_emit(face_event_t ev, const void * payload);
+void hal_face_emit(face_event_t ev, const void * payload);
 
 #ifdef __cplusplus
 }

@@ -139,7 +139,7 @@ typedef enum {
  * 认证副作用完成回调（**主线程** worker_poll 派发）。
  *   result     0 = 成功；-1 = 用户不存在或写盘失败（调用方只作提示，不改安全结论）
  *   face_id_rm >= 0 表示本次级联删除带出了一个模组模板号，调用方应在主线程
- *                   调 face_service_delete_async(face_id_rm)；< 0 表示无需删
+ *                   调 hal_face_delete_async(face_id_rm)；< 0 表示无需删
  *   removed    true = 该用户已被删除（临时授权用尽 / 失效）
  */
 typedef void (*astore_auth_side_cb_t)(int result, int32_t face_id_rm, bool removed);

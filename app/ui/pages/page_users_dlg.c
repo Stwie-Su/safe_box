@@ -16,7 +16,7 @@
 #include "core/support/worker.h"
 #include "core/event_bus.h"
 #include "core/auth/unlock_backend.h"   /* backend_admin_verify_totp：改管理员密码动态码二次确认 */
-#include "hal/hal_face.h"               /* face_service_enroll/delete_async + caps（UI 现代化 ui3） */
+#include "hal/hal_face.h"               /* hal_face_enroll/delete_async + caps（UI 现代化 ui3） */
 #include "hal/hal_time.h"               /* R2：时间源统一走 HAL，不直接读系统时钟 */
 #include "ui/pages/page_enroll.h"       /* page_enroll_show_result：录入结果页内展示 */
 #include <string.h>
@@ -101,7 +101,7 @@ static char s_otp_pin[8]      = {0};
 /* ---- 人脸录入/删除入口（UI 现代化 ui3）----
  * 敏感操作走与「删除用户」同一套 admin PIN 二次确认，因此需要记录
  * 「本次二次确认是为了哪个人脸操作」，auth_result 通过后再分叉。
- * 录入/删除本身是异步的（face_service_*_async 立即返回），结果经
+ * 录入/删除本身是异步的（hal_face_*_async 立即返回），结果经
  * EV_FACE_EVENT(ENROLL_DONE/DELETE_DONE) 回来：横幅由 ui_feedback 出，
  * face_id 写回 users.json 与列表刷新由本页负责（只有本页知道操作目标）。 */
 typedef enum {
@@ -1241,7 +1241,7 @@ static void dlg_confirm_begin(int win_w, int win_h, const char * title, const ch
 /* ================================================================
  *  人脸录入 / 删除（UI 现代化 ui3，spec §4）
  *  链路：行按钮 → admin PIN 二次确认（与删除用户同套弹窗）
- *       → 确认弹窗 → face_service_enroll_async()/delete_async()（立即返回）
+ *       → 确认弹窗 → hal_face_enroll_async()/delete_async()（立即返回）
  *       → EV_FACE_EVENT(ENROLL_DONE/DELETE_DONE)
  *           ├─ ui_feedback：横幅反馈
  *           └─ 本页：user_face_set 写回模板号（worker 线程落盘）+ 刷新列表
@@ -1313,9 +1313,9 @@ static void face_start_cb(lv_event_t * e)
         if (s_face_pending_uid >= 0 && user_find_by_id(s_face_pending_uid, &uu) == 0) {
             strncpy(uname, uu.name, sizeof(uname) - 1);
         }
-        r = face_service_enroll_async(uname);     /* hal_face.h，立即返回 */
+        r = hal_face_enroll_async(uname);     /* hal_face.h，立即返回 */
     } else if (s_face_op == FACE_OP_DELETE) {
-        r = face_service_delete_async(s_face_pending_tpl);   /* hal_face.h:107 */
+        r = hal_face_delete_async(s_face_pending_tpl);   /* hal_face.h:107 */
     } else {
         return;
     }
@@ -1359,7 +1359,7 @@ bool page_users_retry_enroll(void)
     s_face_pending_uid = s_last_enroll_uid;
     s_face_pending_tpl = -1;
 
-    if (face_service_enroll_async(uname) != SAFE_OK) {
+    if (hal_face_enroll_async(uname) != SAFE_OK) {
         s_face_op          = FACE_OP_NONE;
         s_face_pending_uid = -1;
         return false;
@@ -1551,15 +1551,15 @@ static void del_worker(void * p)
  * face_start_cb → on_face_event_ui）：那条路径的目标是**用户还在**时解绑模板，
  * 应答回来要写回 face_id=-1 并刷新列表；而这里用户记录已经删掉了，
  * 没有可写回的对象 —— 复用会让 on_face_event_ui 对一个已不存在的 uid 发
- * user_face_set。故此处只复用「face_service_delete_async + 审计」这一层语义，
+ * user_face_set。故此处只复用「hal_face_delete_async + 审计」这一层语义，
  * 不再走 s_face_op 状态机，DELETE_DONE 事件会被 on_face_event_ui 正常忽略
  * （它要求 s_face_op == FACE_OP_DELETE 才处理）。 */
 static void del_done(void * p)
 {
     user_op_job_t * a = (user_op_job_t *)p;
     if (a->result == 0) {
-        if (a->del_face_id >= 0 && (face_service_caps()->caps & FACE_CAP_DELETE)) {
-            safe_err_t r = face_service_delete_async(a->del_face_id);
+        if (a->del_face_id >= 0 && (hal_face_caps()->caps & FACE_CAP_DELETE)) {
+            safe_err_t r = hal_face_delete_async(a->del_face_id);
             char buf[128];
             if (r == SAFE_OK) {
                 snprintf(buf, sizeof(buf), "删除用户：已下发模组删除模板 %d", a->del_face_id);

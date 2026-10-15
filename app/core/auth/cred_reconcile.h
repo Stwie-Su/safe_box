@@ -2,7 +2,7 @@
  * @file cred_reconcile.h
  * FR-21 防线 3「启动对账」：孤儿凭据标失效（需求 §5）。
  *
- * 模组用户清单首次取得后（face_service_module_users() 返回 >= 0）跑一次，
+ * 模组用户清单首次取得后（hal_face_module_users() 返回 >= 0）跑一次，
  * 把「本地有、模组无」的绑定凭据标记失效（face_enable=false，不删用户），
  * 且不用于放行；PIN / 动态码认证通道不受影响。
  */

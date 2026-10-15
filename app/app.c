@@ -98,13 +98,13 @@ void app_main(void)
     /* 人脸通道（步骤 3a / R6 + 3c 串口接线）：init 绑定后端（构建期默认
      * SAFE_FACE_BACKEND，环境变量运行时可覆盖）；fm225 后端的 init/start
      * 打开串口并把 fd 经 face_thread_set_uart_fd() 借给 face 线程——该接口
-     * 仅线程 start 前可设（§5.19），故 face_service_init/start 必须排在
+     * 仅线程 start 前可设（§5.19），故 hal_face_init/start 必须排在
      * face_thread_start 之前（3c 调整，注释同步）。识别结果经
      * event_bus(EV_FACE_EVENT) 广播，auth_fsm 在自己的 init 里订阅。 */
     /* D2：后端名的唯一解析点在 config（环境变量 SAFE_FACE_BACKEND > 构建期默认），
      * 与下方横幅打印同一字段；此处不再二次读 env，避免"横幅 fake、实际 fm225"。 */
-    face_service_init(app_config()->face_backend);
-    face_service_start();
+    hal_face_init(app_config()->face_backend);
+    hal_face_start();
 
     /* 把**持久化**的人脸录入模式同步给后端（**只做一次**）。
      * 策略（users.json 的 policy.enroll_five_way）是唯一真源，env 只作初始默认 ——
@@ -113,7 +113,7 @@ void app_main(void)
      * ⚠️ 此前这行被误放在 app_tick_fast（20ms 泵）里：它**没有幂等保护**，
      *    会以每秒 50 次的节奏反复调用 user_policy()（加锁 + 整份拷贝）与后端 setter。
      *    泵里只适合放幂等的东西（如 cred_reconcile_tick 自带 s_done 短路）。 */
-    face_service_set_enroll_five_way(user_policy()->enroll_five_way);
+    hal_face_set_enroll_five_way(user_policy()->enroll_five_way);
 
     /* face 线程（步骤 3b，规约 §3.4）：由它 poll 相机 fd 取帧 + 转换（只转最新帧）
      * 与 FM225 UART fd（fm225 后端在上面 start 时已接入），主线程不再直接拉帧。 */
@@ -147,15 +147,15 @@ void app_tick_fast(void)
     worker_poll();
     event_bus_pump();
     rpc_poll();
-    /* face_service_tick 保留在主线程作后端驱动（b3 取简，理由见 face_thread.c 头注释）；
+    /* hal_face_tick 保留在主线程作后端驱动（b3 取简，理由见 face_thread.c 头注释）；
      * 相机采集与格式转换已移入 face 线程，主线程不再做帧转换。
      * now_ms 必须与后端内部的 hal_time_ms() 同源（见 face_backend.h 接口约定）：此前传
      * 进程内自增计数，与后端的单调绝对毫秒跨基，超时判定恒真、每 tick 刷屏（D1）。 */
-    face_service_tick(hal_time_ms());
+    hal_face_tick(hal_time_ms());
 
     /* FR-21 防线 3「启动对账」：模组用户清单首次取得后触发一次孤儿凭据核对
      * （文件 IO 由 cred_reconcile_tick 内部经 worker_post 下沉后台线程，主线程不落盘）。
-     * 放在主线程 20ms 泵里，是因为这里既是 face_service_module_users() 的合法调用点，
+     * 放在主线程 20ms 泵里，是因为这里既是 hal_face_module_users() 的合法调用点，
      * 也是 worker_post() 的合法调用点，且不引入新线程。 */
     cred_reconcile_tick();
 }
@@ -179,8 +179,8 @@ void app_shutdown(void)
     hal_camera_deinit();          /* munmap + close(fd) */
     face_thread_join();           /* 回收 face 线程（线程数回落） */
 
-    face_service_stop();
-    face_service_deinit();        /* §3.2：人脸服务收尾 */
+    hal_face_stop();
+    hal_face_deinit();        /* §3.2：人脸服务收尾 */
 
     mqtt_stop();                  /* §3.2：远程通道 */
 

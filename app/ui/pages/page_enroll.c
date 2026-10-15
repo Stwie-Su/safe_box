@@ -214,7 +214,7 @@ static void rebuild_canvas(void)
     s_canvas_h   = ch;
 }
 
-/* NOTE state → 引导文案（FR-19；语义见 hal_face.h face_service_face_state）
+/* NOTE state → 引导文案（FR-19；语义见 hal_face.h hal_face_face_state）
  *
  * fs < 0 = 模组**还没上报过**任何 FACE_STATE：backend_fm225.c 里 s_face_state
  * 初值就是 -1，而模组只在录入/验证会话开始后才上报 NOTE，会话刚发起到第一帧
@@ -330,7 +330,7 @@ static void frame_timer_cb(lv_timer_t * t)
 }
 
 /* ===== 人脸框（叠加在预览上） =====
- * 数据源：模组 NOTE 帧的 v[1..4] = left/top/right/bottom（经 face_service_face_box 读出）。
+ * 数据源：模组 NOTE 帧的 v[1..4] = left/top/right/bottom（经 hal_face_face_box 读出）。
  *
  * ★ 坐标映射链与预览帧管线**完全同源**：
  *   模组坐标(按 CAP_W×CAP_H) → 按预览旋转角变换 → ×缩放系数 → +视频矩形偏移。
@@ -342,7 +342,7 @@ static void face_box_update(void)
     if (s_box_seg[0] == NULL) return;
     int16_t l = 0, t = 0, r = 0, b = 0;
 
-    const int32_t bret = face_service_face_box(&l, &t, &r, &b);
+    const int32_t bret = hal_face_face_box(&l, &t, &r, &b);
 
     bool bad = (bret != 0) || ((l | t | r | b) == 0);
     if (!bad) {
@@ -392,21 +392,21 @@ static void status_timer_cb(lv_timer_t * t)
 
     uint32_t now = hal_time_ms();
     bool live = s_got_frame && ((now - s_last_frame_ms) < FACE_FRAME_STALE_MS);
-    bool enrolling = face_service_enrolling();
+    bool enrolling = hal_face_enrolling();
     /* 录入模式（单帧 / 五向）决定引导文案；后端无此概念时为 false（单帧）。
-     * 姿态 yaw/pitch/roll 已由 face_service_face_pose() 提供，暂未参与文案
+     * 姿态 yaw/pitch/roll 已由 hal_face_face_pose() 提供，暂未参与文案
      * —— 转头/抬头的判定阈值需要真机标定，标定前只用 state 更稳妥。 */
-    bool five_way = face_service_enroll_five_way();
+    bool five_way = hal_face_enroll_five_way();
 
     /* 引导小字：仅录入会话期间显示在视频上（FR-19）。
      * fs < 0（模组尚未上报）不是「没检测到人脸」，由 guide_text 统一给中性文案。 */
     if (enrolling) {
-        int32_t fs = face_service_face_state();
+        int32_t fs = hal_face_face_state();
         if (five_way) {
             char g[96];
             five_way_guide(g, sizeof(g),
-                           face_service_enroll_dir_mask(),
-                           face_service_enroll_next_dir(), fs);
+                           hal_face_enroll_dir_mask(),
+                           hal_face_enroll_next_dir(), fs);
             lv_label_set_text(s_guide_lb, g);
         } else {
             lv_label_set_text(s_guide_lb, guide_text(fs, false));
@@ -428,15 +428,15 @@ static void status_timer_cb(lv_timer_t * t)
         /* 同验证页：把模组实时上报的**全部**信息都摆出来（状态 + 人脸框 + 姿态）。 */
         int16_t l = 0, t = 0, rr = 0, bb = 0;
         char boxs[40] = "";
-        if (face_service_face_box(&l, &t, &rr, &bb) == 0 && (l | t | rr | bb))
+        if (hal_face_face_box(&l, &t, &rr, &bb) == 0 && (l | t | rr | bb))
             snprintf(boxs, sizeof(boxs), " 框(%d,%d,%d,%d)", l, t, rr, bb);
-        if (face_service_face_pose(&yaw, &pitch, &roll) == 0) {
+        if (hal_face_face_pose(&yaw, &pitch, &roll) == 0) {
             snprintf(sb, sizeof(sb), "状态=%d%s  姿态 yaw=%d pitch=%d roll=%d",
-                     (int)face_service_face_state(), boxs,
+                     (int)hal_face_face_state(), boxs,
                      (int)yaw, (int)pitch, (int)roll);
         } else {
             snprintf(sb, sizeof(sb), "状态=%d%s（模组未上报姿态）",
-                     (int)face_service_face_state(), boxs);
+                     (int)hal_face_face_state(), boxs);
         }
         lv_label_set_text(s_sub, sb);
     } else {
@@ -449,7 +449,7 @@ static void status_timer_cb(lv_timer_t * t)
      * 这里不覆盖 —— 否则 500ms 后结果就被冲掉了。 */
     if (!s_result_shown) {
         const char * st;
-        if (!face_service_enrolling())     st = "未在录入会话 · 从「用户」页发起录入";
+        if (!hal_face_enrolling())     st = "未在录入会话 · 从「用户」页发起录入";
         else if (!live)                    st = "等待摄像头出帧…";
         else                               st = "录入会话进行中 · 完成后自动返回用户页";
         lv_label_set_text(s_status, st);

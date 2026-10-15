@@ -10,14 +10,14 @@
  *   - M>>H NOTE(0x01)：Data = nid + [人脸状态等]，NID_READY(0) 上电就绪通知。
  *
  * 数据流（规约 §5.19 接线）：
- *   主线程 face_service_init("fm225") → fm225_open()（SAFE_FM225_DEV，
+ *   主线程 hal_face_init("fm225") → fm225_open()（SAFE_FM225_DEV，
  *   兼容旧名 SAFE_FACE_DEV，默认 /tmp/fm225_host；上板 /dev/ttymxc2）
  *   + termios 115200 8N1；
- *   face_service_start → fm225_start() 下发 VERIFY 之外还把 fd 经
+ *   hal_face_start → fm225_start() 下发 VERIFY 之外还把 fd 经
  *   fm225_uart_fd() 交给 face_thread_set_uart_fd()（start 前调用无竞争）。
  *   face 线程 poll 到 UART 可读 → read → fm225_proto_feed → 帧回调（本文件
- *   on_fm225_frame，仍在 face 线程）→ 识别结果 face_service_emit → event_bus_post。
- *   fd 归本后端所有，close 在 face_service_deinit（app_shutdown 里排在
+ *   on_fm225_frame，仍在 face 线程）→ 识别结果 hal_face_emit → event_bus_post。
+ *   fd 归本后端所有，close 在 hal_face_deinit（app_shutdown 里排在
  *   face_thread_join 之后，线程先停再关 fd，无竞争窗口）。
  *
  * 命令应答超时重发：VERIFY/ENROLL/DELETE 下发后记 pending 命令与时间戳，
@@ -436,7 +436,7 @@ static bool fm225_enroll_issue(uint32_t now_ms)
         memset(&r, 0, sizeof(r));
         r.face_id = -1;
         r.err     = e;
-        face_service_emit(FACE_EV_ENROLL_DONE, &r);
+        hal_face_emit(FACE_EV_ENROLL_DONE, &r);
         return false;
     }
 
@@ -576,7 +576,7 @@ static bool s_fg_last = true;      /* 上一次 tick 的前台态（初值 = 前
 static void fm225_fg_tick(uint32_t now_ms)
 {
     (void)now_ms;
-    bool fg = face_service_foreground();
+    bool fg = hal_face_foreground();
     if(fg == s_fg_last) return;
     s_fg_last = fg;
     if(!fg) {
@@ -620,7 +620,7 @@ static void fm225_health_tick(uint32_t now_ms)
     if(!s_health_monitor) return;
     /* Duty-cycle（FR-27）：前台暂停期模组是被我们主动静默的，不计无应答轮；
      * 清轮基准，恢复前台后从零重新起算（恢复后仍要连续 3 轮静默才判不健康）。 */
-    if(!face_service_foreground()) { s_health_round_at_ms = 0; return; }
+    if(!hal_face_foreground()) { s_health_round_at_ms = 0; return; }
     if(s_health_round_at_ms == 0) { s_health_round_at_ms = now_ms; return; }  /* 首轮基准 */
 
     if(s_rx_in_round) {
@@ -842,7 +842,7 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
         r.timestamp = hal_time();
         printf("[fm225] verify 应答：reason=%s uid=%d name=\"%s\"\n",
                face_reason_name(reason), r.face_id, r.user_name);
-        face_service_emit(FACE_EV_DETECT, &r);
+        hal_face_emit(FACE_EV_DETECT, &r);
         /* verify 结束：不在应答回调里立刻续发下一轮——那等于零退避轮询，模组/模拟器
          * 连答时会被打成一串 no_match 洪泛（伪造失败计数 → 自锁）。改由 fm225_tick
          * 的 REARM 退避统一续发，轮间强制留静默间隔（模组一次 VERIFY 只出一组结果）。 */
@@ -919,7 +919,7 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
             fm225_send_silent(FM225_CMD_FACE_RESET);
             printf("[fm225] 录入未成功：0x23 FACE RESET 清除录入残留状态\n");
         }
-        face_service_emit(FACE_EV_ENROLL_DONE, &r);
+        hal_face_emit(FACE_EV_ENROLL_DONE, &r);
         break;
     }
     case FM225_CMD_DELETE_USER:
@@ -933,7 +933,7 @@ static void on_fm225_frame(const fm225_frame_t * f, void * user)
         r.err     = mr_to_err(f->result);
         printf("[fm225] delete 应答：err=%d mr=0x%02X id=%d\n",
                (int)r.err, f->result, r.face_id);
-        face_service_emit(FACE_EV_DELETE_DONE, &r);
+        hal_face_emit(FACE_EV_DELETE_DONE, &r);
         break;
     }
     case FM225_CMD_GET_ALL_USERID: {
@@ -1009,7 +1009,7 @@ static safe_err_t fm225_init(void)
     safe_err_t e = fm225_open();
     if(e != SAFE_OK) {
         /* 串口没起（PC 上没先跑 socat）：照常初始化，start 时再报错——
-         * face_service_init 的降级逻辑（找不到后端退化 none）不该因外设
+         * hal_face_init 的降级逻辑（找不到后端退化 none）不该因外设
          * 临时不在而改变后端选择。 */
         printf("[fm225] 串口未就绪，start 时重试打开\n");
         return SAFE_OK;
@@ -1035,14 +1035,14 @@ static safe_err_t fm225_start(void)
 
     /* UART fd 借给 face 线程 poll（§5.19：start 前调用，线程未起无竞争；
      * face_thread_set_uart_fd 幂等保护：线程已在跑则忽略，本后端必须
-     * 在 face_thread_start 之前完成 face_service_start——app_main 的
-     * face_thread_start() 在 face_service_init/start 之前调用。见 app.c
+     * 在 face_thread_start 之前完成 hal_face_start——app_main 的
+     * face_thread_start() 在 hal_face_init/start 之前调用。见 app.c
      * 注释与 fm225_uart_fd 交接顺序） */
     face_thread_set_uart_fd(s_uart_fd);
 
     s_started = true;
     /* 不在 start 时布防 VERIFY（FR-27 拍板 2026-09-15）：识别由界面按钮单次
-     * 触发（face_service_verify_once），其余时间——含启动后——模组静默低功耗。 */
+     * 触发（hal_face_verify_once），其余时间——含启动后——模组静默低功耗。 */
     return SAFE_OK;
 }
 
@@ -1092,14 +1092,14 @@ static void fm225_session_giveup(void)
         memset(&r, 0, sizeof(r));
         r.face_id = -1;
         r.err     = SAFE_ERR_TIMEOUT;
-        face_service_emit(FACE_EV_ENROLL_DONE, &r);
+        hal_face_emit(FACE_EV_ENROLL_DONE, &r);
     }
     else {
         char msg[64];
         snprintf(msg, sizeof(msg), "fm225 命令 0x%02X 无应答（会话型命令不重发）",
                  (unsigned)cmd);
         printf("[fm225] %s\n", msg);
-        face_service_emit(FACE_EV_ERROR, msg);
+        hal_face_emit(FACE_EV_ERROR, msg);
     }
 }
 
@@ -1117,7 +1117,7 @@ static void fm225_tick(uint32_t now_ms)
     fm225_health_tick(now_ms);
 
     /* 前台暂停：不对账 / 不重发 / 不重开识别会话 */
-    if(!face_service_foreground()) return;
+    if(!hal_face_foreground()) return;
 
     /* 静默命令（0x10 清场 / 0x24 清单查询 / 0x23 清录入状态）的在途窗口：到点即视为
      * 结束，解除「在途」标记。它们不进 pending、没有超时重发，必须有个兜底出口——
@@ -1172,7 +1172,7 @@ static void fm225_tick(uint32_t now_ms)
             snprintf(msg, sizeof(msg), "fm225 命令 0x%02X 无应答（重发 %u 次）",
                      s_pending_cmd, s_retry);
             printf("[fm225] %s\n", msg);
-            face_service_emit(FACE_EV_ERROR, msg);
+            hal_face_emit(FACE_EV_ERROR, msg);
         }
         else {
             /* 日志降频（D1③）：仅在「进入重发」这一状态变化时打一次；中间几次重发
@@ -1186,7 +1186,7 @@ static void fm225_tick(uint32_t now_ms)
     }
 
     /* verify 不再自动续发（FR-27 拍板 2026-09-15）：识别改为界面按钮单次触发
-     *（face_service_verify_once → fm225_verify_once），会话结束即静默低功耗。
+     *（hal_face_verify_once → fm225_verify_once），会话结束即静默低功耗。
      * 原 REARM 自动循环随按键触发模式一并移除；重发放弃后由用户再次发起。 */
 }
 

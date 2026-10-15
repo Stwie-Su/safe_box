@@ -1,7 +1,7 @@
 # 单元测试：只链业务库，不碰 LVGL。板子交叉编译时 SAFE_BUILD_TESTS 默认 OFF。
 
 # safe_core 与 safe_hal 之间存在静态库级互相引用：core->hal（hal_time、
-# face_service_module_users）与 hal->core（face_service.c 的 event_bus_post）。
+# hal_face_module_users）与 hal->core（face_service.c 的 event_bus_post）。
 # 单趟归档扫描无法闭合 —— 对测试目标用 --start-group 允许重扫，避免依赖「某个
 # 恰好被引用的符号把对方 .o 拽进来」这种脆弱巧合（例：去掉 cred_reconcile 里一条
 # 无订阅者的 event_bus_publish 后，event_bus.o 不再被拉入，链接即断）。

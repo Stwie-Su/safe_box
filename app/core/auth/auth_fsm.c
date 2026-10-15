@@ -61,7 +61,7 @@ static auth_event_cb_t  s_evt_cb    = NULL;
 static uint32_t s_otp_gen    = 0;   /* 提交计数（世代号发生器） */
 static uint32_t s_otp_active = 0;   /* 当前在途作业的世代号；0 = 无 */
 
-/* 人脸事件入口：face_service_emit → event_bus(EV_FACE_EVENT) → 本回调（主线程） */
+/* 人脸事件入口：hal_face_emit → event_bus(EV_FACE_EVENT) → 本回调（主线程） */
 static void handle_face_result(int32_t face_id, face_reason_t reason, const char * mod_name);
 static void on_face_event(ev_topic_t topic, const void * payload, void * user);
 static void do_unlock(const char * user, const char * via);
@@ -111,7 +111,7 @@ void auth_fsm_init(void)
     s_otp_active = 0;
 
     /* 人脸通道（步骤 3a / R6 接线）：订阅总线 EV_FACE_EVENT。
-     * 后端结果由 face_service_emit 广播（主线程 publish 同步派发），
+     * 后端结果由 hal_face_emit 广播（主线程 publish 同步派发），
      * 后端是模拟器还是 FM225 由构建选项决定，这里不做任何区分。 */
     event_bus_subscribe(EV_FACE_EVENT, on_face_event, NULL);
 }
@@ -160,7 +160,7 @@ static void handle_face_result(int32_t face_id, face_reason_t reason, const char
 }
 
 /* 人脸事件回调（总线签名）：payload 为 ev_face_event_t（POD，步骤 3a），
- * 由 face_service_emit → event_bus_publish 在主线程同步派发。 */
+ * 由 hal_face_emit → event_bus_publish 在主线程同步派发。 */
 static void on_face_event(ev_topic_t topic, const void * payload, void * user)
 {
     (void)user;
@@ -232,12 +232,12 @@ static void note_fail(const char *user, const char *detail)
 }
 
 /* 级联删除类作业的完成回调（主线程）：唯一要补做的是「通知 face 线程删模组模板」。
- * 那是异步投递（不落盘、不阻塞），且必须在主线程——face_service_delete_async 会走
+ * 那是异步投递（不落盘、不阻塞），且必须在主线程——hal_face_delete_async 会走
  * 模组命令队列。result / removed 只影响审计文案，而审计已由 worker 侧写好了。 */
 static void revoke_done(int result, int32_t face_id_rm, bool removed)
 {
     (void)result; (void)removed;
-    if (face_id_rm >= 0) face_service_delete_async(face_id_rm);
+    if (face_id_rm >= 0) hal_face_delete_async(face_id_rm);
 }
 
 static void do_unlock(const char *user, const char *via)

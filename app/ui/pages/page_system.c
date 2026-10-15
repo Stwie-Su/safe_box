@@ -32,7 +32,7 @@
 #include "core/support/ota_status.h"  /* 状态接口约定解析（纯函数，ctest 锁定） */
 #include "core/support/worker.h"
 #include "core/event_bus.h"      /* 订阅 EV_FACE_EVENT：识别「全清完成」 */
-#include "hal/hal_face.h"        /* face_service_delete_all_async */
+#include "hal/hal_face.h"        /* hal_face_delete_all_async */
 #include "ui/ui_feedback.h"      /* ui_banner：操作结果横幅 */
 #include "hal/hal_time.h"      /* R2：时间源统一走 HAL，不直接读系统时钟 */
 #include "app_version.h"       /* SAFE_VERSION_STRING：版本卡 */
@@ -832,7 +832,7 @@ static void mode_done(void * p)
 {
     mode_job_t * j = (mode_job_t *)p;
     /* 落盘完成后再同步后端 —— 顺序反了会让界面/后端短暂不一致。 */
-    face_service_set_enroll_five_way(j->five);
+    hal_face_set_enroll_five_way(j->five);
     mode_refresh();
     astore_append_log("setting_change", "admin", 1,
                       j->five ? "face enroll mode: five-way"
@@ -1149,7 +1149,7 @@ static void do_clear_face_cb(lv_event_t * e)
 {
     (void)e;
     close_dlg();
-    safe_err_t r = face_service_delete_all_async();
+    safe_err_t r = hal_face_delete_all_async();
     if (r == SAFE_OK)            ui_banner("正在清空模组人脸…", UI_BANNER_INFO, 2000);
     else if (r == SAFE_ERR_BUSY) ui_banner("模组忙（可能正在录入/识别），请稍后重试",
                                            UI_BANNER_DANGER, 3000);

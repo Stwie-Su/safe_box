@@ -69,7 +69,7 @@ typedef struct {
 /* ---------------- 事件 ---------------- */
 
 /* 人脸事件不再走本模块的自有订阅接口（v1.3 §5.18：全工程只留 worker + event_bus
- * 两套通知机制）。后端结果经 face_service_emit() → event_bus(EV_FACE_EVENT) 广播，
+ * 两套通知机制）。后端结果经 hal_face_emit() → event_bus(EV_FACE_EVENT) 广播，
  * payload 为 ev_face_event_t（core/event_bus.h，POD 按值拷贝）。
  * FACE_EV_ERROR 的描述文本放在该结构的 msg[64] 定长数组里。 */
 typedef enum {
@@ -96,78 +96,78 @@ typedef struct {
 /* ---------------- 生命周期 ---------------- */
 
 /* 初始化并绑定后端。backend_name 为 NULL 时用构建期默认后端。 */
-safe_err_t face_service_init(const char * backend_name);
-safe_err_t face_service_deinit(void);
+safe_err_t hal_face_init(const char * backend_name);
+safe_err_t hal_face_deinit(void);
 
 /* 主线程周期驱动（20ms 级）。后端需要轮询硬件时在此处理。
  * now_ms 必须与 hal_time_ms() 同源（单调毫秒）——见 face_backend_t.tick 行为约定。 */
-void face_service_tick(uint32_t now_ms);
+void hal_face_tick(uint32_t now_ms);
 
 /* ---------------- 查询与控制 ---------------- */
 
-const face_caps_t * face_service_caps(void);
+const face_caps_t * hal_face_caps(void);
 
-safe_err_t face_service_start(void);
-safe_err_t face_service_stop(void);
-bool       face_service_running(void);
+safe_err_t hal_face_start(void);
+safe_err_t hal_face_stop(void);
+bool       hal_face_running(void);
 
 /* Duty-cycle（FR-27 模组功耗管理）：人脸页是否前台。离开前台 = 停 UVC 采集流
  * + 终止/不再发起模组识别会话（红外补光与传感停工作降温）；回到前台恢复。
- * 由 page_face 在可见性边沿调用；face 线程 / fm225 后端经 face_service_foreground()
+ * 由 page_face 在可见性边沿调用；face 线程 / fm225 后端经 hal_face_foreground()
  * 读取。跨线程语义与 face_thread 的退出标志相同：volatile 标量、无锁。 */
-void face_service_set_foreground(bool active);
-bool face_service_foreground(void);
+void hal_face_set_foreground(bool active);
+bool hal_face_foreground(void);
 
 /* 异步录入：立即返回，结果通过 FACE_EV_ENROLL_DONE 上报。
  * user_name（v1.4）：本地用户名，由后端写入模组侧模板，使 VERIFY 应答能把它带回来
  * 供 FR-21 凭据一致性核对（backend → face_result_t.user_name → auth_fsm）。
  * 传 NULL 或空串 = 不写名（核对会自动跳过）。 */
-safe_err_t face_service_enroll_async(const char * user_name);
+safe_err_t hal_face_enroll_async(const char * user_name);
 
 /* 异步删除指定模板。 */
-safe_err_t face_service_delete_async(int32_t face_id);
+safe_err_t hal_face_delete_async(int32_t face_id);
 
 /* 异步清空模组侧**全部**模板（DELETE_ALL）。
  * 结果经 FACE_EV_DELETE_DONE 上报，**face_id 恒为 -1**（无具体模板号）——
  * 调用方据此区分「全清完成」与「单条删除完成」。
  * 后端不支持 → SAFE_ERR_UNSUP；模组忙 → SAFE_ERR_BUSY。 */
-safe_err_t face_service_delete_all_async(void);
+safe_err_t hal_face_delete_all_async(void);
 
 /* 单次识别（FR-27 拍板 2026-09-15）：触发一次识别会话，结果/超时走既有事件链，
  * 会话结束即静默（模组红外与传感停工作）。识别不再自动循环；忙 = SAFE_ERR_BUSY，
  * 后端不支持 = SAFE_ERR_UNSUP。 */
-safe_err_t face_service_verify_once(void);
+safe_err_t hal_face_verify_once(void);
 
 /* 模组实时人脸状态（FR-19 实时引导数据源，NOTE NID_FACE_STATE 的 state 字段）。
  * 语义（手册 §NOTE）：0=人脸正常 1=未检测到人脸 2=太靠上 3=太靠下 4=太靠左 5=太靠右；
  * -1 = 尚未收到任何状态帧（该后端无此概念或模组未上报）。
  * 后端在 face 线程持续更新，此处只读快照；无模组概念的后端恒返回 -1。 */
-int32_t face_service_face_state(void);
+int32_t hal_face_face_state(void);
 
 /* 人脸姿态快照（五向录入引导用）：yaw/pitch/roll，任一可为 NULL。
  * 返回 0 = 取到；< 0 = 后端无姿态概念或未上报。
- * 与 face_service_face_state() 属于**同一帧的两个侧面**，调用方应成对读取。 */
-int32_t face_service_face_pose(int16_t * yaw, int16_t * pitch, int16_t * roll);
+ * 与 hal_face_face_state() 属于**同一帧的两个侧面**，调用方应成对读取。 */
+int32_t hal_face_face_pose(int16_t * yaw, int16_t * pitch, int16_t * roll);
 /* 人脸框（left/top/right/bottom），与 face_state 同一次 NOTE 更新；不支持返回 -1。 */
-int32_t face_service_face_box(int16_t * l, int16_t * t, int16_t * r, int16_t * b);
+int32_t hal_face_face_box(int16_t * l, int16_t * t, int16_t * r, int16_t * b);
 
 /* 当前录入模式是否为五向（face_direction=0x1F）。false = 单帧。
  * 由后端 env SAFE_FACE_ENROLL_5WAY 决定，供录入页切换引导文案。 */
-bool face_service_enroll_five_way(void);
+bool hal_face_enroll_five_way(void);
 
 /* 五向录入进度（供 UI 在视频上方显示分步引导）：
- *   face_service_enroll_dir_mask() → 已完成的方向掩码（位：正1 右2 左4 下8 上16）；
- *   face_service_enroll_next_dir() → 下一个待采集的方向（单一位）；0 = 已采齐 / 非五向。
+ *   hal_face_enroll_dir_mask() → 已完成的方向掩码（位：正1 右2 左4 下8 上16）；
+ *   hal_face_enroll_next_dir() → 下一个待采集的方向（单一位）；0 = 已采齐 / 非五向。
  * 后端无此概念时返回 0。 */
-uint8_t face_service_enroll_dir_mask(void);
-uint8_t face_service_enroll_next_dir(void);
+uint8_t hal_face_enroll_dir_mask(void);
+uint8_t hal_face_enroll_next_dir(void);
 
 /* 运行时切换录入模式（单帧/五向）。上层在启动时按持久化策略调用一次；
  * 后端不支持时静默忽略（保持当前模式）。 */
-void face_service_set_enroll_five_way(bool five_way);
+void hal_face_set_enroll_five_way(bool five_way);
 
 /* 是否有录入会话在途（录入实时引导小字的显隐依据）。 */
-bool face_service_enrolling(void);
+bool hal_face_enrolling(void);
 
 /* 模组侧已注册用户清单（FR-21 防线 3「启动对账」用）。
  * 返回：>= 0 模组清单数量（**可以是 0**，0 与「没取到」必须区分开）；
@@ -175,11 +175,11 @@ bool face_service_enrolling(void);
  *       -2    后端有该能力但清单尚未取得（模组未就绪 / 尚未应答）。
  * cap <= 0 时只查询数量（ids 可传 NULL）。
  * 上层用它核对「本地凭据 ↔ 模组存量」，孤儿凭据（本地有、模组无）应标失效且不用于放行。 */
-int32_t face_service_module_users(int32_t * ids, int32_t cap);
+int32_t hal_face_module_users(int32_t * ids, int32_t cap);
 
 /* ---------------- 模组健康（FR-23） ---------------- */
 
-/* 模组健康三态（FR-23「模组健康与降级」）。与 face_service_module_users 的三态风格一致，
+/* 模组健康三态（FR-23「模组健康与降级」）。与 hal_face_module_users 的三态风格一致，
  * 业务层（UI / RPC）只读，不得直接读后端全局变量：
  *   FACE_MOD_UNKNOWN = 未知：后端无模组级监测（fake / none），或尚未得出判定；
  *   FACE_MOD_OK      = 健康：近期收到过模组合法帧（NOTE READY / VERIFY 应答 / 清单应答）；
@@ -192,24 +192,24 @@ typedef enum {
 } face_module_health_t;
 
 /* 只读查询当前模组健康（FR-23）。返回上面三态之一。 */
-face_module_health_t face_service_module_health(void);
+face_module_health_t hal_face_module_health(void);
 
 /* 健康三态的可读名（日志 / RPC status 用）："unknown" / "ok" / "fail"。
  * 实现在 face_service.c。非法值返回 "unknown"。 */
 const char * face_module_health_name(face_module_health_t h);
 
 /* 最近一次识别结果；没有任何结果时返回 NULL。 */
-const face_result_t * face_service_last_result(void);
+const face_result_t * hal_face_last_result(void);
 
 /* ---------------- 调试注入 ---------------- */
 
 /* 仅 FACE_CAP_INJECT 后端有效（当前为 fake），其它后端返回 SAFE_ERR_UNSUP。
  * 供调试页与 RPC inject_face 使用，真实硬件路径不会走到这里。 */
-safe_err_t face_service_inject(int32_t face_id, face_reason_t reason);
+safe_err_t hal_face_inject(int32_t face_id, face_reason_t reason);
 
 /* 兼容层：旧同步轮询接口，内部取最近一次结果。
  * 迁移期保留，待 auth_fsm 完全改为事件驱动后删除。 */
-int face_service_poll_compat(face_result_t * out);
+int hal_face_poll_compat(face_result_t * out);
 
 #ifdef __cplusplus
 }

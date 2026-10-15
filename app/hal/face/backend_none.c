@@ -3,7 +3,7 @@
  * 空人脸后端：人脸通道整体停用时使用（SAFE_FACE_BACKEND=none）。
  *
  * 所有操作返回 SAFE_ERR_UNSUP，能力位为 0。
- * 业务层在调用前应查 face_service_caps()，发现无 FACE_CAP_DETECT 时把人脸入口置灰。
+ * 业务层在调用前应查 hal_face_caps()，发现无 FACE_CAP_DETECT 时把人脸入口置灰。
  */
 
 #include "face_backend.h"

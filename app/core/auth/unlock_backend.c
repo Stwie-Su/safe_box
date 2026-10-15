@@ -39,7 +39,7 @@ static void temp_revoke(const safe_user_t *u, uint32_t now)
     {   /* 级联删除模组模板（含 uid 归属核验，见 user_del_cascade） */
         int32_t fid_rm = -1;
         user_del_cascade(u->id, &fid_rm);
-        if (fid_rm >= 0) face_service_delete_async(fid_rm);
+        if (fid_rm >= 0) hal_face_delete_async(fid_rm);
     }
     log_append("ALARM", u->name, 1, why);
 }

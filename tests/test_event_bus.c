@@ -182,10 +182,10 @@ static void test_publish_sync(void)
     CHECK(strlen(s_last_auth.detail) == 63);
 }
 
-/* ---------------- 用例 5：face_service_emit 跨线程并发（步骤 3c 前置必改） ---------------- */
+/* ---------------- 用例 5：hal_face_emit 跨线程并发（步骤 3c 前置必改） ---------------- */
 
 /* 场景复刻：fm225 后端在 face 线程高频 emit（写 s_last/s_seq），同时主线程不断调
- * face_service_last_result（读 s_last）——3b 之前 emit 只在主线程无竞争，3c 起
+ * hal_face_last_result（读 s_last）——3b 之前 emit 只在主线程无竞争，3c 起
  * face 线程 emit 与主线程读并发。断言：
  *  a) 读到的 seq 恰在 [1, N_EMIT] 范围内（无垃圾值）；
  *  b) seq 单调不回头（读到旧快照可以，但下一次读必须 >= 上一次——锁保证读写的
@@ -194,7 +194,7 @@ static void test_publish_sync(void)
  * 注：本用例直接驱动 face_service（fm225 后端未编入时也成立），不依赖总线内容。 */
 
 #include "hal/hal_face.h"
-#include "hal/face/face_backend.h"   /* face_service_emit 声明（仅后端与测试可用） */
+#include "hal/face/face_backend.h"   /* hal_face_emit 声明（仅后端与测试可用） */
 
 #define CONC_EMIT_N     2000     /* face 线程 emit 次数 */
 
@@ -209,16 +209,16 @@ static void * emitter_thread(void * arg)
         r.face_id   = i;
         r.reason    = FACE_RES_OK;
         r.timestamp = (uint32_t)i;
-        face_service_emit(FACE_EV_DETECT, &r);
+        hal_face_emit(FACE_EV_DETECT, &r);
     }
     s_emit_done = 1;
     return NULL;
 }
 
-static void test_face_service_concurrent_last_result(void)
+static void test_hal_face_concurrent_last_result(void)
 {
-    /* 直接绑 fake 后端（face_service_init 幂等，重复 init 走既有后端） */
-    CHECK(face_service_init("fake") == SAFE_OK);
+    /* 直接绑 fake 后端（hal_face_init 幂等，重复 init 走既有后端） */
+    CHECK(hal_face_init("fake") == SAFE_OK);
 
     pthread_t t;
     uint32_t prev_seq = 0;
@@ -227,7 +227,7 @@ static void test_face_service_concurrent_last_result(void)
 
     /* 主线程持续读 last_result，直到 emit 线程结束（读不到结果也正常：竞争窗口） */
     while(!s_emit_done) {
-        const face_result_t * r = face_service_last_result();
+        const face_result_t * r = hal_face_last_result();
         if(r != NULL) {
             CHECK(r->seq >= 1 && r->seq <= CONC_EMIT_N);   /* a) 无垃圾值 */
             CHECK(r->seq >= prev_seq);                     /* b) 单调不回头 */
@@ -240,7 +240,7 @@ static void test_face_service_concurrent_last_result(void)
     CHECK(pthread_join(t, NULL) == 0);
 
     /* c) 收尾后读到的是最后一帧的完整快照 */
-    const face_result_t * fin = face_service_last_result();
+    const face_result_t * fin = hal_face_last_result();
     CHECK(fin != NULL);
     CHECK(fin->seq == CONC_EMIT_N);
     CHECK(fin->face_id == CONC_EMIT_N - 1);
@@ -256,7 +256,7 @@ int main(void)
     test_multiple_subscribers();
     test_unsubscribe();
     test_publish_sync();
-    test_face_service_concurrent_last_result();
+    test_hal_face_concurrent_last_result();
 
     event_bus_reset();
     TEST_RESULT();

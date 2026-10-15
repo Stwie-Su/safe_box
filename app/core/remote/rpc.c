@@ -97,7 +97,7 @@ static char *build_status(int code, const char *msg, const char *req_id, int use
     /* FR-23：模组健康纳入远程上报（ok / fail / unknown）。用 cJSON 拼串，不经过定长
      * 缓冲，天然规避 -Wformat-truncation。 */
     cJSON_AddStringToObject(j, "mod_health",
-                            face_module_health_name(face_service_module_health()));
+                            face_module_health_name(hal_face_module_health()));
     if (code) cJSON_AddNumberToObject(j, "code", code);
     if (msg) cJSON_AddStringToObject(j, "msg", msg);
     if (req_id && *req_id) cJSON_AddStringToObject(j, "req_id", req_id);
@@ -463,7 +463,7 @@ static void rpc_job_done(void *arg)
         break;
     case JOB_DEL_USER:
         /* 本地删成功且归属核验通过 -> 异步删模组模板（face 线程，主线程调用安全）。 */
-        if (j->code == 0 && j->del_fid >= 0) face_service_delete_async(j->del_fid);
+        if (j->code == 0 && j->del_fid >= 0) hal_face_delete_async(j->del_fid);
         ack(j->req_id, j->code, j->msg);
         break;
     case JOB_REMOTE_UNLOCK:
@@ -872,7 +872,7 @@ static void dispatch(const char *payload)
             return;
         }
         /* 人脸注入在板子管线（主线程，无磁盘 IO）；审计日志写盘下沉 worker。 */
-        face_service_inject(fid, (face_reason_t)reason_i);
+        hal_face_inject(fid, (face_reason_t)reason_i);
         char detail[96];
         snprintf(detail, sizeof(detail), "face_id=%d reason=%.32s",
                  fid, cJSON_IsString(rs) && rs->valuestring ? rs->valuestring : "?");

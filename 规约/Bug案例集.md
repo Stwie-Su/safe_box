@@ -287,7 +287,7 @@ if (now_ms - last_send_ms > 800) resend();   // 伪代码
 
 ### 案例 11：人脸画面"进来不恢复"——状态量初值的方向性错误
 
-**背景**：`face_service_set_foreground(true)` 首次调用时不生效——不打日志、不恢复相机流。
+**背景**：`hal_face_set_foreground(true)` 首次调用时不生效——不打日志、不恢复相机流。
 
 **根因**：`s_fg` 初值 `true`，于是首次调用被 `if(s_fg == active) return;` 直接吞掉。默认页是 HOME 时靠 app 开机的 `hal_camera_start` 兜住，所以一直没暴露。
 

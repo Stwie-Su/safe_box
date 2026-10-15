@@ -72,14 +72,14 @@ static const face_backend_t * find_backend(const char * name)
         const face_backend_t * b = table[i].f();
         if(b != NULL && strcmp(name, b->name) == 0) return b;
     }
-    /* 未命中返回 NULL：由 face_service_init 统一退化 none（不让系统起不来），
+    /* 未命中返回 NULL：由 hal_face_init 统一退化 none（不让系统起不来），
      * 本函数不做任何「看起来能用」的兜底。 */
     return NULL;
 }
 
 /* ---------------- 对外接口 ---------------- */
 
-safe_err_t face_service_init(const char * backend_name)
+safe_err_t hal_face_init(const char * backend_name)
 {
     if(s_backend != NULL) return SAFE_OK;
 
@@ -103,7 +103,7 @@ safe_err_t face_service_init(const char * backend_name)
     return SAFE_OK;
 }
 
-safe_err_t face_service_deinit(void)
+safe_err_t hal_face_deinit(void)
 {
     if(s_backend == NULL) return SAFE_OK;
     if(s_running && s_backend->stop) s_backend->stop();
@@ -114,7 +114,7 @@ safe_err_t face_service_deinit(void)
     return SAFE_OK;
 }
 
-void face_service_tick(uint32_t now_ms)
+void hal_face_tick(uint32_t now_ms)
 {
     if(s_backend == NULL) return;
     if(s_backend->tick) s_backend->tick(now_ms);
@@ -127,12 +127,12 @@ void face_service_tick(uint32_t now_ms)
         else if((now_ms - s_enroll_start_ms) > ENROLL_TIMEOUT_MS) {
             s_enroll_pending = false;
             face_enroll_result_t r = { -1, SAFE_ERR_TIMEOUT, 0 };
-            face_service_emit(FACE_EV_ENROLL_DONE, &r);
+            hal_face_emit(FACE_EV_ENROLL_DONE, &r);
         }
     }
 }
 
-const face_caps_t * face_service_caps(void)
+const face_caps_t * hal_face_caps(void)
 {
     static face_caps_t caps = { "none", 0, 0 };
     if(s_backend != NULL) {
@@ -143,7 +143,7 @@ const face_caps_t * face_service_caps(void)
     return &caps;
 }
 
-safe_err_t face_service_start(void)
+safe_err_t hal_face_start(void)
 {
     if(s_backend == NULL) return SAFE_ERR_STATE;
     if(s_running) return SAFE_OK;
@@ -152,7 +152,7 @@ safe_err_t face_service_start(void)
     return e;
 }
 
-safe_err_t face_service_stop(void)
+safe_err_t hal_face_stop(void)
 {
     if(s_backend == NULL) return SAFE_ERR_STATE;
     if(!s_running) return SAFE_OK;
@@ -161,7 +161,7 @@ safe_err_t face_service_stop(void)
     return e;
 }
 
-bool face_service_running(void)
+bool hal_face_running(void)
 {
     return s_running;
 }
@@ -178,7 +178,7 @@ bool face_service_running(void)
  *   掉流后重新进前台，就会表现为「画面不恢复」。-1 表示「还没人设过」，语义正确。 */
 static volatile int s_fg = -1;
 
-void face_service_set_foreground(bool active)
+void hal_face_set_foreground(bool active)
 {
     int want = active ? 1 : 0;
     if(s_fg == want) return;
@@ -200,7 +200,7 @@ void face_service_set_foreground(bool active)
            active ? "恢复" : "终止");
 }
 
-bool face_service_foreground(void)
+bool hal_face_foreground(void)
 {
     /* D27a：-1「未定」按**前台**处理 —— 与改前的既有行为一致（开机即可用：
      * app 开机走 hal_camera_start，默认页若就是人脸页也照常识别）。
@@ -208,7 +208,7 @@ bool face_service_foreground(void)
     return s_fg != 0;
 }
 
-safe_err_t face_service_enroll_async(const char * user_name)
+safe_err_t hal_face_enroll_async(const char * user_name)
 {
     if(s_backend == NULL) return SAFE_ERR_STATE;
     if(!(s_backend->caps & FACE_CAP_ENROLL)) return SAFE_ERR_UNSUP;
@@ -219,32 +219,32 @@ safe_err_t face_service_enroll_async(const char * user_name)
     safe_err_t e = s_backend->enroll(user_name);
     if(e == SAFE_OK) {
         s_enroll_pending   = true;
-        s_enroll_start_ms  = 0;      /* 由 tick 的 now_ms 记账，见 face_service_tick */
+        s_enroll_start_ms  = 0;      /* 由 tick 的 now_ms 记账，见 hal_face_tick */
     }
     return e;
 }
 
-int32_t face_service_module_users(int32_t * ids, int32_t cap)
+int32_t hal_face_module_users(int32_t * ids, int32_t cap)
 {
     /* 后端未编入实现 → 视为「无此概念」（-1）；有实现但尚未取得 → 由后端返回 -2 */
     if(s_backend == NULL || s_backend->module_users == NULL) return -1;
     return s_backend->module_users(ids, cap);
 }
 
-face_module_health_t face_service_module_health(void)
+face_module_health_t hal_face_module_health(void)
 {
     /* 后端未编入健康监测 → 未知（fake / none 无模组级健康概念） */
     if(s_backend == NULL || s_backend->module_health == NULL) return FACE_MOD_UNKNOWN;
     return s_backend->module_health();
 }
 
-safe_err_t face_service_delete_all_async(void)
+safe_err_t hal_face_delete_all_async(void)
 {
     if(s_backend == NULL || s_backend->delete_all == NULL) return SAFE_ERR_UNSUP;
     return s_backend->delete_all();
 }
 
-safe_err_t face_service_delete_async(int32_t face_id)
+safe_err_t hal_face_delete_async(int32_t face_id)
 {
     if(s_backend == NULL) return SAFE_ERR_STATE;
     if(!(s_backend->caps & FACE_CAP_DELETE)) return SAFE_ERR_UNSUP;
@@ -252,7 +252,7 @@ safe_err_t face_service_delete_async(int32_t face_id)
     return s_backend->delete_tpl(face_id);
 }
 
-safe_err_t face_service_verify_once(void)
+safe_err_t hal_face_verify_once(void)
 {
     if(s_backend == NULL) return SAFE_ERR_STATE;
     if(!(s_backend->caps & FACE_CAP_DETECT)) return SAFE_ERR_UNSUP;
@@ -260,54 +260,54 @@ safe_err_t face_service_verify_once(void)
     return s_backend->verify_once();
 }
 
-int32_t face_service_face_state(void)
+int32_t hal_face_face_state(void)
 {
     if(s_backend == NULL || s_backend->face_state == NULL) return -1;
     return s_backend->face_state();
 }
 
-int32_t face_service_face_pose(int16_t * yaw, int16_t * pitch, int16_t * roll)
+int32_t hal_face_face_pose(int16_t * yaw, int16_t * pitch, int16_t * roll)
 {
     if (s_backend == NULL || s_backend->face_pose == NULL) return -1;
     return s_backend->face_pose(yaw, pitch, roll);
 }
 
-int32_t face_service_face_box(int16_t * l, int16_t * t, int16_t * r, int16_t * b)
+int32_t hal_face_face_box(int16_t * l, int16_t * t, int16_t * r, int16_t * b)
 {
     if (s_backend == NULL || s_backend->face_box == NULL) return -1;
     return s_backend->face_box(l, t, r, b);
 }
 
-void face_service_set_enroll_five_way(bool five_way)
+void hal_face_set_enroll_five_way(bool five_way)
 {
     if (s_backend == NULL || s_backend->set_enroll_five_way == NULL) return;
     s_backend->set_enroll_five_way(five_way);
 }
 
-uint8_t face_service_enroll_dir_mask(void)
+uint8_t hal_face_enroll_dir_mask(void)
 {
     if (s_backend == NULL || s_backend->enroll_dir_mask == NULL) return 0;
     return s_backend->enroll_dir_mask();
 }
 
-uint8_t face_service_enroll_next_dir(void)
+uint8_t hal_face_enroll_next_dir(void)
 {
     if (s_backend == NULL || s_backend->enroll_next_dir == NULL) return 0;
     return s_backend->enroll_next_dir();
 }
 
-bool face_service_enroll_five_way(void)
+bool hal_face_enroll_five_way(void)
 {
     if (s_backend == NULL || s_backend->enroll_five_way == NULL) return false;
     return s_backend->enroll_five_way();
 }
 
-bool face_service_enrolling(void)
+bool hal_face_enrolling(void)
 {
     return s_enroll_pending;
 }
 
-const face_result_t * face_service_last_result(void)
+const face_result_t * hal_face_last_result(void)
 {
     pthread_mutex_lock(&s_last_lock);
     static face_result_t snap;             /* 快照：返回指针归本模块所有，解锁后仍有效 */
@@ -317,7 +317,7 @@ const face_result_t * face_service_last_result(void)
     return has ? &snap : NULL;
 }
 
-safe_err_t face_service_inject(int32_t face_id, face_reason_t reason)
+safe_err_t hal_face_inject(int32_t face_id, face_reason_t reason)
 {
     if(s_backend == NULL) return SAFE_ERR_STATE;
     if(!(s_backend->caps & FACE_CAP_INJECT)) return SAFE_ERR_UNSUP;
@@ -326,7 +326,7 @@ safe_err_t face_service_inject(int32_t face_id, face_reason_t reason)
 }
 
 /* 兼容层：旧同步轮询接口。事件驱动改造完成后删除。 */
-int face_service_poll_compat(face_result_t * out)
+int hal_face_poll_compat(face_result_t * out)
 {
     if(out == NULL) return 0;
     pthread_mutex_lock(&s_last_lock);
@@ -363,7 +363,7 @@ const char * face_module_health_name(face_module_health_t h)
 
 /* emit：后端结果的唯一出口，组装 ev_face_event_t 后经总线广播。
  * FACE_EV_ERROR 的 payload 为 const char *（错误描述），拷进 msg[64] 截断。 */
-void face_service_emit(face_event_t ev, const void * payload)
+void hal_face_emit(face_event_t ev, const void * payload)
 {
     ev_face_event_t e;
     memset(&e, 0, sizeof(e));

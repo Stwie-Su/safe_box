@@ -15,7 +15,7 @@
 #include "core/support/worker.h"
 #include "core/event_bus.h"
 #include "core/auth/unlock_backend.h"   /* backend_admin_verify_totp：改管理员密码动态码二次确认 */
-#include "hal/hal_face.h"               /* face_service_enroll/delete_async + caps（UI 现代化 ui3） */
+#include "hal/hal_face.h"               /* hal_face_enroll/delete_async + caps（UI 现代化 ui3） */
 #include "hal/hal_time.h"               /* R2：时间源统一走 HAL，不直接读系统时钟 */
 #include "ui/pages/page_enroll.h"       /* page_enroll_show_result：录入结果页内展示 */
 #include <string.h>
@@ -55,7 +55,7 @@ const char * name_cache_get(int id)
 
 bool face_cap_ok(bool need_enroll)
 {
-    const face_caps_t * caps = face_service_caps();
+    const face_caps_t * caps = hal_face_caps();
     if (caps == NULL) return false;
     uint32_t need = need_enroll ? FACE_CAP_ENROLL : FACE_CAP_DELETE;
     return (caps->caps & need) != 0u;

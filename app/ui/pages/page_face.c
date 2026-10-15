@@ -16,7 +16,7 @@
  *
  * Duty-cycle（FR-27 模组功耗管理）：
  *   仅当本页可见时才开 UVC 预览流与模组识别会话（模组红外补光长时间工作发热）。
- *   实现：frame_timer_cb 的可见性边沿 → face_service_set_foreground()。
+ *   实现：frame_timer_cb 的可见性边沿 → hal_face_set_foreground()。
  *
  * 性能与纪律：
  *   - 画布缓冲尺寸 = 视频矩形（非整面板），映射表 SIZE_CHANGED 时重建一次，
@@ -888,7 +888,7 @@ static void frame_timer_cb(lv_timer_t * t)
                page_enroll_is_visible();
     if (vis != s_fg_ui) {
         s_fg_ui = vis;
-        face_service_set_foreground(vis);
+        hal_face_set_foreground(vis);
     }
 
     if (s_page_root == NULL || lv_obj_is_hidden(s_page_root)) {
@@ -965,11 +965,11 @@ static void face_ph_show(bool show, const char * text)
 /* 健康状态：先看模组级健康（FR-23），再按后端能力 + 运行状态 + 是否有帧推导（真实来源，非写死） */
 static const char * face_health_str(void)
 {
-    const face_caps_t * caps = face_service_caps();
+    const face_caps_t * caps = hal_face_caps();
     if (caps == NULL || caps->name == NULL || strcmp(caps->name, "none") == 0) return "未启用";
     /* FR-23：模组连续多轮无应答 → 明确告警「模组无响应」，优先于其它推导 */
-    if (face_service_module_health() == FACE_MOD_FAIL) return "模组无响应";
-    if (!face_service_running()) return "异常";
+    if (hal_face_module_health() == FACE_MOD_FAIL) return "模组无响应";
+    if (!hal_face_running()) return "异常";
     if (!s_got_frame)            return "待机";
     if (hal_camera_fd() < 0)     return "降级";
     return "正常";
@@ -979,7 +979,7 @@ static const char * face_health_str(void)
 static void face_update_header(void)
 {
     if (s_face_sub == NULL) return;
-    const face_caps_t * caps = face_service_caps();
+    const face_caps_t * caps = hal_face_caps();
     char buf[112];
     if (caps == NULL || caps->name == NULL || strcmp(caps->name, "none") == 0) {
         snprintf(buf, sizeof(buf), "人脸后端未启用 · 仅显示摄像头预览");
@@ -989,7 +989,7 @@ static void face_update_header(void)
          * 「硬编码上限 1000」拼出来的假象，模组里实际 0 个模板，还被人误读成
          * 「模组已有 1 个模板」（与 WiFi mock 误判同族的教训：界面数字必须能追溯到硬件）。 */
         char tpl[24];
-        int32_t mod_n = face_service_module_users(NULL, 0);
+        int32_t mod_n = hal_face_module_users(NULL, 0);
         if (mod_n >= 0) {
             if (caps->max_templates < 0) snprintf(tpl, sizeof(tpl), "%d/不限", (int)mod_n);
             else                         snprintf(tpl, sizeof(tpl), "%d/%d", (int)mod_n,
@@ -1012,7 +1012,7 @@ static void face_update_header(void)
 /* 由最近一次识别结果推导状态文案（结果超过 FACE_RESULT_FRESH_S 秒则忽略） */
 static const char * face_status_from_result(void)
 {
-    const face_result_t * r = face_service_last_result();
+    const face_result_t * r = hal_face_last_result();
     if (r == NULL) return "请将面部对准摄像头";
     uint32_t now = (uint32_t)hal_time();
     if (now - r->timestamp > FACE_RESULT_FRESH_S) return "请将面部对准摄像头";
@@ -1037,14 +1037,14 @@ static void face_set_btn_enabled(lv_obj_t * btn, bool enabled)
 static void verify_btn_cb(lv_event_t * e)
 {
     (void)e;
-    safe_err_t r = face_service_verify_once();
+    safe_err_t r = hal_face_verify_once();
     if (r == SAFE_ERR_BUSY)  ui_banner("识别会话进行中，请稍候…", UI_BANNER_INFO, UI_ANIM_BANNER_HOLD_MS_S);
     else if (r != SAFE_OK)   ui_banner("当前后端不支持识别", UI_BANNER_INFO, UI_ANIM_BANNER_HOLD_MS_S);
     else                     ui_banner("识别已启动，请正对模组（10 秒内）", UI_BANNER_INFO, UI_ANIM_BANNER_HOLD_MS_S);
 }
 
 /* ===== 人脸框（叠加在预览上） =====
- * 数据源：模组 NOTE 帧的 v[1..4] = left/top/right/bottom（face_service_face_box 读出）。
+ * 数据源：模组 NOTE 帧的 v[1..4] = left/top/right/bottom（hal_face_face_box 读出）。
  * 坐标映射链与预览帧管线同源：模组坐标(按 CAP_W×CAP_H) → 旋转变换 → ×缩放 → +视频偏移。
  * ⚠️ 模组检测相机与 app 预览的 UVC 相机**不是同一传感器**，视场/安装位置不同 ——
  * 框是「模组视角」的投影，位置/大小仅作参考；明显错位时开 SAFE_FM225_NOTE_DEBUG 标定。 */
@@ -1053,7 +1053,7 @@ static void face_box_update(void)
     if (s_box_seg[0] == NULL) return;
     int16_t l = 0, t = 0, r = 0, b = 0;
 
-    const int32_t bret = face_service_face_box(&l, &t, &r, &b);
+    const int32_t bret = hal_face_face_box(&l, &t, &r, &b);
 
     bool bad = (bret != 0) || ((l | t | r | b) == 0);
     if (!bad) {
@@ -1104,7 +1104,7 @@ static void face_status_timer_cb(lv_timer_t * t)
 {
     (void)t;
 
-    const face_caps_t * caps = face_service_caps();
+    const face_caps_t * caps = hal_face_caps();
     bool backend_none = (caps == NULL || caps->name == NULL ||
                          strcmp(caps->name, "none") == 0);
     bool cam_ok  = (hal_camera_fd() >= 0);
@@ -1115,7 +1115,7 @@ static void face_status_timer_cb(lv_timer_t * t)
     const char * st;
     if (!cam_ok)            st = "摄像头未接入 · 预览不可用";
     else if (backend_none)  st = "人脸后端未启用 · 仅预览画面";
-    else if (!face_service_running()) st = "人脸后端未运行 · 请检查设备";
+    else if (!hal_face_running()) st = "人脸后端未运行 · 请检查设备";
     else if (!live)         st = "等待摄像头出帧…";
     else                    st = face_status_from_result();
 
@@ -1125,18 +1125,18 @@ static void face_status_timer_cb(lv_timer_t * t)
      * 现在只要相机在出帧且后端在跑，就实时显示在同一行里 ——
      * ①便于观察模组到底在不在看脸；②为「转到位」阈值标定提供依据。 */
     if (s_face_status != NULL) {
-        if (live && !backend_none && face_service_running()) {
+        if (live && !backend_none && hal_face_running()) {
             char buf[160];
             int16_t l = 0, t = 0, r = 0, b = 0, yaw = 0, pit = 0, rol = 0;
             char boxs[40] = "";
             char poses[48] = "";
-            if (face_service_face_box(&l, &t, &r, &b) == 0 && (l | t | r | b))
+            if (hal_face_face_box(&l, &t, &r, &b) == 0 && (l | t | r | b))
                 snprintf(boxs, sizeof(boxs), " 框(%d,%d,%d,%d)", l, t, r, b);
-            if (face_service_face_pose(&yaw, &pit, &rol) == 0)
+            if (hal_face_face_pose(&yaw, &pit, &rol) == 0)
                 snprintf(poses, sizeof(poses), " yaw=%d pitch=%d roll=%d",
                          yaw, pit, rol);
             snprintf(buf, sizeof(buf), "%s |状态=%d%s%s", st,
-                     (int)face_service_face_state(), boxs, poses);
+                     (int)hal_face_face_state(), boxs, poses);
             lv_label_set_text(s_face_status, buf);
         } else {
             lv_label_set_text(s_face_status, st);

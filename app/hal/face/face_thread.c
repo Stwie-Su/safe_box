@@ -18,7 +18,7 @@
  *   再 STREAMOFF 唤醒 poll，然后取 io 锁再放开，保证返回时已无在途采集读到 mmap 缓冲，
  *   之后主线程关 fd（hal_camera_deinit）才安全，最后 join 回收线程，避免 DQBUF 卡住。
  *
- * 后端驱动去向（b3 取简）：face_service_tick 仍留在主线程（app_tick_fast）。
+ * 后端驱动去向（b3 取简）：hal_face_tick 仍留在主线程（app_tick_fast）。
  *   理由：后端 tick（fake 计时 / enroll 超时）读写 face_service 内部状态，且与主线程的
  *   inject/enroll/delete 控制路径共享；移入本线程需给 face_service 全面加锁却无功能收益。
  *   本步只把「相机采集 + 格式转换」这一真正的重活从主线程搬到本线程——b3 验收要求
@@ -234,7 +234,7 @@ static void * face_thread_main(void * arg)
         struct pollfd fds[2];
         /* Duty-cycle（FR-27）：前台暂停时把相机 fd 移出 pollset —— STREAMOFF 后
          * 该 fd 会持续 POLLERR 立即返回，不摘除会退化成忙轮询。 */
-        fds[0].fd      = face_service_foreground() ? hal_camera_fd() : -1;
+        fds[0].fd      = hal_face_foreground() ? hal_camera_fd() : -1;
         fds[0].events  = POLLIN;
         fds[0].revents = 0;
         fds[1].fd      = s_uart_fd;         /* FM225 未接时 -1 -> poll 忽略 */

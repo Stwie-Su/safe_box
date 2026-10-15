@@ -66,7 +66,7 @@ static void fake_tick(uint32_t now_ms)
         else if(now_ms >= s_enroll_done_ms) {
             s_enroll_job = false;
             face_enroll_result_t r = { s_next_face_id++, SAFE_OK, 0 };  /* face_dir_mask：fake 不模拟方向进度 */
-            face_service_emit(FACE_EV_ENROLL_DONE, &r);
+            hal_face_emit(FACE_EV_ENROLL_DONE, &r);
         }
     }
 
@@ -85,7 +85,7 @@ static void fake_tick(uint32_t now_ms)
             /* 接口约定（hal_face.h）：timestamp = hal_time()（Unix 秒），不是"进程/开机起算秒"。
              * 消费方 page_face 用 hal_time() 判新鲜度，用 tick 时钟会让结果恒判过期（D12）。 */
             r.timestamp = hal_time();
-            face_service_emit(FACE_EV_DETECT, &r);
+            hal_face_emit(FACE_EV_DETECT, &r);
         }
     }
 }
@@ -106,7 +106,7 @@ static safe_err_t fake_delete_tpl(int32_t face_id)
 {
     if(face_id < 0) return SAFE_ERR_PARAM;
     face_delete_result_t r = { face_id, SAFE_OK };
-    face_service_emit(FACE_EV_DELETE_DONE, &r);
+    hal_face_emit(FACE_EV_DELETE_DONE, &r);
     return SAFE_OK;
 }
 
