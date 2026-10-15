@@ -796,7 +796,7 @@ static void unlock_cb(lv_event_t * e)
  * 为什么 PIN 通道必须有一个不受 face_count 影响的常驻入口——
  * 虚位密码（FR-18）不是一种独立的开锁方式，而是 PIN 输入的一个属性：在正确
  * PIN 的前后任意插入干扰位，只要输入串中存在连续子串等于真实 PIN 即通过
- * （unlock_backend.c: pin_match_virtual()，经 backend_verify_pin_ex 按用户
+ * （auth_verify.c: pin_match_virtual()，经 auth_verify_pin_ex 按用户
  * virtual_pin_enable 策略生效）。它只存在于 PIN 键盘页；若首页唯一的开锁
  * 入口按 face_count 智能路由，则只要有一名用户录入过人脸，PIN 键盘页就永远
  * 不可达——后端实现得再完整，UI 不可达就等于功能不存在。安全上这也站得住：

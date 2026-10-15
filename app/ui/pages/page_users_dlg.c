@@ -15,7 +15,7 @@
 #include "core/support/async_store.h"
 #include "core/support/worker.h"
 #include "core/event_bus.h"
-#include "core/auth/unlock_backend.h"   /* backend_admin_verify_totp：改管理员密码动态码二次确认 */
+#include "core/auth/auth_verify.h"   /* auth_admin_verify_totp：改管理员密码动态码二次确认 */
 #include "hal/hal_face.h"               /* hal_face_enroll/delete_async + caps（UI 现代化 ui3） */
 #include "hal/hal_time.h"               /* R2：时间源统一走 HAL，不直接读系统时钟 */
 #include "ui/pages/page_enroll.h"       /* page_enroll_show_result：录入结果页内展示 */
@@ -1615,7 +1615,7 @@ static void do_del_cb(lv_event_t * e)
 /* ================================================================
  *  修改管理员密码 — 动态码二次确认（FR-3 敏感操作）
  *  —— 自绘 6 位动态码键盘，复用 auth_show 的视觉范式；
- *     校验走 backend_admin_verify_totp（任一启用且开 TOTP 的管理员）。
+ *     校验走 auth_admin_verify_totp（任一启用且开 TOTP 的管理员）。
  * ================================================================ */
 static void pwd_otp_update_disp(void)
 {
@@ -1686,7 +1686,7 @@ static void pwd_otp_ok_cb(lv_event_t * e)
         if (s_otp_msg) lv_label_set_text(s_otp_msg, "动态码为 6 位");
         return;
     }
-    /* 校验下沉 worker（2026-10-08）：backend_admin_verify_totp 内部是
+    /* 校验下沉 worker（2026-10-08）：auth_admin_verify_totp 内部是
      * user_load_all 全表读盘 + user_update 整表写盘（回写防重放计数器），
      * 主线程同步调用会卡住 UI 泵并违反技术路线规约 §3.1「认证路径零同步落盘」。
      * 提交后不阻塞，结果由 pwd_otp_verify_done 回填。 */

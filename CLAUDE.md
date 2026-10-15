@@ -107,7 +107,7 @@ app/
 ├── core/           平台无关，禁 lvgl.h / 平台头（tools/check_layers.sh 校验）
 │   ├── err.h / event_bus / config
 │   ├── store/      users.json / network.json / safe.log（唯一凭据体系）
-│   ├── auth/       auth_fsm / totp / unlock_backend
+│   ├── auth/       auth_fsm / totp / auth_verify
 │   ├── remote/     mqtt_client(codec/inflight/fsm/tls_stream) + rpc（缺依赖时编 *_stub.c）
 │   └── support/    worker、async_store、crypto、sha1
 ├── hal/            硬件抽象：头文件 + 后端实现
@@ -119,7 +119,7 @@ app/
 ports/lv_port/      LVGL 官方 Linux 移植层
 third_party/        aes、sha256、stb
 tests/              CTest（17 项：store 缓存/崩溃/P0、mqtt codec/fsm/inflight、rpc、
-                    fm225_proto/enroll、auth_fsm、cred_reconcile、totp、unlock_backend、
+                    fm225_proto/enroll、auth_fsm、cred_reconcile、totp、auth_verify、
                     event_bus + check_layers、check_main_thread_store）
 tools/              自检 / 实验 / 字体再生成脚本
 configs/            pc / board / board_3d 三套 defconfig

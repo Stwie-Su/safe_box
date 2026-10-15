@@ -10,7 +10,7 @@
  *   - 防重放 同一时间片内一码一用，由调用方持久化 last_otp_counter
  *
  * 设计边界：本模块只做「密码学生成/比对」，不碰用户表、不落盘。
- * 与用户表和失败计数的耦合放在 core/unlock_backend.c。
+ * 与用户表和失败计数的耦合放在 core/auth_verify.c。
  */
 #pragma once
 #include <stdint.h>

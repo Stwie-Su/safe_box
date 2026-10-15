@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>      /* snprintf：审计详情要拼「前后值」 */
-#include "core/auth/unlock_backend.h"
+#include "core/auth/auth_verify.h"
 #include "core/event_bus.h"
 #include "core/store/store.h"
 #include "hal/hal_time.h"        /* hal_time()：失败锁定截止时刻（AUTH_SIDE_FAIL_BUMP） */
@@ -167,11 +167,11 @@ static void va_worker(void * p)
     va_job_t * a = (va_job_t *)p;
     /* 二级确认要求「任一启用管理员」的 PIN，而非写死名为 "admin" 的用户——
      * 管理员改名 / 多管理员时原来会误判 PIN 错误（用户报：删人脸输入正确 PIN 却报错）。
-     * ★ 必须走 backend_verify_admin_pin（精确匹配）：这里曾复用 backend_verify_pin，
+     * ★ 必须走 auth_verify_admin_pin（精确匹配）：这里曾复用 auth_verify_pin，
      *   而后者会跟随虚位开关做「连续子串」匹配 —— 一旦 FR-18 落地，管理员二次确认
      *   就等于接受了虚位，直接违反规约 §5.5「管理员二次确认：不支持虚位」。 */
     char name[32] = {0};
-    unlock_result_t r = backend_verify_admin_pin(a->pin, name, sizeof(name));
+    unlock_result_t r = auth_verify_admin_pin(a->pin, name, sizeof(name));
     if (r != UNLOCK_OK) { a->result = (r == UNLOCK_LOCKED) ? 2 : 1; return; }
     safe_user_t u;
     if (user_find_by_name(name, &u) == 0 && strcmp(u.role, "admin") == 0)
@@ -198,7 +198,7 @@ void astore_verify_admin(const char * pin, astore_int_cb_t cb)
 
 /* ---------------- 管理员动态码二次确认 ----------------
  * 背景：page_users_dlg 的改管理员密码弹窗原先在 UI 主线程直接调
- * backend_admin_verify_totp —— 该函数内部是全表读盘 + 整表写盘，
+ * auth_admin_verify_totp —— 该函数内部是全表读盘 + 整表写盘，
  * 属主线程同步落盘。而门禁**看不见**：它的正则只匹配 store 接口名，
  * 经 backend_* 间接调用就绕过去了。故补本包装并把调用点改异步。 */
 typedef struct {
@@ -210,7 +210,7 @@ typedef struct {
 static void avt_worker(void * p)
 {
     avt_job_t * a = (avt_job_t *)p;
-    const auth_result_t r = backend_admin_verify_totp(a->code);
+    const auth_result_t r = auth_admin_verify_totp(a->code);
     a->result = (r == AUTH_OK) ? 0 : (r == AUTH_REPLAY ? 2 : 1);
 }
 

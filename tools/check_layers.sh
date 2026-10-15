@@ -45,7 +45,7 @@ out=$(grep -rnE '\blv_(obj|label|btn|timer|display)_' app/core --include='*.c')
 [ -n "$out" ] && { report "core 出现 LVGL API 调用" "$out"; } || echo "  [OK] core 无 LVGL API 调用"
 
 # 6. main.c 只做引导（不出现业务调用）
-out=$(grep -nE 'user_|log_append|backend_verify|totp_' app/main.c)
+out=$(grep -nE 'user_|log_append|auth_verify|totp_' app/main.c)
 [ -n "$out" ] && { report "main.c 出现业务逻辑" "$out"; } || echo "  [OK] main.c 只做引导"
 
 # 7. 依赖方向扫描（★ 当前**只告警不失败**，原因见下）

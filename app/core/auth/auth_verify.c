@@ -1,5 +1,5 @@
 /**
- * @file unlock_backend.c
+ * @file auth_verify.c
  * 解锁后端实现：多用户三通道校验的编排中枢（DESIGN.md §2 / 需求 FR-1）。
  *
  *  - PIN：匹配任一启用且未锁定的用户（PBKDF2-SHA256 哈希比对）；
@@ -8,7 +8,7 @@
  *
  * 防暴力：失败按用户独立计数（ADR-3），达阈值锁定 lock_seconds 秒；成功清零。
  */
-#include "core/auth/unlock_backend.h"
+#include "core/auth/auth_verify.h"
 #include "core/store/store.h"
 #include "core/auth/totp.h"
 #include "hal/hal_time.h"
@@ -104,7 +104,7 @@ static bool pin_hit(const char * pin, const safe_user_t * u, bool allow_virtual,
     return pin_match_virtual(pin, u, pol->pin_min_len, pol->pin_max_len);
 }
 
-unlock_result_t backend_verify_pin_ex(const char *pin, char *out_user, size_t user_cap,
+unlock_result_t auth_verify_pin_ex(const char *pin, char *out_user, size_t user_cap,
                                      bool allow_virtual)
 {
     if (!pin || !*pin) return UNLOCK_FAIL;
@@ -185,19 +185,19 @@ unlock_result_t backend_verify_pin_ex(const char *pin, char *out_user, size_t us
     return UNLOCK_FAIL;
 }
 
-unlock_result_t backend_verify_pin(const char *pin, char *out_user, size_t user_cap)
+unlock_result_t auth_verify_pin(const char *pin, char *out_user, size_t user_cap)
 {
     /* 开锁通道：虚位是否生效由管理员开关决定（规约 §5.2「该功能可由管理员开关控制」）。 */
-    return backend_verify_pin_ex(pin, out_user, user_cap, user_policy()->virtual_pin_enable);
+    return auth_verify_pin_ex(pin, out_user, user_cap, user_policy()->virtual_pin_enable);
 }
 
-unlock_result_t backend_verify_admin_pin(const char *pin, char *out_user, size_t user_cap)
+unlock_result_t auth_verify_admin_pin(const char *pin, char *out_user, size_t user_cap)
 {
     /* 敏感操作二次确认：恒为精确匹配，不受虚位开关影响（规约 §5.5）。 */
-    return backend_verify_pin_ex(pin, out_user, user_cap, false);
+    return auth_verify_pin_ex(pin, out_user, user_cap, false);
 }
 
-auth_result_t backend_verify_totp(const char *user, const char *code)
+auth_result_t auth_verify_totp(const char *user, const char *code)
 {
     if (!user || !code) return AUTH_FAIL;
     safe_user_t u;
@@ -231,7 +231,7 @@ auth_result_t backend_verify_totp(const char *user, const char *code)
     return AUTH_FAIL;
 }
 
-auth_result_t backend_verify_totp_any(const char *code, char *out_user, size_t user_cap)
+auth_result_t auth_verify_totp_any(const char *code, char *out_user, size_t user_cap)
 {
     if (!code || !*code) return AUTH_FAIL;
     safe_user_t *us = NULL;
@@ -268,7 +268,7 @@ auth_result_t backend_verify_totp_any(const char *code, char *out_user, size_t u
     return res;
 }
 
-auth_result_t backend_admin_verify_totp(const char *code)
+auth_result_t auth_admin_verify_totp(const char *code)
 {
     if (!code) return AUTH_FAIL;
     safe_user_t *us = NULL;
@@ -299,7 +299,7 @@ auth_result_t backend_admin_verify_totp(const char *code)
     return res;
 }
 
-bool backend_is_locked(void)
+bool auth_is_locked(void)
 {
     const long now = (long)hal_time();
     safe_user_t *us = NULL;
@@ -314,7 +314,7 @@ bool backend_is_locked(void)
     return locked;
 }
 
-int backend_lock_remaining(void)
+int auth_lock_remaining(void)
 {
     const long now = (long)hal_time();
     long max_left = 0;

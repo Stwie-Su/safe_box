@@ -4,10 +4,10 @@ ROOT="${1:-.}"
 cd "$ROOT" || exit 1
 
 # ★ 2026-10-07：auth_fsm.c 的整文件豁免已摘除（认证路径零同步落盘落地），
-#   并把 unlock_backend.c 纳入扫描 —— 此前它是个盲区：backend_verify_totp 内部
+#   并把 auth_verify.c 纳入扫描 —— 此前它是个盲区：auth_verify_totp 内部
 #   就有 user_find_by_name + user_update（读盘 + 整表写盘），而它曾被主线程
 #   经 auth_fsm_submit_otp 同步调用，门禁完全看不见。
-SCOPE=(app/ui app/core/remote app/core/auth/auth_fsm.c app/core/auth/unlock_backend.c)
+SCOPE=(app/ui app/core/remote app/core/auth/auth_fsm.c app/core/auth/auth_verify.c)
 
 # ★ 不变式已升级（QA-20 收尾）：users.json / safe.log 的**读与写**全部由 worker
 #   线程独占持有，主线程不得调用任何 store 读写接口（要数据走 worker_post 三段式，
@@ -75,17 +75,21 @@ legacy_case() {
         #   文件内已无任何直接 store 调用 —— 整文件豁免失去存在理由。
         #   代价要写清：FSM 状态迁移仍在主线程，落盘结果晚一帧才可见；
         #   安全判定（失败计数 / 锁定 / 防重放）全部依赖 worker 单线程 FIFO 的顺序保证。
-        # unlock_backend.c 的 backend_* 是「存储层判定封装」：它们内部的 store 调用
+        # auth_verify.c 的 auth_verify_* 是「存储层判定封装」：它们内部的 store 调用
         # 是设计的一部分（PIN / TOTP 校验必须读真实文件、回写防重放计数器）。
         # ★ 调用方纪律（本条豁免成立的前提，改动时务必复核）：这些函数**只允许在
         #   worker 线程调用**——PIN 走 astore/pin_worker、TOTP 走 otp_worker、
-        #   管理员二次确认走 astore_verify_admin。新增任何**非 backend_ 前缀**
+        #   管理员二次确认走 astore_verify_admin。新增任何**非 auth_verify_ 前缀**
         #   的函数若在文件内直连 store，门禁会拦下。
-        app/core/auth/unlock_backend.c::backend_*)      return 0 ;;
-        # backend 层的内部辅助：只被 backend_verify_pin_ex 调用，与调用方同线程（worker）。
-        # 单独登记而不是靠 backend_ 前缀通配——前缀豁免只给**对外接口**，
+        app/core/auth/auth_verify.c::auth_verify_*)      return 0 ;;
+        # 同为对外判定接口（原 backend_ 前缀族；v1.7 随文件更名后改为逐个登记）。
+        app/core/auth/auth_verify.c::auth_admin_verify_totp) return 0 ;;
+        app/core/auth/auth_verify.c::auth_is_locked)         return 0 ;;
+        app/core/auth/auth_verify.c::auth_lock_remaining)    return 0 ;;
+        # backend 层的内部辅助：只被 auth_verify_pin_ex 调用，与调用方同线程（worker）。
+        # 单独登记而不是靠 auth_verify_ 前缀通配——前缀豁免只给**对外接口**，
         # 内部辅助逐个登记，新增一个就会被门禁拦下要求显式说明。
-        app/core/auth/unlock_backend.c::temp_revoke)    return 0 ;;
+        app/core/auth/auth_verify.c::temp_revoke)    return 0 ;;
         app/ui/pages/page_users_dlg.c::user_is_admin)       return 0 ;;  # 全表读判「是否有管理员」
         app/ui/pages/page_users_dlg.c::face_btn_cb)         return 0 ;;  # 人脸按钮态需当拍拿到 face_id
         app/ui/pages/page_users_dlg.c::face_start_cb)       return 0 ;;
@@ -140,12 +144,12 @@ echo "== 门禁通过：无新增的主线程直连 store 读写接口（遗留�
 # 主体正则只匹配 store 接口名，而 backend_* 判定接口**内部**就会
 # user_load_all（全表读盘）+ user_update（整表写盘，回写防重放计数器）。
 # 经它们间接落盘，主体正则完全看不见 —— 这正是 page_users_dlg 曾长期在
-# UI 主线程调 backend_admin_verify_totp（改管理员密码的动态码二次确认）
+# UI 主线程调 auth_admin_verify_totp（改管理员密码的动态码二次确认）
 # 却无人发现的原因（2026-10-08 修复，改走 astore_admin_verify_totp）。
 # 故单列一条：UI 层不得直调这些会读写盘的判定接口，一律走 astore_* 异步包装。
-BACKEND_IO='(backend_verify_pin|backend_verify_pin_ex|backend_verify_admin_pin'
-BACKEND_IO+='|backend_verify_totp|backend_verify_totp_any|backend_admin_verify_totp'
-BACKEND_IO+='|backend_is_locked|backend_lock_remaining)[[:space:]]*\('
+BACKEND_IO='(auth_verify_pin|auth_verify_pin_ex|auth_verify_admin_pin'
+BACKEND_IO+='|auth_verify_totp|auth_verify_totp_any|auth_admin_verify_totp'
+BACKEND_IO+='|auth_is_locked|auth_lock_remaining)[[:space:]]*\('
 
 echo "== UI 层间接落盘门禁（经 backend_* 判定接口绕过主体正则）=="
 b_violations=0
@@ -160,7 +164,7 @@ for hit in "${B_HITS[@]}"; do
     b_violations=$((b_violations + 1))
 done
 if [ "$b_violations" -gt 0 ]; then
-    echo "== 门禁失败：UI 层 $b_violations 处直连会读写盘的 backend_* 判定接口 =="
+    echo "== 门禁失败：UI 层 $b_violations 处直连会读写盘的 auth_verify_* 判定接口 =="
     echo "   （这些接口内部会 user_load_all / user_update，须改走 astore_* 异步包装）"
     exit 1
 fi

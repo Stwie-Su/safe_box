@@ -1,5 +1,5 @@
 /**
- * @file test_unlock_backend.c
+ * @file test_auth_verify.c
  * 解锁后端用例（需求 v1.9）：
  *   - FR-18 虚位密码：前后加扰通过 / 中间插入被拒 / 超过 12 位被拒 / 开关关闭时不生效；
  *   - H1 回归：策略 pin_max_len 被手改成 >12 时，读盘钳制 + 超长输入安全拒绝（防栈越界）；
@@ -16,7 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "core/auth/unlock_backend.h"
+#include "core/auth/auth_verify.h"
 #include "core/auth/totp.h"
 #include "core/store/store.h"
 #include "hal/hal_time.h"
@@ -52,7 +52,7 @@ static void add_user(const char * name, const char * role, const char * pin,
     CHECK(user_add(&u) == 0);
 }
 
-/* 失败计数清零：backend_verify_pin 失败会给每个未锁定用户 +1，
+/* 失败计数清零：auth_verify_pin 失败会给每个未锁定用户 +1，
  * 打满 max_failed（默认 5）会进锁定，污染后续用例。用完即清。 */
 static void clear_fail_counters(void)
 {
@@ -110,35 +110,35 @@ int main(void)
 
     /* ---------- 1. PIN 基本路径 ---------- */
     who[0] = '\0';
-    CHECK(backend_verify_pin("2345", who, sizeof(who)) == UNLOCK_OK);
+    CHECK(auth_verify_pin("2345", who, sizeof(who)) == UNLOCK_OK);
     CHECK(strcmp(who, "alice") == 0);
 
     who[0] = '\0';
-    CHECK(backend_verify_pin("0000", who, sizeof(who)) == UNLOCK_FAIL);
+    CHECK(auth_verify_pin("0000", who, sizeof(who)) == UNLOCK_FAIL);
     CHECK(who[0] == '\0');
     clear_fail_counters();
 
     /* ---------- 2. FR-18 虚位密码：前后加扰应当通过 ---------- */
     who[0] = '\0';
-    CHECK(backend_verify_pin("992345", who, sizeof(who)) == UNLOCK_OK);   /* 前缀干扰 */
+    CHECK(auth_verify_pin("992345", who, sizeof(who)) == UNLOCK_OK);   /* 前缀干扰 */
     CHECK(strcmp(who, "alice") == 0);
 
     who[0] = '\0';
-    CHECK(backend_verify_pin("234500", who, sizeof(who)) == UNLOCK_OK);   /* 后缀干扰 */
+    CHECK(auth_verify_pin("234500", who, sizeof(who)) == UNLOCK_OK);   /* 后缀干扰 */
     CHECK(strcmp(who, "alice") == 0);
 
     who[0] = '\0';
-    CHECK(backend_verify_pin("11234599", who, sizeof(who)) == UNLOCK_OK); /* 前后都有 */
+    CHECK(auth_verify_pin("11234599", who, sizeof(who)) == UNLOCK_OK); /* 前后都有 */
     CHECK(strcmp(who, "alice") == 0);
 
     who[0] = '\0';
-    CHECK(backend_verify_pin("234500000", who, sizeof(who)) == UNLOCK_OK);/* 9 位：超 pin_max_len */
+    CHECK(auth_verify_pin("234500000", who, sizeof(who)) == UNLOCK_OK);/* 9 位：超 pin_max_len */
     CHECK(strcmp(who, "alice") == 0);
 
     /* ---------- 3. FR-18：中间插入干扰位 → PIN 不再连续出现 → 拒绝 ---------- */
-    CHECK(backend_verify_pin("23945", NULL, 0) == UNLOCK_FAIL);
+    CHECK(auth_verify_pin("23945", NULL, 0) == UNLOCK_FAIL);
     clear_fail_counters();
-    CHECK(backend_verify_pin("23459", NULL, 0) == UNLOCK_OK);   /* 对照：加在尾部算后缀干扰 */
+    CHECK(auth_verify_pin("23459", NULL, 0) == UNLOCK_OK);   /* 对照：加在尾部算后缀干扰 */
     clear_fail_counters();
 
     /* ---------- 4. FR-18：超过 12 位不受理（v1.9：上限由 20 收紧为 12） ---------- */
@@ -148,19 +148,19 @@ int main(void)
         /* 8 个前导 0 + "2345" = 12 位（上限内）→ 通过 */
         strcpy(over + 8, "2345");
         CHECK(strlen(over) == 12);
-        CHECK(backend_verify_pin(over, NULL, 0) == UNLOCK_OK);
+        CHECK(auth_verify_pin(over, NULL, 0) == UNLOCK_OK);
 
         /* 9 个前导 0 + "2345" = 13 位（超限）→ 拒绝 */
         memset(over, '0', sizeof(over));
         strcpy(over + 9, "2345");
         over[13] = '\0';
         CHECK(strlen(over) == 13);
-        CHECK(backend_verify_pin(over, NULL, 0) == UNLOCK_FAIL);
+        CHECK(auth_verify_pin(over, NULL, 0) == UNLOCK_FAIL);
         clear_fail_counters();
     }
 
     /* ---------- 5. 不含正确 PIN 的长串 → 拒绝 ---------- */
-    CHECK(backend_verify_pin("1111111111", NULL, 0) == UNLOCK_FAIL);
+    CHECK(auth_verify_pin("1111111111", NULL, 0) == UNLOCK_FAIL);
     clear_fail_counters();
 
     /* ---------- 6. 开关关闭 → 虚位失效，精确 PIN 仍可用 ---------- */
@@ -175,37 +175,37 @@ int main(void)
         user_list_free(us);
         CHECK(user_policy()->virtual_pin_enable == false);
     }
-    CHECK(backend_verify_pin("992345", NULL, 0) == UNLOCK_FAIL);
+    CHECK(auth_verify_pin("992345", NULL, 0) == UNLOCK_FAIL);
     clear_fail_counters();
-    CHECK(backend_verify_pin("234500000", NULL, 0) == UNLOCK_FAIL);
+    CHECK(auth_verify_pin("234500000", NULL, 0) == UNLOCK_FAIL);
     clear_fail_counters();
-    CHECK(backend_verify_pin("2345", NULL, 0) == UNLOCK_OK);      /* 精确匹配不受影响 */
+    CHECK(auth_verify_pin("2345", NULL, 0) == UNLOCK_OK);      /* 精确匹配不受影响 */
 
     /* ---------- 7. §5.5：管理员二次确认恒为精确匹配，不受虚位开关影响 ---------- */
     /* 此时开关为 false：精确通过、虚位串被拒 */
     who[0] = '\0';
-    CHECK(backend_verify_admin_pin("123456", who, sizeof(who)) == UNLOCK_OK);
+    CHECK(auth_verify_admin_pin("123456", who, sizeof(who)) == UNLOCK_OK);
     CHECK(strcmp(who, "admin") == 0);
-    CHECK(backend_verify_admin_pin("12345600", NULL, 0) == UNLOCK_FAIL);
+    CHECK(auth_verify_admin_pin("12345600", NULL, 0) == UNLOCK_FAIL);
     clear_fail_counters();
 
     /* 打开虚位后再验一次：管理员路径**依然**不接受虚位 */
     user_policy_set_virtual_pin(true);
     CHECK(user_policy()->virtual_pin_enable == true);
     who[0] = '\0';
-    CHECK(backend_verify_admin_pin("123456", who, sizeof(who)) == UNLOCK_OK);
+    CHECK(auth_verify_admin_pin("123456", who, sizeof(who)) == UNLOCK_OK);
     CHECK(strcmp(who, "admin") == 0);
-    CHECK(backend_verify_admin_pin("12345600", NULL, 0) == UNLOCK_FAIL);
+    CHECK(auth_verify_admin_pin("12345600", NULL, 0) == UNLOCK_FAIL);
     clear_fail_counters();
     /* 同一串走开锁通道应当通过 —— 证明上面被拒确实来自「通道差异」而非实现没生效 */
-    CHECK(backend_verify_pin("12345600", NULL, 0) == UNLOCK_OK);
+    CHECK(auth_verify_pin("12345600", NULL, 0) == UNLOCK_OK);
 
     /* ---------- 8. FR-9：临时用户过期 → 拒绝并自动删除 ---------- */
     {
         safe_user_t u;
         CHECK(user_find_by_name("texp", &u) == 0);            /* 删除前存在 */
     }
-    CHECK(backend_verify_pin("4567", NULL, 0) == UNLOCK_FAIL);
+    CHECK(auth_verify_pin("4567", NULL, 0) == UNLOCK_FAIL);
     {
         safe_user_t u;
         CHECK(user_find_by_name("texp", &u) != 0);            /* 已被自动删除 */
@@ -218,7 +218,7 @@ int main(void)
         CHECK(user_find_by_name("tused", &u) == 0);
         CHECK(u.used_count >= u.use_limit);
     }
-    CHECK(backend_verify_pin("5678", NULL, 0) == UNLOCK_FAIL);
+    CHECK(auth_verify_pin("5678", NULL, 0) == UNLOCK_FAIL);
     {
         safe_user_t u;
         CHECK(user_find_by_name("tused", &u) != 0);           /* 已被自动删除 */
@@ -227,7 +227,7 @@ int main(void)
 
     /* ---------- 10. FR-9：有效期内的临时用户正常开锁 ---------- */
     who[0] = '\0';
-    CHECK(backend_verify_pin("3456", who, sizeof(who)) == UNLOCK_OK);
+    CHECK(auth_verify_pin("3456", who, sizeof(who)) == UNLOCK_OK);
     CHECK(strcmp(who, "tvalid") == 0);
 
     /* ---------- 11. FR-3：用户动态码 ---------- */
@@ -238,20 +238,20 @@ int main(void)
         uint64_t now = hal_time();
         CHECK(totp_at_time(u.totp_secret, now, 6, code, sizeof(code)) == 0);
 
-        CHECK(backend_verify_totp("otpusr", code) == AUTH_OK);
-        CHECK(backend_verify_totp("otpusr", code) == AUTH_REPLAY);   /* 一码一用 */
-        CHECK(backend_verify_totp("otpusr", "000000") == AUTH_FAIL);
+        CHECK(auth_verify_totp("otpusr", code) == AUTH_OK);
+        CHECK(auth_verify_totp("otpusr", code) == AUTH_REPLAY);   /* 一码一用 */
+        CHECK(auth_verify_totp("otpusr", "000000") == AUTH_FAIL);
         clear_fail_counters();
 
         /* 下一个时间片的码：仍应通过（±1 窗口 + 严格大于 last_counter） */
         char code2[8] = {0};
         CHECK(totp_at_time(u.totp_secret, now + TOTP_PERIOD, 6, code2, sizeof(code2)) == 0);
         char name[32] = {0};
-        CHECK(backend_verify_totp_any(code2, name, sizeof(name)) == AUTH_OK);
+        CHECK(auth_verify_totp_any(code2, name, sizeof(name)) == AUTH_OK);
         CHECK(strcmp(name, "otpusr") == 0);
 
         /* 未启用动态码的通道：alice 没绑 TOTP */
-        CHECK(backend_verify_totp("alice", code2) == AUTH_CHANNEL_OFF);
+        CHECK(auth_verify_totp("alice", code2) == AUTH_CHANNEL_OFF);
     }
 
     /* ---------- 12. FR-3：管理员动态码（仅认管理员） ---------- */
@@ -262,22 +262,22 @@ int main(void)
         uint64_t now = hal_time();
         CHECK(totp_at_time(u.totp_secret, now + 2 * TOTP_PERIOD, 6, ucode, sizeof(ucode)) == 0);
         /* otpusr 是普通用户：它的码不能通过管理员二次确认 */
-        CHECK(backend_admin_verify_totp(ucode) == AUTH_FAIL);
+        CHECK(auth_admin_verify_totp(ucode) == AUTH_FAIL);
 
         safe_user_t ad;
         CHECK(user_find_by_name("admin", &ad) == 0);
         CHECK(strcmp(ad.role, "admin") == 0);
         char acode[8] = {0};
         CHECK(totp_at_time(ad.totp_secret, now, 6, acode, sizeof(acode)) == 0);
-        CHECK(backend_admin_verify_totp(acode) == AUTH_OK);
-        CHECK(backend_admin_verify_totp(acode) == AUTH_FAIL);        /* 重放被拒 */
-        CHECK(backend_admin_verify_totp("000000") == AUTH_FAIL);
+        CHECK(auth_admin_verify_totp(acode) == AUTH_OK);
+        CHECK(auth_admin_verify_totp(acode) == AUTH_FAIL);        /* 重放被拒 */
+        CHECK(auth_admin_verify_totp("000000") == AUTH_FAIL);
         clear_fail_counters();
     }
 
     /* ---------- 13. 锁定查询接口（回归） ---------- */
-    CHECK(backend_is_locked() == false);
-    CHECK(backend_lock_remaining() == 0);
+    CHECK(auth_is_locked() == false);
+    CHECK(auth_lock_remaining() == 0);
 
     /* ---------- 14. H1 回归：策略 pin_max_len 越界不得导致虚位滑窗栈越界 ----------
      * QA 用 ASan 实锤：pin_match_virtual 的栈缓冲 cand[SAFE_VIRTUAL_PIN_MAX_INPUT+1] 若滑窗
@@ -305,7 +305,7 @@ int main(void)
         memset(big, '0', 40);
         big[40] = '\0';
         CHECK(strlen(big) == 40);
-        CHECK(backend_verify_pin(big, NULL, 0) == UNLOCK_FAIL);        /* (b) 不越界、安全拒绝 */
+        CHECK(auth_verify_pin(big, NULL, 0) == UNLOCK_FAIL);        /* (b) 不越界、安全拒绝 */
         clear_fail_counters();
     }
 

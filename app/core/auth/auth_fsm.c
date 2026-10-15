@@ -31,7 +31,7 @@
 #include "core/store/store.h"                 /* 仅 user_policy()（策略已加锁快照，不读盘） */
 #include "core/store/store_cache.h"           /* 只读用户快照：主线程查用户的唯一合法通道 */
 #include "core/auth/totp.h"
-#include "core/auth/unlock_backend.h"
+#include "core/auth/auth_verify.h"
 #include "core/support/worker.h"             /* worker_post：PIN / OTP 后台校验 */
 #include "core/support/async_store.h"         /* astore_auth_side / astore_append_log */
 #include "hal/hal_time.h"
@@ -412,7 +412,7 @@ static void pin_worker(void * p)
 {
     pin_job_t * a = (pin_job_t *)p;
     a->user[0] = '\0';
-    a->result = (int)backend_verify_pin(a->pin, a->user, sizeof(a->user));
+    a->result = (int)auth_verify_pin(a->pin, a->user, sizeof(a->user));
 }
 
 /* 主线程（worker_poll 派发）：仅当「世代号 == 当前在途作业」且状态仍为 VERIFYING 时才受理。
@@ -439,7 +439,7 @@ void auth_fsm_set_verify_timeout(uint32_t seconds) { s_verify_timeout = seconds;
 
 /* PIN 通道入口（v1.9 异步化）：把「多用户 × 候选子串」的 PBKDF2 判定下沉到 worker 线程，
  * 主线程只做「提交 → 进入校验中 → 收结果」，消除长虚位输入导致的界面冻结。
- * 判定口径不变：走 backend_verify_pin（连续子串匹配，受 virtual_pin_enable 控制）。
+ * 判定口径不变：走 auth_verify_pin（连续子串匹配，受 virtual_pin_enable 控制）。
  * 校验期间拒绝新的 PIN 提交（单飞），避免并发覆盖状态。 */
 void auth_fsm_submit_pin(const char *pin)
 {
@@ -461,7 +461,7 @@ void auth_fsm_submit_pin(const char *pin)
 /* ---------------- 动态码（OTP）后台校验（2026-10-07） ----------------
  * 与 PIN 通道同构：判定下沉 worker，回调带世代号。
  *
- * 为什么 OTP 也要下沉：backend_verify_totp 内部会 user_find_by_name + user_update
+ * 为什么 OTP 也要下沉：auth_verify_totp 内部会 user_find_by_name + user_update
  * （回写 last_otp_counter 防重放计数器、累加失败计数）——那是同步读盘 + 整表写盘，
  * 直接违反规约 §3.1。更要紧的是「读 last_otp_counter → 判重放 → 写回」本身就是
  * 读改写：拆到两个线程做，同一个码就有机会被用两次。
@@ -478,7 +478,7 @@ void auth_fsm_submit_pin(const char *pin)
  *   pending_user 改在回调里清空——提交后还要拿它给 UI 显示、给 note_fail 记名。 */
 typedef struct {
     uint32_t gen;
-    char     pending[32];   /* 空串 = 身份未定（走 backend_verify_totp_any） */
+    char     pending[32];   /* 空串 = 身份未定（走 auth_verify_totp_any） */
     char     code[16];
     auth_result_t result;
     char     user[32];      /* 命中的用户名（AUTH_OK 时有效） */
@@ -490,14 +490,14 @@ static void otp_worker(void * p)
     otp_job_t * a = (otp_job_t *)p;
     a->user[0] = '\0';
     if (a->pending[0]) {
-        a->result = backend_verify_totp(a->pending, a->code);
+        a->result = auth_verify_totp(a->pending, a->code);
         if (a->result == AUTH_OK) {
             strncpy(a->user, a->pending, sizeof(a->user) - 1);
             a->user[sizeof(a->user) - 1] = '\0';
         }
     } else {
         /* 身份未定：在「任一启用 + TOTP 开启 + 未锁定 + 授权有效」的用户上校验 */
-        a->result = backend_verify_totp_any(a->code, a->user, sizeof(a->user));
+        a->result = auth_verify_totp_any(a->code, a->user, sizeof(a->user));
     }
 }
 

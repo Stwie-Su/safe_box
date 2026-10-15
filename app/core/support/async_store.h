@@ -8,7 +8,7 @@
  */
 #pragma once
 #include "core/store/store.h"
-#include "core/auth/unlock_backend.h"
+#include "core/auth/auth_verify.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,7 +55,7 @@ void astore_verify_admin(const char * pin, astore_int_cb_t cb);
 
 /* 管理员**动态码**二次确认（FR-3 敏感操作，如改管理员密码）。
  * 与 astore_verify_admin 只是一张凭据的区别（PIN vs TOTP），同样必须在 worker 执行：
- * backend_admin_verify_totp 内部要 user_load_all（全表读盘）+ user_update
+ * auth_admin_verify_totp 内部要 user_load_all（全表读盘）+ user_update
  * （回写 last_otp_counter 防重放计数器、清零失败计数）——整表读写不能在主线程。
  * 回调 result：0=通过 1=错误 2=该码已使用（防重放） */
 void astore_admin_verify_totp(const char * code, astore_int_cb_t cb);
@@ -123,7 +123,7 @@ void astore_set_policy(int max_failed, int lock_seconds, astore_int_cb_t cb);
  *   形同虚设，max_failed 永远打不满。读改写必须由**同一个线程**一口气做完。
  *
  * ★ 顺序保证从哪来：worker 是单线程 FIFO 队列。前一个「失败计数」作业写盘完成后，
- *   后一个 PIN 校验作业（backend_verify_pin 走 user_load_all 读**真实文件**）才执行，
+ *   后一个 PIN 校验作业（auth_verify_pin 走 user_load_all 读**真实文件**）才执行，
  *   因此「已锁定」的判定不会被异步化撕开窗口。这是本设计成立的前提。
  *
  * 四类副作用共用一个作业类型 + op 分派（而不是四个独立作业）：它们的输入都是

@@ -12,7 +12,7 @@ set(SAFE_CORE_SRC
     auth/auth_fsm.c
     auth/cred_reconcile.c
     auth/totp.c
-    auth/unlock_backend.c
+    auth/auth_verify.c
     support/worker.c
     support/async_store.c
     support/crypto.c

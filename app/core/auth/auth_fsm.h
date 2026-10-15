@@ -70,7 +70,7 @@ void auth_fsm_submit_face_ex(int32_t face_id, face_reason_t reason, const char *
 /* PIN 通道入口（主页键盘）。
  * v1.9 起**异步**：提交后立即进入 FSM_VERIFYING，PBKDF2 判定在 worker 线程执行，
  * 完成回调经 worker_poll() 回到主线程后才迁移到 UNLOCKED / DENY / LOCKOUT。
- * 校验期间再次提交会被忽略（单飞）；判定口径不变（走 backend_verify_pin
+ * 校验期间再次提交会被忽略（单飞）；判定口径不变（走 auth_verify_pin
  * ——「连续子串」虚位匹配，受 virtual_pin_enable 开关控制）。 */
 void auth_fsm_submit_pin(const char * pin);
 
@@ -80,7 +80,7 @@ void auth_fsm_submit_pin(const char * pin);
 void auth_fsm_set_verify_timeout(uint32_t seconds);
 
 /* 动态码页提交。**2026-10-07 起异步**：与 submit_pin 同构，TOTP 校验下沉 worker
- * （backend_verify_totp 内部要读盘 + 回写防重放计数器，属规约 §3.1 禁止的主线程
+ * （auth_verify_totp 内部要读盘 + 回写防重放计数器，属规约 §3.1 禁止的主线程
  * 同步落盘）。提交后**仍停在 WAIT_OTP**（不新增状态），校验完成经 worker_poll()
  * 回到主线程后才迁移到 UNLOCKED / DENY / LOCKOUT。
  * ⚠ 调用方不得在调用后立刻读 auth_fsm_state() 判定结果 —— 那时作业还在途；

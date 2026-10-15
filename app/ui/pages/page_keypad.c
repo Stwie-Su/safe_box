@@ -1,7 +1,7 @@
 /**
  * @file page_keypad.c
  * 开锁 PIN 键盘（DESIGN.md §7.1 开锁入口）：3×4 数字矩阵 + 掩码输入 + 确认。
- * 校验走 core/unlock_backend（多用户 PIN + 防暴力锁定），结果写审计日志。
+ * 校验走 core/auth_verify（多用户 PIN + 防暴力锁定），结果写审计日志。
  */
 #include "page_keypad.h"
 #include "ui/ui.h"

@@ -16,7 +16,7 @@
 #include "core/auth/totp.h"
 #include "hal/hal_time.h"
 #include "hal/hal_face.h"
-#include "core/auth/unlock_backend.h"
+#include "core/auth/auth_verify.h"
 #include "core/auth/auth_fsm.h"
 #include "app_version.h"            /* SAFE_VERSION_STRING */
 #include <cJSON.h>
@@ -154,7 +154,7 @@ static int parse_face_reason(const char *s)
 }
 
 /* 校验敏感指令是否「已提供 otp」（字符串非空）。
- * 实际校验（backend_admin_verify_totp，会写盘）下沉到 worker 段执行，
+ * 实际校验（auth_admin_verify_totp，会写盘）下沉到 worker 段执行，
  * 不在主线程做文件 IO——否则与 worker 的落盘并发，破坏
  * 「文件读写由 worker 单线程持有」的不变式（QA-20）。
  * 返回 true 表示 otp 已提供（可进入 worker 校验）；false 表示缺失。 */
@@ -173,7 +173,7 @@ static bool rpc_otp_present(cJSON *root, char otp_out[32])
 /* ================= 异步作业：把 store 写操作挪到 worker 线程 =================
  * 不变式（store.c）：users.json / safe.log 的读写由 worker 单线程持有。
  * 原 dispatch 在主线程直接调 user_add / user_del / user_update /
- * user_policy_set_face / log_append / backend_admin_verify_totp（写盘），
+ * user_policy_set_face / log_append / auth_admin_verify_totp（写盘），
  * 与 worker 的落盘并发 -> 「读-改-写」跨两次 IO 的丢失更新（新建用户消失、
  * 失败计数/锁定被回滚，防暴力锁定失效，QA-20）。
  *
@@ -249,7 +249,7 @@ static void rpc_job_fn(void *arg)
 {
     rpc_job_t *j = (rpc_job_t *)arg;
     if (j->has_otp) {
-        if (backend_admin_verify_totp(j->otp) != AUTH_OK) {
+        if (auth_admin_verify_totp(j->otp) != AUTH_OK) {
             j->code = RPC_CODE_BAD_OTP;
             snprintf(j->msg, sizeof(j->msg), "动态码错误或已使用");
             return;  /* 校验失败：不再执行后续 store 副作用 */
@@ -487,7 +487,7 @@ case JOB_INJECT_FACE_LOG:
     }
     /* ★ 明文敏感数据：free 之前再清一次（见 rpc_job_t 的注释）。
      * worker 段已清过 pin，但「哈希失败提前 break」等分支也要覆盖；
-     * otp 一直在 worker 段被 backend_admin_verify_totp 消费，同样在此统一清。 */
+     * otp 一直在 worker 段被 auth_admin_verify_totp 消费，同样在此统一清。 */
     memset(j->pin, 0, sizeof(j->pin));
     memset(j->otp, 0, sizeof(j->otp));
     free(j);

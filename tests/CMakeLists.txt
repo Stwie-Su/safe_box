@@ -32,7 +32,7 @@ safe_add_test(test_fm225_enroll)
 safe_add_test(test_store)
 # 解锁后端：PIN 精确/虚位（FR-18）、管理员二次确认边界（§5.5）、
 # 临时授权过期与次数耗尽（FR-9）、动态码与防重放（FR-3）。
-safe_add_test(test_unlock_backend)
+safe_add_test(test_auth_verify)
 # 崩溃一致性自测（R1）：循环写盘期间 kill -9，校验 users.json 可解析且非旧即新。
 # 默认 20 轮，长跑用 tools/crash_consistency_test.sh <更大轮次>。
 safe_add_test(test_store_crash)

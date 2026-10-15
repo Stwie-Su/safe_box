@@ -265,7 +265,7 @@ int main(void)
         CHECK(auth_fsm_state() == FSM_DENY);        /* alice 被用户级锁定 → 拒绝退出 */
     }
 
-    /* ---- 1.3 WAIT_OTP（身份未定）+ 动态码 → 开锁（backend_verify_totp_any 路径） ----
+    /* ---- 1.3 WAIT_OTP（身份未定）+ 动态码 → 开锁（auth_verify_totp_any 路径） ----
      * 用 dave：alice 在上一段已被用户级锁定，totp_any 会正确跳过她。 */
     fsm_reset();
     auth_fsm_submit_face(-1, FACE_RES_NO_MATCH);    /* 陌生人脸，同样走计数 */
