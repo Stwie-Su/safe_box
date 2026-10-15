@@ -1,5 +1,5 @@
 /**
- * @file time_sys.c
+ * @file backend_sys.c
  * 系统时间后端：直接读 C 库时间。
  *
  * 无 RTC 时的默认实现。校时走 settimeofday，进程需要有相应权限。

@@ -18,7 +18,7 @@
  *   分辨率：800x480 / 864x480 / 854x480 / 480x320 / 320x240
  *   帧间隔：全部离散单值 0.067s = 15.000 fps
  *   另：同一设备的 video1 是 Metadata Capture 节点（无 VIDEO_CAPTURE），
- *       会被本工具的设备判定正确排除——这正是 camera_v4l2.c 必须多节点扫描的原因。
+ *       会被本工具的设备判定正确排除——这正是 backend_v4l2.c 必须多节点扫描的原因。
  *
  * 前提：Linux + <linux/videodev2.h>；只依赖 libc，无第三方库。
  * 编译：cc -O2 -Wall -o cam_probe tools/cam_probe.c
@@ -100,7 +100,7 @@ static uint32_t parse_fourcc(const char * s)
  * 功能：判定节点是否为「可采集 + 支持流式」的摄像头。
  * 调用者：open_dev（扫描每个节点时）、main。
  * 数据流：入参 QUERYCAP 结果 → 取能力位 → 返回 true/false。
- * ★ 与 camera_v4l2.c 的 is_capture_dev 保持**完全一致**的判定规则：
+ * ★ 与 backend_v4l2.c 的 is_capture_dev 保持**完全一致**的判定规则：
  *   驱动置了 V4L2_CAP_DEVICE_CAPS 时必须看 device_caps，否则看 capabilities。
  *   规则不一致会导致「探测说能用、实际后端扫不到」的割裂。
  * ------------------------------------------------------------------ */

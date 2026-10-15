@@ -3,8 +3,8 @@
  * 时间源抽象（FR-6 / NFR-5）。
  *
  * 业务层一律走本接口，不直接 <time.h> 取时：
- *   - 当前实现 = 系统时间（time_sys.c）；
- *   - DS3231 到货后新增 time_rtc.c 后端并切换，业务代码零改动。
+ *   - 当前实现 = 系统时间（backend_sys.c）；
+ *   - DS3231 到货后新增 backend_rtc.c 后端并切换，业务代码零改动。
  */
 #pragma once
 

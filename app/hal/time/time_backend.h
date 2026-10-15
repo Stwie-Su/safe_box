@@ -23,6 +23,6 @@ typedef struct {
  * 未显式调用的路径（如单测）在首次取时时懒选择，默认 sys。 */
 void time_service_init(void);
 
-/* RTC 后端（实现在 time_rtc.c）：设备节点与可用性探测。 */
+/* RTC 后端（实现在 backend_rtc.c）：设备节点与可用性探测。 */
 const char * time_rtc_dev(void);
 bool         time_rtc_available(void);

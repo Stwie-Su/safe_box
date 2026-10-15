@@ -21,9 +21,9 @@
 #include "hal/hal_time.h"
 
 extern const hal_watchdog_backend_t hal_watchdog_backend_linux;
-extern const hal_watchdog_backend_t hal_watchdog_backend_null;
+extern const hal_watchdog_backend_t hal_watchdog_backend_none;
 
-static const hal_watchdog_backend_t * s_backend = &hal_watchdog_backend_null;
+static const hal_watchdog_backend_t * s_backend = &hal_watchdog_backend_none;
 static bool s_inited;
 static bool s_started;
 static uint32_t s_last_kick_ms;
@@ -38,7 +38,7 @@ static const hal_watchdog_backend_t * find_backend(const char * name)
 {
     const hal_watchdog_backend_t * table[] = {
         &hal_watchdog_backend_linux,
-        &hal_watchdog_backend_null,
+        &hal_watchdog_backend_none,
     };
     for(size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
         if(table[i] != NULL && (name == NULL || strcmp(table[i]->name, name) == 0)) return table[i];
@@ -58,12 +58,12 @@ safe_err_t hal_watchdog_init(uint32_t timeout_ms)
 
     const char * want = getenv("SAFE_WATCHDOG_BACKEND");
     const hal_watchdog_backend_t * b = find_backend((want != NULL && *want != '\0') ? want : "linux");
-    if(b == NULL) b = &hal_watchdog_backend_null;
+    if(b == NULL) b = &hal_watchdog_backend_none;
 
     safe_err_t e = b->init(timeout_ms);
-    if(e != SAFE_OK && b != &hal_watchdog_backend_null) {
+    if(e != SAFE_OK && b != &hal_watchdog_backend_none) {
         printf("[WATCHDOG] 后端 %s 初始化失败(%d)，降级 null（不喂真狗）\n", b->name, e);
-        b = &hal_watchdog_backend_null;
+        b = &hal_watchdog_backend_none;
         e = b->init(timeout_ms);
     }
 
@@ -110,7 +110,7 @@ void hal_watchdog_deinit(void)
 {
     if(!s_inited) return;
     s_backend->deinit();
-    s_backend  = &hal_watchdog_backend_null;
+    s_backend  = &hal_watchdog_backend_none;
     s_started  = false;
     s_inited   = false;
 }

@@ -1,5 +1,5 @@
 /**
- * @file time_rtc.c
+ * @file backend_rtc.c
  * 外部 RTC 时间后端（DS3231 到货后启用，规约 §5.14）。
  *
  * 走 Linux RTC 子系统的字符设备 /dev/rtc<N>（DS3231 挂 I2C 后由内核 ds1307

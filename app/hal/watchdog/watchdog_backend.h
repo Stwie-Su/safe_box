@@ -9,8 +9,8 @@
  * 把 hal_watchdog_xxx() 转发成 s_backend->xxx()。
  *
  * 【实例在哪】
- *   - hal_watchdog_backend_linux 定义在 watchdog_linux.c 文件末尾
- *   - hal_watchdog_backend_null  定义在 watchdog_null.c  文件末尾
+ *   - hal_watchdog_backend_linux 定义在 backend_linux.c 文件末尾
+ *   - hal_watchdog_backend_none  定义在 backend_none.c  文件末尾
  *   二者都是 const 全局对象，编译期定好，运行期只读。
  *
  * ★ 成员顺序必须与本结构体定义严格一致：C 的位置初始化若错位不会报错，但会调错函数。

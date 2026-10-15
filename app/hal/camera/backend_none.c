@@ -1,5 +1,5 @@
 /**
- * @file camera_null.c
+ * @file backend_none.c
  * 相机空实现：FM225 的 USB 视频流到货前占位。
  *
  * 所有采集类操作返回 SAFE_ERR_UNSUP，UI 侧据此把预览区显示为占位图案。
@@ -74,7 +74,7 @@ static int null_fd(void)
 
 /* null 后端实例：注意 release 槽位是 NULL ——函数表中唯一允许为空的字段，
  * 因此 camera_service.c 的 hal_camera_release_frame() 里必须判空后再调用。 */
-const hal_camera_backend_t hal_camera_backend_null = {
+const hal_camera_backend_t hal_camera_backend_none = {
     "null",
     null_ok,
     null_ok,

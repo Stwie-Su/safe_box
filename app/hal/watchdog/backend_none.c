@@ -1,5 +1,5 @@
 /**
- * @file watchdog_null.c
+ * @file backend_none.c
  * 看门狗空对象：PC / 无 /dev/watchdog 的设备上的占位实现。
  *
  * 「什么都不做」也是一种实现：上层照常 init/start/kick/stop，只是不产生复位能力。
@@ -51,7 +51,7 @@ static uint32_t null_kick_count(void)
     return s_kicks;
 }
 
-const hal_watchdog_backend_t hal_watchdog_backend_null = {
+const hal_watchdog_backend_t hal_watchdog_backend_none = {
     "null",
     null_init,
     null_start,

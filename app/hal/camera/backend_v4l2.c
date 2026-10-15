@@ -1,5 +1,5 @@
 /**
- * @file camera_v4l2.c
+ * @file backend_v4l2.c
  * V4L2 摄像头后端（Sprint3 步骤 2，FR-16 视频预览）。
  *
  * 设计要点（对应规约 §4.2 性能预算 / §5.13 相机接口约定）：

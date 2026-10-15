@@ -15,7 +15,7 @@
  *    ★ 本文件：选后端 + 转发 + 降级（本文件不含任何 V4L2 代码）
  *           │  s_backend->xxx()
  *           ▼
- *    camera_v4l2.c / camera_null.c（真正干活的实现）
+ *    backend_v4l2.c / backend_none.c（真正干活的实现）
  *
  * 【为什么要这一层】把「用哪个实现」的决策集中到一个文件：
  *   - 业务层永远只写 hal_camera_frame()，换硬件、加后端都不用改业务代码；
@@ -29,10 +29,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-extern const hal_camera_backend_t hal_camera_backend_null;
+extern const hal_camera_backend_t hal_camera_backend_none;
 extern const hal_camera_backend_t hal_camera_backend_v4l2;
 
-static const hal_camera_backend_t * s_backend = &hal_camera_backend_null;
+static const hal_camera_backend_t * s_backend = &hal_camera_backend_none;
 static bool s_started;
 static bool s_inited;
 
@@ -47,7 +47,7 @@ static const hal_camera_backend_t * find_backend(const char * name)
 {
     const hal_camera_backend_t * table[] = {
         &hal_camera_backend_v4l2,
-        &hal_camera_backend_null,
+        &hal_camera_backend_none,
     };
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
         if (table[i] != NULL && (name == NULL || strcmp(name, table[i]->name) == 0))
@@ -70,12 +70,12 @@ safe_err_t hal_camera_init(void)
 
     const char * want = getenv("SAFE_CAMERA_BACKEND");
     const hal_camera_backend_t * b = find_backend((want && *want) ? want : "v4l2");
-    if (b == NULL) b = &hal_camera_backend_null;   /* 未知名字 → 降级 */
+    if (b == NULL) b = &hal_camera_backend_none;   /* 未知名字 → 降级 */
 
     safe_err_t e = b->init();
-    if (e != SAFE_OK && b != &hal_camera_backend_null) {
+    if (e != SAFE_OK && b != &hal_camera_backend_none) {
         printf("[CAMERA] 后端 %s 初始化失败(%d)，降级 null 预览占位\n", b->name, e);
-        b = &hal_camera_backend_null;
+        b = &hal_camera_backend_none;
         e = b->init();
     }
 
@@ -97,7 +97,7 @@ safe_err_t hal_camera_deinit(void)
     if (!s_inited) return SAFE_OK;
     if (s_started && s_backend->stop) s_backend->stop();
     s_backend->deinit();
-    s_backend = &hal_camera_backend_null;
+    s_backend = &hal_camera_backend_none;
     s_started = false;
     s_inited  = false;
     return SAFE_OK;
@@ -124,7 +124,7 @@ safe_err_t hal_camera_start(uint16_t w, uint16_t h)
         const char * want = getenv("SAFE_CAMERA_BACKEND");
         bool want_null = (want != NULL && strcmp(want, "null") == 0);
         static int s_race_retries = 0;
-        if (s_backend == &hal_camera_backend_null && !want_null && s_race_retries < 3) {
+        if (s_backend == &hal_camera_backend_none && !want_null && s_race_retries < 3) {
             s_race_retries++;
             printf("[CAMERA] 开机竞态重试 %d：重新扫描 v4l2 相机\n", s_race_retries);
             s_inited = false;

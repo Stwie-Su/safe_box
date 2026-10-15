@@ -13,7 +13,7 @@
  *        │
  *   ┌────┴──────────────────┐
  *   ▼                       ▼
- * watchdog_linux.c      watchdog_null.c
+ * backend_linux.c      backend_none.c
  * （/dev/watchdog 真狗）   （PC/无狗占位）
  *
  * 【为什么喂狗放在主循环】

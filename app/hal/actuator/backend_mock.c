@@ -1,5 +1,5 @@
 /**
- * @file actuator_mock.c
+ * @file backend_mock.c
  * 执行器模拟后端（PC 阶段 / LED 验证阶段）。
  *
  * 不碰硬件，只打印动作日志；关断动作放在独立线程里完成，

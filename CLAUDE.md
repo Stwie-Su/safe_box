@@ -161,8 +161,8 @@ data/               PC 运行时数据（不入库）
 | 硬件到货 | 改动位置 | 业务代码 |
 |---|---|---|
 | FM225 人脸模组 ✅已接入 | `app/hal/face/backend_fm225.c` + `fm225_proto.c`（UART 帧解析）+ `-DSAFE_FACE_BACKEND=fm225`；剩余缺口 N1~N5 以代码核对为准 | 不动 |
-| 摄像头预览 ✅已接入 | `app/hal/camera/camera_v4l2.c`（UVC 自动扫描 + MJPG，旋转用 `SAFE_CAMERA_ROT`） | 不动 |
-| DS3231 RTC | `app/hal/time/time_rtc.c` 壳已在（`SAFE_RTC_DEV`），到货后实测对接 | 不动 |
+| 摄像头预览 ✅已接入 | `app/hal/camera/backend_v4l2.c`（UVC 自动扫描 + MJPG，旋转用 `SAFE_CAMERA_ROT`） | 不动 |
+| DS3231 RTC | `app/hal/time/backend_rtc.c` 壳已在（`SAFE_RTC_DEV`），到货后实测对接 | 不动 |
 | 电磁锁 / 继电器 | 新增 `app/hal/actuator/actuator_gpio.c`，`actuator_service.c` 换默认后端 | 不动 |
 
 ## 11. 已知坑

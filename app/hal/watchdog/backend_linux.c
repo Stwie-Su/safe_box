@@ -1,5 +1,5 @@
 /**
- * @file watchdog_linux.c
+ * @file backend_linux.c
  * 看门狗 Linux 后端：/dev/watchdog 真狗（超时自动复位设备）。
  *
  * Linux watchdog API 要点（换任何板子都适用）：
