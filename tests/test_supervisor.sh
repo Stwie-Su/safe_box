@@ -63,6 +63,7 @@ case "${1:-ok}" in
     crash) exit 7 ;;
     segv)  kill -SEGV $$ ;;
     hang)  trap 'echo term > "$2"; exit 0' TERM; while :; do sleep 1; done ;;
+    slow)  trap 'sleep 1.5; echo done > "$2"; exit 0' TERM; while :; do sleep 1; done ;;
     args)  echo "$@" > "$2"; exit 0 ;;
     *)     exit 0 ;;
 esac
@@ -196,6 +197,59 @@ check "应给出提示而不是误杀" "grep -q '未检测到心跳文件' '$TMP
 check "supervisor 应仍在运行" "kill -0 $SUP_PID 2>/dev/null"
 kill -TERM "$SUP_PID" 2>/dev/null
 wait "$SUP_PID" 2>/dev/null
+
+echo "== 用例 12：宽限期从「收到停机信号」起算，不是从应用启动起算 =="
+# 背景：曾用「子进程已运行时长」判断宽限，长跑应用（本例跑 6s > grace 3s）
+#       一收到停机信号就被立刻 SIGKILL，等于没有宽限，日志/存储来不及落盘（D46）。
+"$TMP/sup" --app "$TMP/app.sh" --grace 3 --watchdog none \
+    --pidfile "$TMP/s12.pid" --log "$TMP/s12.log" -- slow "$TMP/s12.done" >/dev/null 2>&1 &
+SUP_PID=$!
+sleep 6                     # 让应用运行时长明显超过 grace(3s)
+kill -TERM "$SUP_PID" 2>/dev/null
+wait "$SUP_PID"
+rc=$?
+check "退出码应为 0（实际 $rc）" "[ $rc -eq 0 ]"
+check "应给足宽限让应用收尾（应出现 s12.done）" "[ -f '$TMP/s12.done' ]"
+check "不应出现宽限超时 SIGKILL" "! grep -q 'SIGKILL' '$TMP/s12.log'"
+check "应判定为正常退出" "grep -q '正常退出' '$TMP/s12.log'"
+
+echo "== 用例 13：daemon 模式重复启动返回 3 =="
+# 背景：抢锁曾在 daemonize 之后，父进程先 _exit(0)，重复启动被静默吞掉（D47）。
+"$TMP/sup" --app "$TMP/app.sh" --daemon --watchdog none \
+    --pidfile "$TMP/s13.pid" --status "$TMP/s13.status" \
+    --log "$TMP/s13.log" -- hang >/dev/null 2>&1
+sleep 0.8
+"$TMP/sup" --app "$TMP/app.sh" --daemon --watchdog none \
+    --pidfile "$TMP/s13.pid" --log "$TMP/s13b.log" -- hang >/dev/null 2>&1
+rc=$?
+check "第二个 daemon 实例应返回 3（实际 $rc）" "[ $rc -eq 3 ]"
+D13="$(cat "$TMP/s13.pid" 2>/dev/null)"
+case "$D13" in ''|*[!0-9]*) ;; *) kill -TERM "$D13" 2>/dev/null ;; esac
+sleep 0.6
+
+echo "== 用例 14：见过心跳之后卡死，不能被启动宽限拖住 =="
+# 背景：启动宽限曾无条件生效，应用先写过心跳再卡死也要等满 30s 才判死（D48）。
+cat > "$TMP/hb_then_stall.py" <<'PY'
+#!/usr/bin/env python3
+import sys, time
+# 只写一次（新值），随后卡住不再更新 —— 模拟「主循环跑起来后死锁」
+with open(sys.argv[1], "w") as f:
+    f.write(str(int(time.monotonic() * 1000)))
+time.sleep(3600)
+PY
+chmod +x "$TMP/hb_then_stall.py"
+T0=$(date +%s)
+"$TMP/sup" --app "$TMP/hb_then_stall.py" --max-restarts 0 --window 5 --restart-delay 20 \
+    --grace 1 --watchdog none \
+    --heartbeat "$TMP/hb_seen" --heartbeat-timeout 1 --heartbeat-startup 30 \
+    --status "$TMP/s14.status" --pidfile "$TMP/s14.pid" \
+    --log "$TMP/s14.log" -- "$TMP/hb_seen" >/dev/null 2>&1
+rc=$?
+T1=$(date +%s)
+elapsed=$((T1 - T0))
+check "应在 5s 内判死，而不是等满 30s 启动宽限（实际 ${elapsed}s）" "[ $elapsed -lt 5 ]"
+check "日志应出现心跳超时" "grep -q '心跳超时' '$TMP/s14.log'"
+check "退出码应为 2（安全态，实际 $rc）" "[ $rc -eq 2 ]"
 
 if [ "$fails" -ne 0 ]; then
     echo "[FAIL] test_supervisor（$fails 项未过）"

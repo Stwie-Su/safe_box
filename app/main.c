@@ -50,7 +50,7 @@ int main(int argc, char ** argv)
 
     perf_probe_init_from_env();
 
-    /* 看门狗：开设备并设定喂狗超时（默认 15s，SAFE_WATCHDOG_TIMEOUT_MS 可覆盖）。
+    /* 看门狗：开设备并设定喂狗超时（默认 60s，SAFE_WATCHDOG_TIMEOUT_MS 可覆盖）。
      * 排在 app_main() 之前——这样后续初始化若卡死也能被硬件复位；
      * 无 /dev/watchdog 的环境（PC）自动降级 null 后端，接口照常调用但不产生复位能力。 */
     {
@@ -65,7 +65,7 @@ int main(int argc, char ** argv)
     if(app_main() != 0) {
         /* 启动中止（典型原因：配置校验 FATAL + 严格模式）。
          * 必须走 stop（magic close）再退出：否则关闭 fd 后看门狗继续计时，
-         * 15s 后整机复位 —— 表现为「应用起不来还反复重启整机」。 */
+         * 超时（默认 60s）后整机复位 —— 表现为「应用起不来还反复重启整机」。 */
         fprintf(stderr, "[main] 启动中止，停止看门狗后退出\n");
         hal_watchdog_stop();
         hal_watchdog_deinit();

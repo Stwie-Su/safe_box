@@ -62,12 +62,15 @@ export SAFE_TIME_BACKEND=rtc
 export SAFE_RTC_DEV=/dev/rtc0
 insmod /lib/modules/4.9.88/extra/ch341.ko 2>/dev/null
 
-# ---- 看门狗 ----
-# 板上没有 /dev/watchdog（无外置狗芯片 / 内核没开 SoC WDOG）时走软狗：
-#   应用主循环把单调时钟值写进心跳文件 → supervisor 读数值比较，超时判定卡死并重启。
+# ---- 看门狗（两层，板上 2026-10-19 实测确认）----
+# 第一层 硬件看门狗（真狗）：i.MX6ULL 片内 WDOG，/dev/watchdog 存在，超时 60s。
+#   应用主循环喂狗；进程被冻住/卡死 → 60s 后整机复位。代价是重启整机，
+#   所以「快速卡死」交给第二层先手处理，真狗只兜底整机级异常。
+# 第二层 软狗：应用主循环把单调时钟值写进心跳文件 → supervisor 读数值比较，
+#   超过 --heartbeat-timeout（5s）判定卡死 → SIGTERM → 重启应用（保留现场、只重启进程）。
 #   （用单调时钟而不是文件时间：这台设备有 RTC 校时和远程 sync_time，拨时钟会绕过判定。）
 # 不显式设 SAFE_WATCHDOG_BACKEND，让 HAL 自动降级：linux → file → null。
-# 以后接了真狗，什么都不用改（linux 能打开就优先用真狗）。
+#   真狗打不开的板子会自动退到软狗，不用改这里。
 export SAFE_WATCHDOG_FILE="${SAFE_WATCHDOG_FILE:-/var/run/safe_heartbeat}"
 
 # ---- 远程通道目标：先试上次成功地址，不通则扫描本网段 ----

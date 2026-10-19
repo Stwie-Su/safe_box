@@ -15,7 +15,15 @@ while true; do
         echo "$(date) rollback done" >> /var/log/ota.log
     fi
     rm -f "$M"
-    killall lvglsim 2>/dev/null
-    rm -f /var/run/lvgl.pid
-    /etc/init.d/S05lvgl start
+    # 重启入口必须跟着「谁在管进程」走。
+    # ★ 有 supervisor 时不能 killall：那会被判成一次崩溃、占用重启配额，
+    #   而且 supervisor 会立刻把「旧二进制」再拉起来，刚回滚的版本反而没生效。
+    #   交给 init 脚本 restart：先转发 TERM 让旧实例优雅退出，再重新拉起新文件。
+    if [ -x /etc/init.d/S05safe ]; then
+        /etc/init.d/S05safe restart
+    else
+        killall lvglsim 2>/dev/null
+        rm -f /var/run/lvgl.pid
+        /etc/init.d/S05lvgl start
+    fi
 done

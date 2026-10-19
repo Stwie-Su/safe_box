@@ -5,7 +5,8 @@
 #  安装：
 #    cp S05safe /etc/init.d/S05safe && chmod +x /etc/init.d/S05safe
 #    cp safe_state.sh /etc/safe/safe_state.sh && chmod +x /etc/safe/safe_state.sh
-#    cp safe_boot.sh run_with_supervisor.sh safe_supervisor /usr/share/lvgl/
+#    cp deploy/safe_boot.sh /usr/share/lvgl/safe_boot.sh   # 仓库里叫
+#    cp build_board/safe_supervisor /usr/share/lvgl/        #   tools/supervisor/run_with_supervisor.sh
 #
 #  启动链路：
 #    S05safe start → safe_boot.sh（一次性环境准备）

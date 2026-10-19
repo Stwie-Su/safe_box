@@ -11,7 +11,7 @@
  *      避免「崩溃 → 立刻拉起 → 再崩溃」把 CPU 与日志打满；
  *   5) 安全态（fail-safe）：先执行安全动作钩子（默认 /etc/safe/safe_state.sh，
  *      真锁接入后指向「拉低 GPIO、保持锁闭」），再**接管硬件看门狗**持续喂狗。
- *      ★ 为什么必须接管：应用崩溃后没人喂狗，15s 后整机复位 → init 又拉起
+ *      ★ 为什么必须接管：应用崩溃后没人喂狗，超时（默认 60s）后整机复位 → init 又拉起
  *        supervisor → 又崩溃，形成「整机反复重启」。接管后设备保持运行且锁闭，
  *        日志与状态文件可查，等人来修 —— 这才是安全设备的失效方向。
  *   6) 优雅停机：supervisor 收到 SIGTERM/SIGINT → 转发 SIGTERM 给应用，
@@ -84,6 +84,8 @@
 
 static volatile sig_atomic_t g_stop = 0;
 static volatile pid_t        g_child = -1;
+/* 是否已经读到过有效心跳（每个子进程重新计时）：一旦见过，启动宽限立即失效。 */
+static int                   s_hb_seen;
 static FILE *                g_log = NULL;
 static const char *          g_log_path = NULL;
 static long                  g_log_max = DEFAULT_LOG_MAX;
@@ -149,10 +151,15 @@ static int hb_check(long long child_started_ms, long long * age_ms)
     long long now = monotonic_ms();
     long long age = now - beat;
     if(age_ms) *age_ms = age;
-    if(age <= (long long)g_hb_timeout_s * 1000LL) return 0;
+    if(age <= (long long)g_hb_timeout_s * 1000LL) {
+        s_hb_seen = 1;      /* 主循环已经跑起来过，启动宽限从此不再适用 */
+        return 0;
+    }
 
-    /* 过期了，但还在启动宽限内（应用初始化期间不更新心跳）→ 再等等 */
-    if(now - child_started_ms <= (long long)g_hb_startup_s * 1000LL) return 0;
+    /* 过期了。只有「从未见过有效心跳」才享启动宽限（应用初始化期间本来就不写心跳）。
+     * ★ 见过心跳之后还让宽限生效，等于把「启动后 N 秒内卡死」全部漏掉：
+     *   板上实测冻住主循环，本该 5s 报警，实际等到 30s 启动宽限结束才报。 */
+    if(!s_hb_seen && now - child_started_ms <= (long long)g_hb_startup_s * 1000LL) return 0;
     return 1;
 }
 
@@ -340,7 +347,7 @@ static void enter_safe_state(const char * safe_cmd, const char * wd_dev, const c
     log_line("SAFE-STATE: %s（停止重启，设备保持安全态）", why);
     status_write("safe", "safe-state");
 
-    /* 先接管狗再执行钩子：钩子若卡住，至少不会在 15s 后被整机复位。 */
+    /* 先接管狗再执行钩子：钩子若卡住，至少不会在超时（默认 60s）后被整机复位。 */
     /* 安全态的狗要「松」一点：这里的目标是保持设备活着、锁闭、日志可查，
      * 不是尽快复位。超时给 30s，避免安全动作钩子本身慢一点就被复位打断。 */
     int wd = watchdog_takeover(wd_dev, 30);
@@ -410,6 +417,17 @@ static int single_instance(const char * path)
     if(ftruncate(fd, 0) != 0) { /* 截断失败不阻断：下面写入会覆盖 */ }
     if(write(fd, buf, (size_t)n) != n) { /* 写失败不阻断：锁本身已生效 */ }
     return fd;
+}
+
+/* 把当前进程 pid 写进锁文件（覆盖写，不改变文件里已持有的 flock）。 */
+static void pidfile_write_pid(int fd)
+{
+    if(fd < 0) return;
+
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
+    if(ftruncate(fd, 0) != 0) { /* 截断失败不阻断：下面 pwrite 会覆盖开头 */ }
+    if(pwrite(fd, buf, (size_t)n, 0) != n) { /* 写失败不阻断：锁本身已生效 */ }
 }
 
 static void usage(const char * self)
@@ -499,6 +517,21 @@ int main(int argc, char ** argv)
     if(g_hb_timeout_s <= 0) g_hb_timeout_s = DEFAULT_HB_TIMEOUT_SEC;
     if(g_hb_startup_s < 0)  g_hb_startup_s = 0;
 
+    /* ---- 单实例：必须抢在 daemonize 之前 ----
+     * daemonize 的父进程会立刻 _exit(0)，调用方（init 脚本 / 手工执行）拿到的是
+     * 「父进程成功」的 0；若把抢锁放在它后面，重复启动就被静默吞掉，
+     * 脚本会以为「又起了一份」，实际第二份早已退出。板上实测踩过（D47）。
+     * flock 挂在打开文件描述上，fork 后由孙进程继承，父进程退出不影响锁的持有。 */
+    g_lock_fd = single_instance(pidfile);
+    if(g_lock_fd == -2) {
+        fprintf(stderr, "[ERROR] 已有 supervisor 在运行（锁文件 %s）\n", pidfile);
+        return 3;
+    }
+    if(g_lock_fd < 0) {
+        fprintf(stderr, "[WARN] 无法创建锁文件 %s: %s（继续运行，但无单实例保护）\n",
+                pidfile, strerror(errno));
+    }
+
     /* ---- 后台化（必须在打开日志/写 PID 之前，PID 才是最终进程） ---- */
     if(want_daemon) {
         if(log_path == NULL) {
@@ -508,17 +541,8 @@ int main(int argc, char ** argv)
             fprintf(stderr, "[ERROR] 转后台失败: %s\n", strerror(errno));
             return 1;
         }
-    }
-
-    /* ---- 单实例（重复启动不抢应用与看门狗） ---- */
-    g_lock_fd = single_instance(pidfile);
-    if(g_lock_fd == -2) {
-        fprintf(stderr, "[ERROR] 已有 supervisor 在运行（锁文件 %s）\n", pidfile);
-        return 3;
-    }
-    if(g_lock_fd < 0) {
-        fprintf(stderr, "[WARN] 无法创建锁文件 %s: %s（继续运行，但无单实例保护）\n",
-                pidfile, strerror(errno));
+        /* 转后台后 PID 变了，锁文件里要写真正的守护进程 pid（pidof / kill 都靠它）。 */
+        pidfile_write_pid(g_lock_fd);
     }
 
     /* ---- 日志：先打开再装信号，保证「启动」这条一定落盘 ---- */
@@ -593,12 +617,17 @@ int main(int argc, char ** argv)
         }
 
         g_child = pid;
+        s_hb_seen = 0;      /* 新进程重新进入启动宽限窗口 */
         log_line("启动应用 pid=%d（第 %d 次）", (int)pid, g_nrestart);
         status_write("running", "running");
 
         int st = 0;
-        int waited_ms = 0;
         pid_t r = 0;
+        /* 停机宽限的计时起点：只在第一次看到 g_stop 时打戳（0 = 尚未收到停机信号）。
+         * ★ 不能用「子进程已运行多久」当判据：长跑应用的运行时长早就超过 grace，
+         *   信号一到就会立刻 SIGKILL，等于没有宽限，日志/存储来不及落盘。 */
+        long long stop_start_ms = 0;
+        int stop_killed = 0;
 
         /* 软狗状态（每个子进程一份）：
          *   child_started_ms —— 启动宽限起点
@@ -619,10 +648,16 @@ int main(int argc, char ** argv)
                 rc = 1;
                 break;
             }
-            /* 停机中：宽限 grace 秒走优雅退出，超时强杀（防止应用忽略 SIGTERM 把 supervisor 挂住） */
-            if(g_stop && waited_ms >= grace * 1000) {
-                log_line("优雅退出宽限 %ds 超时 → SIGKILL pid=%d", grace, (int)pid);
-                kill(pid, SIGKILL);
+            /* 停机中：宽限 grace 秒走优雅退出，超时强杀（防止应用忽略 SIGTERM 把 supervisor 挂住）。
+             * 宽限从「收到停机信号那一刻」起算，见上面 stop_start_ms 的说明（D46）。 */
+            if(g_stop) {
+                if(stop_start_ms == 0) stop_start_ms = monotonic_ms();
+                if(!stop_killed &&
+                   monotonic_ms() - stop_start_ms >= (long long)grace * 1000LL) {
+                    log_line("优雅退出宽限 %ds 超时 → SIGKILL pid=%d", grace, (int)pid);
+                    kill(pid, SIGKILL);
+                    stop_killed = 1;
+                }
             }
 
             /* 软狗：应用没有真狗时，用「心跳文件是否还在更新」判断主循环是否卡死。 */
@@ -654,7 +689,6 @@ int main(int argc, char ** argv)
             }
 
             sleep_ms(POLL_MS);
-            waited_ms += POLL_MS;
         }
         g_child = -1;
         if(r != pid) break;   /* waitpid 出错，退出循环 */
