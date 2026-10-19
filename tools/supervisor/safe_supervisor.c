@@ -674,9 +674,12 @@ int main(int argc, char ** argv)
                     hb_hit = 1;
                     hb_hit_ms = nowm;
                 }
-                else if(hs == -1 && nowm - last_warn_ms >= 10000) {
-                    /* 没有可判定的心跳：应用走真狗后端 / 还在初始化 / 文件不可读。
-                     * 只提示不判死（判死会在真狗场景下反复误杀），且限频避免刷屏。 */
+                else if(hs == -1 && nowm - last_warn_ms >= 10000 &&
+                        nowm - child_started_ms > (long long)g_hb_startup_s * 1000LL) {
+                    /* 没有可判定的心跳：应用走真狗后端 / 文件不可读。
+                     * 只提示不判死（判死会在真狗场景下反复误杀），且限频避免刷屏。
+                     * ★ 启动宽限内不报：那只是应用还没写出第一个心跳，属正常启动，
+                     *   每次开机都刷一条会让人误以为软狗没配好。 */
                     last_warn_ms = nowm;
                     log_line("未检测到心跳文件（应用可能使用真狗后端，或仍在初始化宽限 %ds 内）",
                              g_hb_startup_s);
