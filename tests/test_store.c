@@ -184,6 +184,30 @@ int main(void)
         CHECK(dirty.face_enable == false);  /* 归一化：无绑定 ⟹ 通道停用 */
     }
 
+    /* ---- 策略上限钳制：手工改 users.json 不能突破 setter 的范围 ----
+     * 没有上限时 max_failed=999999 会让暴力破解防护形同虚设，
+     * lock_seconds=99999999 会把设备锁死数年。 */
+    {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/users.json", store_dir());
+        FILE * fp = fopen(path, "w");
+        CHECK(fp != NULL);
+        fprintf(fp,
+                "{\"version\":1,"
+                "\"policy\":{\"pin_min_len\":4,\"pin_max_len\":8,\"max_failed\":999999,"
+                "\"lock_seconds\":99999999},"
+                "\"users\":[{\"id\":11,\"name\":\"clampuser\",\"role\":\"user\","
+                "\"pin_hash\":\"ee\",\"pin_salt\":\"ff\",\"auth_method\":\"pin\","
+                "\"enabled\":true,\"created_at\":\"2026-01-01T00:00:00\","
+                "\"failed_attempts\":0,\"lock_until\":0}]}");
+        fclose(fp);
+
+        safe_user_t u;
+        CHECK(user_find_by_name("clampuser", &u) == 0);   /* 触发一次读盘 */
+        CHECK(user_policy()->max_failed == 10);
+        CHECK(user_policy()->lock_seconds == 3600);
+    }
+
     /* ---- 日志 ---- */
     CHECK(log_append("UNLOCK", "carol2", 1, "test") == 0);
     log_entry_t * logs = NULL;

@@ -1,0 +1,122 @@
+#!/bin/sh
+# ============================================================
+#  /etc/init.d/S05safe — 智能保险柜开机自启（BusyBox init / Buildroot）
+#
+#  安装：
+#    cp S05safe /etc/init.d/S05safe && chmod +x /etc/init.d/S05safe
+#    cp safe_state.sh /etc/safe/safe_state.sh && chmod +x /etc/safe/safe_state.sh
+#    cp safe_boot.sh run_with_supervisor.sh safe_supervisor /usr/share/lvgl/
+#
+#  启动链路：
+#    S05safe start → safe_boot.sh（一次性环境准备）
+#                  → safe_supervisor --daemon
+#                      → lvglsim（崩溃重启 / 限速 / 安全态 / 看门狗接管）
+#
+#  ★ 与 inittab respawn 二选一：
+#      supervisor 负责重启；若 inittab 再 respawn supervisor，
+#      安全态（rc=2）会被 init 立刻拉起 → 安全态被绕过。
+#
+#  ★ stop 必须发 SIGTERM 而不是 SIGKILL：
+#      supervisor 收到 TERM 会转发给应用，让应用走自己的优雅退出链
+#      （停流 → 关 fd → join → 看门狗 magic close）。直接 KILL 会让
+#      看门狗继续计时，10 多秒后整机被复位 —— 表现为「关机变成重启」。
+# ============================================================
+set -u
+
+DAEMON=/usr/share/lvgl/safe_supervisor
+BOOT=/usr/share/lvgl/safe_boot.sh
+PIDFILE=/var/run/safe_supervisor.pid
+STATUS=/var/run/safe_supervisor.status
+
+start()
+{
+    printf "Starting safe_box: "
+
+    if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE" 2>/dev/null)
+        case "$PID" in
+            ''|*[!0-9]*) ;;
+            *)
+                if kill -0 "$PID" 2>/dev/null; then
+                    echo "already running (pid $PID)"
+                    return 0
+                fi
+                ;;
+        esac
+    fi
+
+    if [ ! -x "$BOOT" ]; then
+        echo "FAILED（缺少 $BOOT）"
+        return 1
+    fi
+
+    mkdir -p /var/run /var/log /var/lib/safe
+
+    # safe_boot.sh 内部 exec supervisor --daemon，自己随即退出；
+    # 这里不需要 &（daemon 化由 supervisor 完成，避免多一层 shell 进程）。
+    "$BOOT"
+    echo "OK"
+}
+
+stop()
+{
+    printf "Stopping safe_box: "
+
+    if [ ! -f "$PIDFILE" ]; then
+        echo "not running"
+        return 0
+    fi
+
+    PID=$(cat "$PIDFILE" 2>/dev/null)
+    case "$PID" in
+        ''|*[!0-9]*) echo "stale pidfile"; rm -f "$PIDFILE"; return 0;;
+    esac
+
+    kill -TERM "$PID" 2>/dev/null
+
+    # 宽限 10s：supervisor 自身 grace 默认 5s，留一倍余量。
+    i=0
+    while [ "$i" -lt 10 ]; do
+        kill -0 "$PID" 2>/dev/null || break
+        sleep 1
+        i=$((i + 1))
+    done
+
+    if kill -0 "$PID" 2>/dev/null; then
+        echo "timeout, SIGKILL $PID"
+        kill -KILL "$PID" 2>/dev/null
+    fi
+
+    rm -f "$PIDFILE"
+    echo "OK"
+}
+
+status()
+{
+    if [ -f "$STATUS" ]; then
+        echo "== supervisor 状态 =="
+        cat "$STATUS"
+    else
+        echo "supervisor 未运行（无 $STATUS）"
+    fi
+
+    if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE" 2>/dev/null)
+        if kill -0 "$PID" 2>/dev/null; then
+            echo "process: alive (pid $PID)"
+        else
+            echo "process: dead (stale pidfile)"
+        fi
+    fi
+}
+
+case "$1" in
+    start)          start ;;
+    stop)           stop ;;
+    restart|reload) stop; sleep 1; start ;;
+    status)         status ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac

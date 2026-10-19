@@ -117,11 +117,17 @@ safe_err_t app_config_init(void)
         app_config_report(&rep);
 
         if(rep.fatal_count > 0) {
-            if(app_config_strict()) {
+            /* fatal_blocking = 不可降级的 FATAL（数据目录不可写这类）：
+             * 即使非严格模式也必须拒绝启动 —— 关掉远程通道救不了它。 */
+            if(app_config_strict() || rep.fatal_blocking > 0) {
                 fprintf(stderr,
-                        "[CONFIG] 严格模式：%d 项 FATAL，拒绝启动"
-                        "（确认配置无误后可设 SAFE_CONFIG_STRICT=0 临时放行）\n",
-                        rep.fatal_count);
+                        "[CONFIG] 拒绝启动：%d 项 FATAL（其中不可降级 %d）%s\n",
+                        rep.fatal_count, rep.fatal_blocking,
+                        app_config_strict() ? "" : "，非严格模式也无法降级");
+                if(rep.fatal_blocking == 0) {
+                    fprintf(stderr,
+                            "[CONFIG] 确认配置无误后可设 SAFE_CONFIG_STRICT=0 临时放行\n");
+                }
                 return SAFE_ERR_PARAM;
             }
             fprintf(stderr,

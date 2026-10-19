@@ -43,6 +43,7 @@ typedef struct {
     cfg_severity_t severity;
     const char *   field;    /* 字段名，便于 grep 与运维定位 */
     bool           has_value;/* true = value 有意义（数值字段） */
+    bool           degradable;/* FATAL 时：true = 可降级（关远程通道），false = 必须拒绝启动 */
     long           value;    /* 数值现场值；非数值字段填 0 */
     const char *   rule;     /* 期望范围 / 约束 */
 } cfg_issue_t;
@@ -52,6 +53,7 @@ typedef struct {
     int         count;       /* 已记录条数（<= CFG_MAX_ISSUES） */
     int         total;       /* 实际发现问题总数（可能大于 count） */
     int         fatal_count;
+    int         fatal_blocking; /* 其中不可降级的（数据目录不可写等） */
     int         warn_count;
 } cfg_report_t;
 

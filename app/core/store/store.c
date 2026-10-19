@@ -562,8 +562,15 @@ static int load_users(safe_user_t **list, int *count, bool *ok)
             if (v < g_policy.pin_min_len)        { v = g_policy.pin_min_len;        pin_len_clamped = true; }
             g_policy.pin_max_len = (int)v;
         }
-        if (js_get_int(pol, "max_failed", &v) && v >= 1)  g_policy.max_failed = (int)v;
-        if (js_get_int(pol, "lock_seconds", &v) && v >= 1) g_policy.lock_seconds = (int)v;
+        /* 上限必须与 setter（user_policy_set）一致：手工改 users.json 可把
+         * max_failed 设成 999999，让暴力破解防护形同虚设。 */
+        if (js_get_int(pol, "max_failed", &v) && v >= 1) {
+            g_policy.max_failed = (v > 10) ? 10 : (int)v;
+        }
+        /* 上限同理：lock_seconds 可被改成数年，把设备永久锁死。 */
+        if (js_get_int(pol, "lock_seconds", &v) && v >= 1) {
+            g_policy.lock_seconds = (v > 3600) ? 3600 : (int)v;
+        }
         /* 阈值有合理范围才采纳；旧版 score_high/score_mid 字段直接忽略（兼容读取） */
         if (js_get_int(pol, "face_otp_after", &v) && v >= 1 && v <= 10) g_policy.face_otp_after = (int)v;
         if (js_get_int(pol, "face_verify_timeout_s", &v) && v >= 3 && v <= 120) g_policy.face_verify_timeout_s = (int)v;

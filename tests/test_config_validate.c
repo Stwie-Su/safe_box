@@ -91,11 +91,14 @@ int main(void)
     make_valid(&c, "/tmp/safe_cfgtest_no_such_dir_9163");
     app_config_validate(&c, &r);
     CHECK(r.fatal_count == 1);
+    CHECK(r.fatal_blocking == 1);           /* 数据目录不可写：不可降级 */
     CHECK(find_issue(&r, "data_dir")->severity == CFG_SEV_FATAL);
+    CHECK(find_issue(&r, "data_dir")->degradable == false);
 
     make_valid(&c, NULL);
     app_config_validate(&c, &r);
     CHECK(r.fatal_count == 1);              /* 空指针也要被判非法，不能崩 */
+    CHECK(r.fatal_blocking == 1);
 
     /* 5. 远程通道启用时：host 空 / 端口越界 → FATAL */
     make_valid(&c, dir);
@@ -104,6 +107,8 @@ int main(void)
     app_config_validate(&c, &r);
     CHECK(find_issue(&r, "mqtt_host") != NULL);
     CHECK(find_issue(&r, "mqtt_host")->severity == CFG_SEV_FATAL);
+    CHECK(find_issue(&r, "mqtt_host")->degradable == true);   /* 关远程通道即可降级 */
+    CHECK(r.fatal_blocking == 0);
 
     make_valid(&c, dir);
     c.mqtt_enabled = true;
@@ -136,6 +141,7 @@ int main(void)
     app_config_validate(&c, &r);
     CHECK(find_issue(&r, "mqtt_ca_file") != NULL);
     CHECK(find_issue(&r, "mqtt_ca_file")->severity == CFG_SEV_FATAL);
+    CHECK(r.fatal_blocking == 0);           /* TLS 配错可降级为「关闭远程」 */
 
     /* 8b. CA 存在但客户端证书缺私钥 → FATAL */
     char ca[512];
@@ -154,6 +160,7 @@ int main(void)
     app_config_validate(&c, &r);
     CHECK(find_issue(&r, "mqtt_tls") != NULL);
     CHECK(find_issue(&r, "mqtt_tls")->severity == CFG_SEV_FATAL);
+    CHECK(r.fatal_blocking == 0);
 #endif
 
     /* 9. 没开 TLS 却配了证书 → WARN（多半是「以为开了」） */

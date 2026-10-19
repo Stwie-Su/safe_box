@@ -31,6 +31,12 @@ int main(int argc, char ** argv)
 {
     platform_bootstrap(argc, argv);
 
+    /* 行缓冲：被 supervisor 守护时 stdout 是文件（默认全缓冲），
+     * 进程被 SIGSEGV / SIGKILL 时缓冲区里最后几 KB 日志会丢；
+     * 行缓冲把丢日志的窗口压到一行以内，排障时这几行往往就是现场。 */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     /* 注册 SIGTERM / SIGINT：处理函数内只置 g_quit（§3.2）。 */
     signal(SIGTERM, on_signal);
     signal(SIGINT,  on_signal);

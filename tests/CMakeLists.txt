@@ -95,6 +95,14 @@ if(SAFE_BASH)
              COMMAND ${SAFE_BASH} ${CMAKE_SOURCE_DIR}/tools/check_rpc_cmd_table.sh
                      ${CMAKE_SOURCE_DIR})
 
+    # supervisor 进程级契约（生产级补齐）：正常退出不重启 / 崩溃重启 /
+    # 超限进安全态 / SIGTERM 转发 / 单实例锁 / daemon 模式 / 日志轮转。
+    # 这些行为只存在于 fork/exec/waitpid/signal 的内核语义里，必须真起进程；
+    # 脚本自带编译（cc 缺失时返回 77 → ctest 记为 Skipped）。
+    add_test(NAME test_supervisor
+             COMMAND ${SAFE_BASH} ${CMAKE_SOURCE_DIR}/tests/test_supervisor.sh)
+    set_tests_properties(test_supervisor PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+
     # 无头端到端（FR-11/FR-12）：起临时 broker + PC 应用，验「连上 → 下发指令 →
     # 回执关联 → kill -9 后 LWT」这条最小闭环。这是 §10 里唯一一条此前没有
     # 自动化载体的验收项（判据只在 R9 文档里，未脚本化）。

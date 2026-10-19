@@ -1,0 +1,46 @@
+# ============================================================
+#  systemd 单元（可选，给支持 systemd 的板子 / 桌面验证用）
+#
+#  100ask Buildroot 用 BusyBox init，生产走 /etc/init.d/S05safe；
+#  本文件是「同一套 supervisor 在 systemd 系统上怎么接」的模板，
+#  也用于在桌面发行版上做部署演练。
+#
+#  安装：
+#    cp safe_supervisor.service /etc/systemd/system/
+#    systemctl daemon-reload
+#    systemctl enable --now safe_supervisor
+#
+#  ★ 与 S05safe 的三处关键差异：
+#    1) 不要加 --daemon：systemd 自己负责后台化，Type=simple 下
+#       supervisor 一 fork 就会被判定为主进程退出 → 反复重启。
+#    2) RestartPreventExitStatus=2：安全态退出码不能触发重启，
+#       否则「保持锁闭等人修」会被 systemd 立刻拉起来，安全态被绕过。
+#    3) 退出码 3（已有实例）同理，不该重启。
+# ============================================================
+[Unit]
+Description=Safe box supervisor (LVGL app + watchdog)
+After=network.target
+# 板端若挂载了 /var/lib/safe，等本地文件系统就绪
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/share/lvgl/safe_supervisor \
+    --app /usr/share/lvgl/lvglsim \
+    --max-restarts 5 --window 60 --grace 5 \
+    --safe-cmd /etc/safe/safe_state.sh \
+    --watchdog /dev/watchdog \
+    --log /var/log/safe_supervisor.log --log-max 1048576 \
+    --app-log /var/log/lvglsim.log \
+    --status /var/run/safe_supervisor.status \
+    --pidfile /var/run/safe_supervisor.pid
+
+Restart=on-failure
+RestartSec=2
+RestartPreventExitStatus=2 3
+
+# 兜底：supervisor 自身卡死时由 systemd 处理（与硬件看门狗是两层）
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
