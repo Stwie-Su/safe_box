@@ -93,7 +93,7 @@ cmake --build build_board -j$(nproc)
 
 调试环境变量（`grep -r 'getenv("SAFE_' app` 为准）：`SAFE_DATA_DIR`、`SAFE_TEST_PAGE`（HOME/LOGS/SETTINGS/USERS/NETWORK/SYSTEM/KEYPAD/FACE）、`SAFE_TEST_THEME`(0..4，THEME_COUNT=5)、`SAFE_TEST_DLG`(add_user|auth|change_pwd)、`SAFE_TEST_SHOT` / `SAFE_TEST_SHOT_MS`、`SAFE_TEST_UNLOCK=1`、`SAFE_TEST_TRANS_MS` / `SAFE_TEST_TRANS_PAGE`、`SAFE_TEST_FACE`、`SAFE_ICON_CHECK`、`SAFE_PERF_LOG=1`、`SAFE_MQTT_HOST|PORT`、`SAFE_MQTT_OFF=1`、`SAFE_FACE_BACKEND` / `SAFE_FACE_DEV`、`SAFE_FM225_DEV`（真模组串口，建议 by-id 路径）、`SAFE_FACE_PREVIEW_SCALE`、`SAFE_CAMERA_BACKEND` / `SAFE_CAMERA_DEV` / `SAFE_CAMERA_ROT`、`SAFE_TIME_BACKEND` / `SAFE_RTC_DEV`、`SAFE_NET_BACKEND`（wpa|none，WLAN 后端强制指定）/ `SAFE_WPA_CTRL`（wpa_supplicant ctrl_iface 路径，默认 /var/run/wpa_supplicant/wlan0）。
 
-辅助脚本：`tools/fm225_selftest.py`（不启主程序的串口链路 30 秒自检）、`tools/crash_consistency_test.sh`（store 崩溃一致性长跑）、`tools/mqtt_lab.py`（MQTT 本地实验）、`tools/check_layers.sh` / `tools/check_main_thread_store.sh`（分层与线程纪律闸门）。
+辅助脚本：`tests/test_supervisor.sh`（supervisor 进程级行为，ctest 自动跑）、`deploy/S05safe`（开机自启）、`tools/fm225_selftest.py`（不启主程序的串口链路 30 秒自检）、`tools/crash_consistency_test.sh`（store 崩溃一致性长跑）、`tools/mqtt_lab.py`（MQTT 本地实验）、`tools/check_layers.sh` / `tools/check_main_thread_store.sh`（分层与线程纪律闸门）。
 
 ## 6. 目录结构
 
@@ -200,5 +200,5 @@ data/               PC 运行时数据（不入库）
 **动手前的最短路径**：CLAUDE.md（地图 + 当前态）→ `规约/需求规约.md` / `技术路线规约.md` 定位（grep 关键字）→ 定位文件 → 读该文件。
 **排错先读** `规约/Bug案例集.md` §一（断言链二分 + 分层地图 + 反模式清单），再查 `规约/归档/Bug台账_全量.md`（缺陷一页纸，**修完也要回来加一行**），不要凭印象猜。
 
-**改完必做**：`ctest --test-dir build_pc`（24 项）+ 涉及板端时 `cmake --build build_board`；
+**改完必做**：`ctest --test-dir build_pc`（28 项）+ 涉及板端时 `cmake --build build_board`；
 提交前 `git status --short` 确认无孤儿未跟踪文件（本项目反复踩过）。
