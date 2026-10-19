@@ -79,7 +79,7 @@ static void on_bus_user_changed(ev_topic_t topic, const void * payload, void * u
     rpc_publish_event(p->evt, p->user, p->detail, p->res);
 }
 
-void app_main(void)
+int app_main(void)
 {
     /* 时间后端选择（规约 §5.14）：必须排在最前——TOTP、日志时间戳、
      * 状态上报、人脸事件时间戳全部依赖它。rtc 不可用时内部自动降级 sys。 */
@@ -88,7 +88,14 @@ void app_main(void)
     store_init();
     worker_init();
     hal_actuator_init();
-    app_config_init();
+
+    /* 配置校验失败（FATAL + 严格模式）：此时 UI / 远程都没起来，只能返回非 0。
+     * main 负责停狗并退出；生产链路上 supervisor 看到非 0 退出 → 限速重启
+     * → 超限进安全态（锁闭），不会出现「坏配置反复拉起」的静默循环。 */
+    if(app_config_init() != SAFE_OK) {
+        fprintf(stderr, "[app] 配置校验未通过，启动中止\n");
+        return 2;
+    }
 
     /* 相机链路（Sprint3 步骤 2，FR-16）：init/start 在此统一编排。
      * 无摄像头时 camera_service 自动降级 null 后端，预览区显示占位。 */
@@ -140,6 +147,7 @@ void app_main(void)
 
     printf("[app] safe %s  platform=%s  face=%s  data=%s\n",
            SAFE_VERSION_STRING, platform_name(), cfg->face_backend, cfg->data_dir);
+    return 0;
 }
 
 void app_tick_fast(void)

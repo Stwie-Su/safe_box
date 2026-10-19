@@ -56,7 +56,15 @@ int main(int argc, char ** argv)
         hal_watchdog_start();
     }
 
-    app_main();
+    if(app_main() != 0) {
+        /* 启动中止（典型原因：配置校验 FATAL + 严格模式）。
+         * 必须走 stop（magic close）再退出：否则关闭 fd 后看门狗继续计时，
+         * 15s 后整机复位 —— 表现为「应用起不来还反复重启整机」。 */
+        fprintf(stderr, "[main] 启动中止，停止看门狗后退出\n");
+        hal_watchdog_stop();
+        hal_watchdog_deinit();
+        return 2;
+    }
 
     /* PC 调试钩子（指定起始页/主题/截图）。板子构建下为空实现。 */
     debug_hooks_apply();

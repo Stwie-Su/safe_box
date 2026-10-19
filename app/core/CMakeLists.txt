@@ -4,6 +4,9 @@ set(SAFE_CORE_SRC
     err.c
     event_bus.c
     config.c
+    # 配置校验：范围 / 路径 / 组合约束。纯函数（不读 env、不分配堆、不改入参），
+    # 独立成文件是为了能直接单测，不必拉起整个 config_init 与 store。
+    config_validate.c
     store/store.c
     # 只读用户表快照缓存（双缓冲：worker 写 / 主线程读）。
     # QA-20 不变式升级为「读写全归 worker」之后，主线程读用户表的唯一合法通道。

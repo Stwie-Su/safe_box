@@ -7,6 +7,7 @@
  */
 
 #include "core/config.h"
+#include "core/config_validate.h"
 #include "core/store/store.h"
 
 #include <stdio.h>
@@ -98,6 +99,37 @@ safe_err_t app_config_init(void)
      * D2：横幅与 face_service 都取本字段，杜绝"横幅显示 fake、实际跑 fm225"。 */
     const char * fb = getenv("SAFE_FACE_BACKEND");
     s_cfg.face_backend = (fb && *fb) ? fb : SAFE_FACE_BACKEND;
+
+    /* 配置校验（生产级补齐）：范围/路径/组合约束在这里一次性查完。
+     *
+     * 为什么不在各字段赋值处顺手 if：那样每条规则都散在赋值旁边，
+     * 新增一个配置项就要记得再加一段，且无法整体报告；集中成一次遍历后，
+     * 规则表就是唯一事实来源，单元测试也能直接喂结构体断言。
+     *
+     * 分级：
+     *   WARN  → 钳制到合法范围后继续（阈值写错不该让设备起不来）；
+     *   FATAL → 严格模式拒绝启动；非严格模式关闭远程通道后继续
+     *           （绝不把「要求 TLS 但没 CA」降级成明文连接）。
+     */
+    {
+        cfg_report_t rep;
+        app_config_validate(&s_cfg, &rep);
+        app_config_report(&rep);
+
+        if(rep.fatal_count > 0) {
+            if(app_config_strict()) {
+                fprintf(stderr,
+                        "[CONFIG] 严格模式：%d 项 FATAL，拒绝启动"
+                        "（确认配置无误后可设 SAFE_CONFIG_STRICT=0 临时放行）\n",
+                        rep.fatal_count);
+                return SAFE_ERR_PARAM;
+            }
+            fprintf(stderr,
+                    "[CONFIG] 非严格模式：关闭远程通道后继续（不会退化成明文）\n");
+            s_cfg.mqtt_enabled = false;
+        }
+        app_config_clamp(&s_cfg);
+    }
 
     return SAFE_OK;
 }

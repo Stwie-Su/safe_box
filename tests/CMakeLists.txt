@@ -68,6 +68,10 @@ safe_add_test(test_worker)
 # 密码学原语：SHA-1 / HMAC-SHA1（RFC 3174 / RFC 2202 向量）+ PBKDF2 向量 + 认证加密层。
 safe_add_test(test_crypto)
 
+# 配置校验（生产级补齐）：范围 / 路径 / 组合约束 / 分级（FATAL vs WARN）/ 钳制幂等。
+# 纯函数测试，不读环境变量、不启动 store；路径项用 mkdtemp 造临时目录。
+safe_add_test(test_config_validate)
+
 # 分层检查：core 不碰 LVGL/平台头，hal 头文件不带平台实现，ui 不碰底层协议
 find_program(SAFE_BASH bash)
 if(SAFE_BASH)
