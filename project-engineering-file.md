@@ -28,11 +28,12 @@
 | 编号 | 场景 | 决策 | 理由 | 代价 | 状态 |
 |---|---|---|---|---|---|
 | ADR-001 | 应用崩溃后无人拉起 | 独立 supervisor 进程（fork/exec + waitpid），不在应用内自重启 | 崩溃时应用自身状态不可信；父进程只依赖内核语义 | 多一个进程要维护 | 已落地 |
-| ADR-002 | 应用活着但卡死 | 主循环心跳喂 `/dev/watchdog`，卡死即停喂 | 只有主循环知道业务是否真的在跑；独立线程喂狗会让看门狗形同虚设 | PC 无狗，只能走 null 后端 | 已落地，板上待验 |
+| ADR-002 | 应用活着但卡死 | 主循环心跳喂 `/dev/watchdog`，卡死即停喂 | 只有主循环知道业务是否真的在跑；独立线程喂狗会让看门狗形同虚设 | PC 无狗，走软狗/占位后端 | **已落地，板上已确认真狗可用**（imx2-wdt，nowayout=0；实测复位与 magic close 均有效） |
 | ADR-003 | 反复崩溃后进安全态，没人喂狗 → 整机复位循环 | 安全态由 supervisor **接管看门狗**持续喂狗，保持锁闭等人修 | 失效要导向安全侧且有痕迹；整机反复复位会丢现场 | supervisor 要理解 watchdog ioctl | 已落地，板上待验 |
 | ADR-004 | 配置错误静默进入运行期 | 启动时集中校验，分三级：FATAL 不可降级 / FATAL 可降级 / WARN | 配错应在启动时暴露；但阈值越界不该让设备起不来 | 多一个模块与一套测试 | 已落地 |
 | ADR-005 | 重复启动会抢应用与看门狗 | `flock` 单实例 + `--daemon` 双 fork + pidfile | init 脚本可能被手工重复执行；两个 supervisor 会互相 kill | 需要可写的 `/var/run` | 已落地 |
 | ADR-006 | `--daemon` 后 stdio 指向 /dev/null，应用日志丢失 | supervisor `--app-log` 把子进程 stdout/stderr 接到文件；应用侧行缓冲 | 日志是排障第一现场；外部 `stdbuf` 在 Buildroot 不一定有 | 多一个参数 | 已落地 |
+| ADR-009 | 真狗与软狗的参数怎么定 | 真狗默认超时 **60s**（`HAL_WATCHDOG_DEFAULT_TIMEOUT_MS`），软狗 5s 判定、启动宽限 30s | 真狗代价是整机复位，启动慢一点就会被反复复位；快速卡死由软狗在 5s 内重启应用处理，真狗只兜底 | 真狗恢复更慢（60s）；待板端实测启动耗时后决定是否收紧到 30s | 已落地，参数待板端复核 |
 | ADR-008 | 软狗怎么判定才不会被绕过 / 不会误杀 | 心跳值写 **CLOCK_MONOTONIC**（不写墙上时间、不看文件 mtime）；supervisor 读内容与自身单调时钟比较；每次拉起子进程前 `unlink` 心跳文件；文件不存在或不可解析时**只提示不判死** | 设备有 RTC 校时与远程 `sync_time`，拨时钟会让「墙上时间判定」失效；真狗场景应用根本不写文件，判死就是误杀 | 启动期（默认 30s 宽限内）不判死，等于这段时间没有卡死检测 | 已落地 |
 | ADR-007 | 板子没有 `/dev/watchdog`，硬狗这层能力为空 | 加 `backend_file` 软狗：应用写心跳文件，supervisor 按 mtime 判卡死并重启；后端自动降级 linux→file→null | 至少覆盖「进程活着但主循环卡死」；有真狗时自动优先真狗 | 覆盖不了内核 panic / 整机死机 / 断电；需 supervisor 配合 | 已落地，PC 已验证 |
 
@@ -92,8 +93,8 @@ last_exit=exit:<code> | signal:<NAME>(<num>) | running | safe-state | supervisor
 
 | 风险 | 影响 | 现状 / 缓解 |
 |---|---|---|
-| 板子未接入 | 软狗已在 PC 端到端验证；S05、安全态、真狗路径未上板 | 先按 README「上板自检清单」逐步验证；未验证前不要把 S05 切生产 |
-| 板子没有 `/dev/watchdog` | 只有软狗：内核 panic / 整机死机 / 断电无法复位 | 软狗覆盖主循环卡死；要整机级复位需开 SoC WDOG（`CONFIG_IMX2_WDT`）或加外置芯片 |
+| 新代码还没部署到板子 | 板上跑的还是旧版应用（无软狗、无新配置校验） | 板子已通过 adb 在线（100ask_IMX6ULL），下一步可部署验证；切换前保留回滚副本 |
+| 真狗已可用，但整机复位的代价 | 若启动耗时超过真狗超时，会反复复位（现场全丢） | 默认超时已放宽到 60s；第二期做「启动后收紧到 30s」或直接实测后固定 |
 | 安全态接管狗未实测 | 若驱动不允许二次 open，设备仍会复位 | `watchdog_takeover` 失败会明确记日志；这是无狗可接管时的最后手段 |
 | `safe_state.sh` 的 GPIO 未接 | 安全态只留痕、未真正保持锁闭 | 真锁接入后按注释补 sysfs 写值，并在板上 `echo` 验证引脚编号 |
 | systemd 模板未实测 | 参数组合可能与 systemd 生命周期冲突 | 已写 `RestartPreventExitStatus=2 3` 且不加 `--daemon`；上 systemd 板子前先手工跑 |
@@ -103,6 +104,7 @@ last_exit=exit:<code> | signal:<NAME>(<num>) | running | safe-state | supervisor
 
 ## 7. 待办
 
+0. **实测板端启动耗时**（决定真狗超时能否从 60s 收紧到 30s）：记录「执行 lvglsim → 打印进入主循环」的秒数。
 1. 上板自检 6 步（README）：supervisor 手工跑 → 崩溃重启 → 安全态 → 确认后端=file（软狗）→ `kill -STOP` 验证心跳超时重启 → S05 断电重上电。
 2. S05 接线：确认板上现网 `S05lvgl` 的调用方式，替换为 `S05safe`（保留回滚脚本）。
 3. 真锁 GPIO：`safe_state.sh` 补拉低动作；`hal/actuator` 接 GPIO 后端。
