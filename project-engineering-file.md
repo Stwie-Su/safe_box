@@ -33,9 +33,9 @@
 | ADR-004 | 配置错误静默进入运行期 | 启动时集中校验，分三级：FATAL 不可降级 / FATAL 可降级 / WARN | 配错应在启动时暴露；但阈值越界不该让设备起不来 | 多一个模块与一套测试 | 已落地 |
 | ADR-005 | 重复启动会抢应用与看门狗 | `flock` 单实例 + `--daemon` 双 fork + pidfile | init 脚本可能被手工重复执行；两个 supervisor 会互相 kill | 需要可写的 `/var/run` | 已落地 |
 | ADR-006 | `--daemon` 后 stdio 指向 /dev/null，应用日志丢失 | supervisor `--app-log` 把子进程 stdout/stderr 接到文件；应用侧行缓冲 | 日志是排障第一现场；外部 `stdbuf` 在 Buildroot 不一定有 | 多一个参数 | 已落地 |
-| ADR-009 | 真狗与软狗的参数怎么定 | 真狗默认超时 **60s**（`HAL_WATCHDOG_DEFAULT_TIMEOUT_MS`），软狗 5s 判定、启动宽限 30s | 真狗代价是整机复位，启动慢一点就会被反复复位；快速卡死由软狗在 5s 内重启应用处理，真狗只兜底 | 真狗恢复更慢（60s）；待板端实测启动耗时后决定是否收紧到 30s | 已落地，参数待板端复核 |
+| ADR-009 | 真狗与软狗的参数怎么定 | 真狗默认超时 **60s**，软狗 5s 判定、启动宽限 30s（见过心跳后宽限失效） | 真狗代价是整机复位，启动慢一点就会被反复复位；快速卡死由软狗在 5s 内重启应用处理，真狗只兜底 | 真狗恢复更慢（60s） | 已板上复核：开机→应用启动 6.3s、应用初始化≈3s、进主循环≈9.5s，60s 有 6 倍余量；收紧到 30s（3 倍）也安全，默认仍留 60s |
 | ADR-008 | 软狗怎么判定才不会被绕过 / 不会误杀 | 心跳值写 **CLOCK_MONOTONIC**（不写墙上时间、不看文件 mtime）；supervisor 读内容与自身单调时钟比较；每次拉起子进程前 `unlink` 心跳文件；文件不存在或不可解析时**只提示不判死** | 设备有 RTC 校时与远程 `sync_time`，拨时钟会让「墙上时间判定」失效；真狗场景应用根本不写文件，判死就是误杀 | 启动期（默认 30s 宽限内）不判死，等于这段时间没有卡死检测 | 已落地 |
-| ADR-007 | 板子没有 `/dev/watchdog`，硬狗这层能力为空 | 加 `backend_file` 软狗：应用写心跳文件，supervisor 按 mtime 判卡死并重启；后端自动降级 linux→file→null | 至少覆盖「进程活着但主循环卡死」；有真狗时自动优先真狗 | 覆盖不了内核 panic / 整机死机 / 断电；需 supervisor 配合 | 已落地，PC 已验证 |
+| ADR-007 | （前提后来被推翻）当时认为板子没有 `/dev/watchdog`，硬狗这层能力为空 | 加 `backend_file` 软狗：应用写心跳文件，supervisor 按单调时钟判卡死并重启；后端自动降级 linux→file→null | 至少覆盖「进程活着但主循环卡死」；有真狗时自动优先真狗 | 软狗覆盖不了内核 panic / 整机死机 / 断电 | 已落地；后经 adb 实测确认**板子其实有真狗**（见 ADR-002），软狗保留为**伴随层**与真狗并行 |
 
 ## 4. 模块清单与进度
 
@@ -46,7 +46,7 @@
 | `app/main.c` / `app/app.c` | 已完成 | `app_main()` 返回 int；启动中止时停狗（magic close）后退出 2 |
 | `tools/supervisor/safe_supervisor.c` | 已完成 | daemon / flock / status / 日志轮转 / 退避 / 安全态接管狗 |
 | `tools/supervisor/run_with_supervisor.sh` | 已完成 | 一次性环境准备 + `exec supervisor --daemon` |
-| `deploy/S05safe` | 已完成（未上板） | BusyBox init 的 start/stop/restart/status |
+| `deploy/S05safe` | 已上板验证 | BusyBox init 的 start/stop/restart/status；已替换现网 `S05lvgl`（旧脚本移至 `/root/rollback_20261019/`） |
 | `deploy/safe_state.sh` | 已完成（GPIO 待接） | 安全态留痕；真锁接入后补 GPIO 拉低 |
 | `deploy/safe_supervisor.service` | 模板 | systemd 备用；未实测 |
 | `README.md` | 已完成 | 新增「生产运行」：进程模型 / 文件位置 / 命令 / 退出码 / 配置校验 / 排障表 / 上板清单 |
@@ -93,9 +93,9 @@ last_exit=exit:<code> | signal:<NAME>(<num>) | running | safe-state | supervisor
 
 | 风险 | 影响 | 现状 / 缓解 |
 |---|---|---|
-| 新代码还没部署到板子 | 板上跑的还是旧版应用（无软狗、无新配置校验） | 板子已通过 adb 在线（100ask_IMX6ULL），下一步可部署验证；切换前保留回滚副本 |
-| 真狗已可用，但整机复位的代价 | 若启动耗时超过真狗超时，会反复复位（现场全丢） | 默认超时已放宽到 60s；第二期做「启动后收紧到 30s」或直接实测后固定 |
-| 安全态接管狗未实测 | 若驱动不允许二次 open，设备仍会复位 | `watchdog_takeover` 失败会明确记日志；这是无狗可接管时的最后手段 |
+| ~~新代码未部署~~ | — | 已闭环（2026-10-20）：板上运行新版本，回滚副本在 `/root/rollback_20261019/` 与 `/usr/share/lvgl/*.bak_20261019` |
+| 真狗整机复位的代价 | 若启动耗时超过真狗超时，会反复复位（现场全丢） | 实测开机到可交互约 9.5s，60s 余量 6 倍；不再收紧 |
+| ~~安全态接管狗未实测~~ | — | 已闭环：板上 6 次崩溃进安全态，接管 30s 超时持续喂狗，观察 40s 未复位；`kill -TERM` 后 magic close 且不复位 |
 | `safe_state.sh` 的 GPIO 未接 | 安全态只留痕、未真正保持锁闭 | 真锁接入后按注释补 sysfs 写值，并在板上 `echo` 验证引脚编号 |
 | systemd 模板未实测 | 参数组合可能与 systemd 生命周期冲突 | 已写 `RestartPreventExitStatus=2 3` 且不加 `--daemon`；上 systemd 板子前先手工跑 |
 | 日志轮转只保留一份历史 | 长时间崩溃循环会覆盖更早现场 | 崩溃循环本身会进安全态，日志量有限；需要长期留档时接 syslog |
@@ -104,9 +104,11 @@ last_exit=exit:<code> | signal:<NAME>(<num>) | running | safe-state | supervisor
 
 ## 7. 待办
 
-0. **实测板端启动耗时**（决定真狗超时能否从 60s 收紧到 30s）：记录「执行 lvglsim → 打印进入主循环」的秒数。
-1. 上板自检 6 步（README）：supervisor 手工跑 → 崩溃重启 → 安全态 → 确认后端=file（软狗）→ `kill -STOP` 验证心跳超时重启 → S05 断电重上电。
-2. S05 接线：确认板上现网 `S05lvgl` 的调用方式，替换为 `S05safe`（保留回滚脚本）。
+0. ~~实测板端启动耗时~~ 已完成（2026-10-20）：开机 → 应用启动 6.3s，应用初始化 ≈3s，进主循环 ≈9.5s。
+1. ~~上板自检 6 步~~ 已完成：自启 / 崩溃重启 / 软狗 / 安全态 / 优雅停机 / 单实例逐项实测，记录见 README「板上验收记录」。
+2. ~~S05 接线~~ 已完成：`S05safe` 已在板子上，`S05lvgl` 移至 `/root/rollback_20261019/`（**不能只改名**，`S??*` 仍会匹配，见 D49）。
 3. 真锁 GPIO：`safe_state.sh` 补拉低动作；`hal/actuator` 接 GPIO 后端。
 4. 72h 长跑：看门狗不误触发、fd/内存无增长、日志轮转生效。
 5. 若上 systemd 板子：实测 unit 文件，补 `WatchdogSec` 与 `sd_notify`（可选）。
+6. OTA 回滚与 supervisor 的联调：`ota_watchdog.sh` 已改为优先 `S05safe restart`，但**回滚流程本身尚未在板上完整跑一遍**（造一个坏版本 → 触发 45s 超时 → 确认新二进制生效且进程只剩一个）。
+7. 清理板上的历史遗留：`lvglsim.old` / `lvglsim.bak_*` / `run_page.sh`（不存在的 `S06lvglpage` 仍在 init.d 里每次启动报错）。
