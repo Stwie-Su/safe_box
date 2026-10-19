@@ -27,6 +27,8 @@ set(SAFE_HAL_SRC
     # 因此 PC（无 /dev/watchdog）与板子编同一份主循环代码。
     watchdog/watchdog_service.c
     watchdog/backend_linux.c
+    # 软狗：写心跳文件，由 supervisor --heartbeat 检查（无 /dev/watchdog 时的降级方案）
+    watchdog/backend_file.c
     watchdog/backend_none.c
     # WLAN：wpa_supplicant ctrl_iface 后端 + 降级后端 + 分发层。
     # 依赖只有 libc 与 POSIX socket，板子与 PC 编同一份代码（不引入任何第三方库）。

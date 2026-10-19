@@ -62,6 +62,13 @@ export SAFE_TIME_BACKEND=rtc
 export SAFE_RTC_DEV=/dev/rtc0
 insmod /lib/modules/4.9.88/extra/ch341.ko 2>/dev/null
 
+# ---- 看门狗 ----
+# 板上没有 /dev/watchdog（无外置狗芯片 / 内核没开 SoC WDOG）时走软狗：
+#   应用主循环写心跳文件 → supervisor 检查 mtime，超时判定卡死并重启。
+# 不显式设 SAFE_WATCHDOG_BACKEND，让 HAL 自动降级：linux → file → null。
+# 以后接了真狗，什么都不用改（linux 能打开就优先用真狗）。
+export SAFE_WATCHDOG_FILE="${SAFE_WATCHDOG_FILE:-/var/run/safe_heartbeat}"
+
 # ---- 远程通道目标：先试上次成功地址，不通则扫描本网段 ----
 # 板子与代理主机都走 DHCP，地址会漂；写死 IP 时换网即断线且零报错。
 export SAFE_MQTT_HINT="${SAFE_MQTT_HINT:-10.123.24.51}"
@@ -108,4 +115,7 @@ exec "$SUP" --app "$APP" --daemon \
     --watchdog "${SAFE_WATCHDOG_DEV:-/dev/watchdog}" \
     --log "$LOG" --log-max "${SAFE_SUP_LOG_MAX:-1048576}" \
     --app-log "${SAFE_APP_LOG:-/var/log/lvglsim.log}" \
+    --heartbeat "${SAFE_WATCHDOG_FILE:-/var/run/safe_heartbeat}" \
+    --heartbeat-timeout "${SAFE_HB_TIMEOUT:-5}" \
+    --heartbeat-startup "${SAFE_HB_STARTUP:-20}" \
     --status "$STATUS" --pidfile "$PIDFILE"

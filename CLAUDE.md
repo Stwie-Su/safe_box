@@ -118,7 +118,7 @@ app/
 └── platform/       platform_sdl / fbdev / null、perf_probe、debug_hooks
 ports/lv_port/      LVGL 官方 Linux 移植层
 third_party/        aes、sha256、stb
-tests/              CTest（28 项：store 缓存/崩溃/P0、mqtt codec/fsm/inflight、rpc、supervisor、
+tests/              CTest（29 项：store 缓存/崩溃/P0、mqtt codec/fsm/inflight、rpc、supervisor、
                     fm225_proto/enroll、auth_fsm、cred_reconcile、totp、auth_verify、
                     event_bus + check_layers、check_main_thread_store）
 tools/              自检 / 实验 / 字体再生成脚本
@@ -201,5 +201,5 @@ data/               PC 运行时数据（不入库）
 **动手前的最短路径**：CLAUDE.md（地图 + 当前态）→ `规约/需求规约.md` / `技术路线规约.md` 定位（grep 关键字）→ 定位文件 → 读该文件。
 **排错先读** `规约/Bug案例集.md` §一（断言链二分 + 分层地图 + 反模式清单），再查 `规约/归档/Bug台账_全量.md`（缺陷一页纸，**修完也要回来加一行**），不要凭印象猜。
 
-**改完必做**：`ctest --test-dir build_pc`（28 项）+ 涉及板端时 `cmake --build build_board`；
+**改完必做**：`ctest --test-dir build_pc`（29 项）+ 涉及板端时 `cmake --build build_board`；
 提交前 `git status --short` 确认无孤儿未跟踪文件（本项目反复踩过）。

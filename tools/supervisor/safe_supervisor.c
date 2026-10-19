@@ -40,6 +40,9 @@
  *   --log FILE           日志落盘（默认 stderr）
  *   --log-max BYTES      单个日志文件上限，超过轮转为 .1（默认 1048576；0=不轮转）
  *   --app-log FILE       应用 stdout/stderr 追加到该文件（默认继承 supervisor）
+ *   --heartbeat FILE     软狗心跳文件（应用侧 SAFE_WATCHDOG_BACKEND=file 写同一路径）
+ *   --heartbeat-timeout SEC  心跳超过该秒数未更新 → 判定卡死并重启（默认 5）
+ *   --heartbeat-startup SEC  启动宽限：应用初始化期间不判死（默认 15）
  *   --status FILE        状态文件路径（默认不写）
  *   --pidfile FILE       单实例锁 + PID 文件（默认 /var/run/safe_supervisor.pid）
  *   --daemon             转入后台（setsid + 二次 fork + stdio 重定向）
@@ -73,6 +76,8 @@
 #define DEFAULT_WATCHDOG_DEV      "/dev/watchdog"
 #define DEFAULT_LOG_MAX           (1024 * 1024)
 #define DEFAULT_PIDFILE           "/var/run/safe_supervisor.pid"
+#define DEFAULT_HB_TIMEOUT_SEC    5
+#define DEFAULT_HB_STARTUP_SEC    15
 #define MAX_TRACKED               64
 #define POLL_MS                   100
 #define BACKOFF_MAX_FACTOR        8
@@ -83,6 +88,9 @@ static FILE *                g_log = NULL;
 static const char *          g_log_path = NULL;
 static long                  g_log_max = DEFAULT_LOG_MAX;
 static const char *          g_status_path = NULL;
+static const char *          g_hb_path = NULL;      /* 软狗心跳文件；NULL = 不启用 */
+static int                   g_hb_timeout_s = DEFAULT_HB_TIMEOUT_SEC;
+static int                   g_hb_startup_s = DEFAULT_HB_STARTUP_SEC;
 static int                   g_lock_fd = -1;
 
 static time_t g_restarts[MAX_TRACKED];
@@ -97,6 +105,62 @@ static void sleep_ms(int ms)
     ts.tv_sec  = ms / 1000;
     ts.tv_nsec = (long)(ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
+}
+
+/* 单调时钟（毫秒）：算「启动后过了多久」，不受系统时间调整影响。 */
+static long long monotonic_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000L;
+}
+
+/* 墙上时钟（毫秒）：与文件 mtime 同源，算「心跳多久没更新」。 */
+static long long wall_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000L;
+}
+
+/* 心跳文件里是否已经写了 stopped（应用正常退出时留下）。
+ * 正常退出不该被当成卡死再拉起来。读失败按「没有标记」处理。 */
+static int hb_is_stopped(void)
+{
+    if(g_hb_path == NULL) return 0;
+    int fd = open(g_hb_path, O_RDONLY);
+    if(fd < 0) return 0;
+
+    char buf[16] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    return (n >= 7 && strncmp(buf, "stopped", 7) == 0) ? 1 : 0;
+}
+
+/* 软狗判定：
+ *   1  = 心跳过期（应用卡死）
+ *   0  = 正常
+ *  -1  = 文件还没出现，但仍在启动宽限内（应用初始化中）
+ * age_ms 回填「距上次心跳/启动的毫秒数」，便于日志说明。 */
+static int hb_check(long long child_started_ms, long long * age_ms)
+{
+    if(g_hb_path == NULL) return 0;
+
+    struct stat st;
+    if(stat(g_hb_path, &st) == 0) {
+        long long m = (long long)st.st_mtim.tv_sec * 1000LL + st.st_mtim.tv_nsec / 1000000L;
+        long long age = wall_ms() - m;
+        if(age_ms) *age_ms = age;
+        if(age > (long long)g_hb_timeout_s * 1000LL) {
+            if(hb_is_stopped()) return 0;
+            return 1;
+        }
+        return 0;
+    }
+
+    long long age = monotonic_ms() - child_started_ms;
+    if(age_ms) *age_ms = age;
+    return (age > (long long)g_hb_startup_s * 1000LL) ? 1 : -1;
 }
 
 /* ------------------------------------------------------------------
@@ -367,12 +431,16 @@ static void usage(const char * self)
             "  --log FILE           日志落盘（默认 stderr）\n"
             "  --log-max BYTES      日志文件上限（默认 %d；0=不轮转）\n"
             "  --app-log FILE       应用 stdout/stderr 追加到该文件\n"
+            "  --heartbeat FILE     软狗心跳文件（应用写同一路径）\n"
+            "  --heartbeat-timeout SEC  心跳过期秒数（默认 %d）\n"
+            "  --heartbeat-startup SEC  启动宽限秒数（默认 %d）\n"
             "  --status FILE        状态文件（默认不写）\n"
             "  --pidfile FILE       单实例锁 + PID（默认 %s）\n"
             "  --daemon             转入后台运行\n",
             self, DEFAULT_MAX_RESTARTS, DEFAULT_WINDOW_SEC, DEFAULT_GRACE_SEC,
             DEFAULT_RESTART_DELAY_MS, DEFAULT_SAFE_CMD, DEFAULT_WATCHDOG_DEV,
-            DEFAULT_LOG_MAX, DEFAULT_PIDFILE);
+            DEFAULT_LOG_MAX, DEFAULT_HB_TIMEOUT_SEC, DEFAULT_HB_STARTUP_SEC,
+            DEFAULT_PIDFILE);
 }
 
 int main(int argc, char ** argv)
@@ -406,6 +474,9 @@ int main(int argc, char ** argv)
         if(strcmp(a, "--safe-cmd") == 0 && i + 1 < argc) { safe_cmd = argv[++i]; continue; }
         if(strcmp(a, "--watchdog") == 0 && i + 1 < argc) { wd_dev = argv[++i]; continue; }
         if(strcmp(a, "--app-log") == 0 && i + 1 < argc) { app_log = argv[++i]; continue; }
+        if(strcmp(a, "--heartbeat") == 0 && i + 1 < argc) { g_hb_path = argv[++i]; continue; }
+        if(strcmp(a, "--heartbeat-timeout") == 0 && i + 1 < argc) { g_hb_timeout_s = atoi(argv[++i]); continue; }
+        if(strcmp(a, "--heartbeat-startup") == 0 && i + 1 < argc) { g_hb_startup_s = atoi(argv[++i]); continue; }
         if(strcmp(a, "--log") == 0 && i + 1 < argc) { log_path = argv[++i]; continue; }
         if(strcmp(a, "--log-max") == 0 && i + 1 < argc) { g_log_max = atol(argv[++i]); continue; }
         if(strcmp(a, "--status") == 0 && i + 1 < argc) { status_path = argv[++i]; continue; }
@@ -430,6 +501,8 @@ int main(int argc, char ** argv)
     if(window <= 0)      window = DEFAULT_WINDOW_SEC;
     if(grace <= 0)       grace = DEFAULT_GRACE_SEC;
     if(restart_delay_ms < 0) restart_delay_ms = 0;
+    if(g_hb_timeout_s <= 0) g_hb_timeout_s = DEFAULT_HB_TIMEOUT_SEC;
+    if(g_hb_startup_s < 0)  g_hb_startup_s = 0;
 
     /* ---- 后台化（必须在打开日志/写 PID 之前，PID 才是最终进程） ---- */
     if(want_daemon) {
@@ -471,6 +544,10 @@ int main(int argc, char ** argv)
 
     log_line("supervisor 启动：app=%s pid=%d max-restarts=%d/%ds grace=%ds daemon=%d",
              app, (int)getpid(), max_restarts, window, grace, want_daemon);
+    if(g_hb_path != NULL) {
+        log_line("软狗：心跳=%s 超时=%ds 启动宽限=%ds",
+                 g_hb_path, g_hb_timeout_s, g_hb_startup_s);
+    }
     status_write("running", "-");
 
     /* 组装子进程 argv：'--' 位置替换为应用路径。 */
@@ -522,6 +599,17 @@ int main(int argc, char ** argv)
         int st = 0;
         int waited_ms = 0;
         pid_t r = 0;
+
+        /* 软狗状态（每个子进程一份）：
+         *   child_started_ms —— 启动宽限起点
+         *   last_check_ms    —— 上次检查时间（1s 一次，别每 100ms stat）
+         *   hb_hit/hb_killed —— 已 TERM / 已 KILL，防止每个轮询都重复发信号 */
+        long long child_started_ms = monotonic_ms();
+        long long last_check_ms = 0;
+        long long hb_hit_ms = 0;
+        int hb_hit = 0;
+        int hb_killed = 0;
+
         for(;;) {
             r = waitpid(pid, &st, WNOHANG);
             if(r == pid) break;
@@ -535,38 +623,77 @@ int main(int argc, char ** argv)
                 log_line("优雅退出宽限 %ds 超时 → SIGKILL pid=%d", grace, (int)pid);
                 kill(pid, SIGKILL);
             }
+
+            /* 软狗：应用没有真狗时，用「心跳文件是否还在更新」判断主循环是否卡死。 */
+            long long nowm = monotonic_ms();
+            if(g_hb_path != NULL && !hb_hit && nowm - last_check_ms >= 1000) {
+                last_check_ms = nowm;
+                long long age = 0;
+                int hs = hb_check(child_started_ms, &age);
+                if(hs == 1) {
+                    log_line("心跳超时：%lldms 未更新（阈值 %ds）→ 判定应用卡死，SIGTERM pid=%d",
+                             age, g_hb_timeout_s, (int)pid);
+                    status_write("running", "heartbeat-timeout");
+                    kill(pid, SIGTERM);
+                    hb_hit = 1;
+                    hb_hit_ms = nowm;
+                }
+                else if(hs == -1) {
+                    log_line("心跳文件尚未出现（启动宽限 %ds 内，继续等待）", g_hb_startup_s);
+                }
+            }
+            if(hb_hit && !hb_killed && nowm - hb_hit_ms >= (long long)grace * 1000LL) {
+                log_line("心跳超时后优雅退出宽限 %ds 超时 → SIGKILL pid=%d", grace, (int)pid);
+                kill(pid, SIGKILL);
+                hb_killed = 1;
+            }
+
             sleep_ms(POLL_MS);
             waited_ms += POLL_MS;
         }
         g_child = -1;
         if(r != pid) break;   /* waitpid 出错，退出循环 */
 
-        /* ---- 退出原因分类 ---- */
+        /* ---- 退出原因分类 ----
+         * ★ hb_hit 必须优先判断：应用被软狗 SIGTERM 后可能「优雅退出 code=0」，
+         *   若按正常退出处理就不会重启 —— 卡死的应用被拉起来一次就再也不管了。 */
         char exit_desc[64];
+        if(hb_hit) {
+            snprintf(exit_desc, sizeof(exit_desc), "heartbeat-timeout");
+        }
+
         if(WIFEXITED(st)) {
             int code = WEXITSTATUS(st);
-            snprintf(exit_desc, sizeof(exit_desc), "exit:%d", code);
-            if(code == 0) {
-                log_line("应用正常退出(code=0)，不重启");
-                status_write("stopped", exit_desc);
-                rc = 0;
-                break;
+            if(hb_hit) {
+                log_line("应用在心跳超时后退出(code=%d)，按异常处理并重启", code);
             }
-            log_line("应用异常退出 code=%d", code);
+            else {
+                snprintf(exit_desc, sizeof(exit_desc), "exit:%d", code);
+                if(code == 0) {
+                    log_line("应用正常退出(code=0)，不重启");
+                    status_write("stopped", exit_desc);
+                    rc = 0;
+                    break;
+                }
+                log_line("应用异常退出 code=%d", code);
+            }
         }
         else if(WIFSIGNALED(st)) {
             int sig = WTERMSIG(st);
-            snprintf(exit_desc, sizeof(exit_desc), "signal:%s(%d)", signal_name(sig), sig);
-            if(sig == SIGTERM || sig == SIGINT) {
+            if(!hb_hit) {
+                snprintf(exit_desc, sizeof(exit_desc), "signal:%s(%d)", signal_name(sig), sig);
+            }
+            if((sig == SIGTERM || sig == SIGINT) && !hb_hit) {
                 log_line("应用被 %s 停止（视为正常停止），不重启", signal_name(sig));
                 status_write("stopped", exit_desc);
                 rc = 0;
                 break;
             }
-            log_line("应用被 %s(%d) 杀死（异常）", signal_name(sig), sig);
+            log_line("应用被 %s(%d) 杀死（%s）", signal_name(sig), sig,
+                     hb_hit ? "心跳超时后终止" : "异常");
         }
         else {
-            snprintf(exit_desc, sizeof(exit_desc), "unknown");
+            if(!hb_hit) snprintf(exit_desc, sizeof(exit_desc), "unknown");
             log_line("应用以未知状态退出 st=%d", st);
         }
 

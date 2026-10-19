@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -36,7 +37,7 @@ static safe_err_t linux_init(uint32_t timeout_ms)
 
     s_fd = open(dev, O_WRONLY);
     if(s_fd < 0) {
-        printf("[WATCHDOG] 打开 %s 失败: %s（降级 null）\n", dev, strerror(errno));
+        printf("[WATCHDOG] 打开 %s 失败: %s（尝试软狗/占位后端）\n", dev, strerror(errno));
         return SAFE_ERR_UNSUP;
     }
 

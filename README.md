@@ -56,6 +56,39 @@ BusyBox init
 | supervisor | 进程崩溃、非 0 退出、反复崩溃后进安全态 | 进程还活着但卡死 |
 | 硬件看门狗 | 主循环卡死、死锁（停喂 → 复位整机） | 崩溃后由谁拉起（那是 supervisor） |
 
+### 没有硬件看门狗时（本项目的实际情况）
+
+板子上没有 `/dev/watchdog`，所以看门狗能力按三档降级：
+
+| 后端 | 能做什么 | 不能做什么 |
+|---|---|---|
+| `linux`（真狗） | 主循环停喂 → 超时复位整机 | 需要芯片/内核支持 |
+| `file`（软狗） | 心跳停 → supervisor 判定卡死 → 杀掉并重启应用 | 内核 panic、整机死机、supervisor 自己挂掉、断电 |
+| `null`（占位） | 保住调用链，便于 PC 跑同一份代码 | 没有任何检测能力 |
+
+选择规则：不指定 `SAFE_WATCHDOG_BACKEND` 时自动按 **linux → file → null** 降级。
+所以现在板子走 `file`；以后接了真狗或打开内核 WDOG，同一份代码会自动优先用真狗，不用改配置。
+
+软狗怎么工作：
+
+```
+应用主循环每拍 hal_watchdog_kick()（默认 1s 节流）→ 写 /var/run/safe_heartbeat
+supervisor 每秒看该文件 mtime
+  ├─ 超过 --heartbeat-timeout（默认 5s）没更新 → SIGTERM → 宽限后 SIGKILL → 按异常重启
+  ├─ 文件是 stopped → 应用正常退出，不重启
+  └─ 文件还没出现 → --heartbeat-startup（默认 20s）内不判死，避免初始化慢被误杀
+```
+
+**能力边界要说清楚**：软狗只能覆盖「进程活着但主循环卡死」，覆盖不了内核死机与整机断电。
+要补上那一层只有两条路：开 i.MX6ULL 内置 WDOG（内核 `CONFIG_IMX2_WDT` + 设备树使能），
+或加一颗外置看门狗芯片。先确认板子到底有没有：
+
+```sh
+ls /dev/watchdog*                        # 有没有设备节点
+zcat /proc/config.gz | grep -i IMX2_WDT  # 内核有没有编 SoC 看门狗驱动
+dmesg | grep -i wdog                     # 驱动有没有起来
+```
+
 ### 文件放哪
 
 | 内容 | 路径 |
@@ -125,6 +158,7 @@ tail -f /var/log/lvglsim.log          # 应用日志（行缓冲，崩溃不丢�
 | 反复重启 | `status` 里的 `last_exit` 与日志中的「异常退出」 | 应用崩溃（段错误/断言）、依赖文件缺失 | 拿 `last_exit=signal:SIGSEGV` 去查 core 与日志最后几行 |
 | 进了安全态（state=safe） | `/var/log/safe_state.log`、应用日志最后 20 行 | 60s 内崩溃超过 5 次 | 修好根因后 `S05safe restart` 人工恢复 |
 | 整机隔十几秒复位一次 | 串口内核日志有没有 watchdog reset | 应用卡死停喂狗，或安全态下 supervisor 没接管 | 确认主循环没死锁；看 supervisor 是否打印「已接管看门狗」 |
+| 应用被反复重启，日志有「心跳超时」 | `status` 的 `last_exit=heartbeat-timeout` | 主循环死锁 / 长时间阻塞（软狗判定） | 查应用日志最后几行；软狗不覆盖内核死机 |
 | 关机变成重启 | `[WATCHDOG] magic close` 相关日志 | stop 用了 KILL，没走优雅退出 | 用 `S05safe stop`，不要 `kill -9` |
 | 远程连不上 | `[CONFIG]` 的 TLS 项、`SAFE_MQTT_HOST` | CA/证书路径错、端口错、broker 地址漂了 | 先手工跑一次 `find_broker.py` |
 | 日志不增长 | `/var/log` 是否可写、`--app-log` 路径 | 分区满 / 权限不对 / 忘了 `--app-log` | `df -h`、`touch` 试写 |
@@ -137,8 +171,9 @@ tail -f /var/log/lvglsim.log          # 应用日志（行缓冲，崩溃不丢�
 2. `./safe_supervisor --app ./lvglsim --watchdog none --status /tmp/s.status --pidfile /tmp/s.pid`
    能起来，`kill -TERM` 后退出码 0。
 3. 故意让应用退出 1，确认 supervisor 会重启，并在超过上限后打印 `SAFE-STATE`。
-4. `ls -l /dev/watchdog` 存在；确认驱动超时时间（不同内核路径不同，可看 `dmesg`）。
-5. 手工 `kill -STOP <lvglsim pid>`，等超时确认整机复位（**这条会重启设备，最后再做**）。
+4. `ls /dev/watchdog`：有则确认日志是 `后端=linux`（真狗）；没有则确认是 `后端=file`（软狗）。
+5. 软狗验证：对 `lvglsim` 执行 `kill -STOP <pid>`，等 `--heartbeat-timeout`（默认 5s），
+   确认 supervisor 日志出现「心跳超时」并重启应用。要验真狗复位再单独做（**会重启设备，最后再做**）。
 6. 换成 `S05safe` 自启，断电重上电，确认界面起来且 `status` 里 `state=running`。
 
 ## FM225 人脸识别模组
@@ -176,7 +211,7 @@ lv_port_linux/
 
 **构建**：`./build_pc.sh`（PC/SDL）；
 交叉构建 `cmake -B build_board --toolchain cmake/arm-linux.cmake -DPython3_EXECUTABLE=/usr/bin/python3 && cmake --build build_board -j4`。
-**测试**：`ctest --test-dir build_pc`（28 项，含进程级 supervisor 行为测试）。
+**测试**：`ctest --test-dir build_pc`（29 项，含进程级 supervisor 行为测试与软狗测试）。
 **文档入口**：面向人看 README；面向 agent 看 `CLAUDE.md`（含目录禁区与省上下文纪律）；
 需求/设计看 `规约/需求规约.md` + `规约/技术路线规约.md`；排错先看 `规约/Bug案例集.md`（定位方法论），
 缺陷清单查 `规约/归档/Bug台账_全量.md`。

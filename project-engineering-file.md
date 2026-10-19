@@ -21,7 +21,7 @@
 | 界面 | LVGL v9（vendored 在 `lvgl/`） | 仓库 |
 | 远程 | 自研 MQTT 3.1.1 + mbedTLS（可选） | `app/core/remote/` |
 | 存储 | JSON 文件（`users.json` / `network.json` / `safe.log`），原子写 | `app/core/store/` |
-| 测试 | ctest 28 项（PC），含 8 组 supervisor 进程级用例 | `tests/` |
+| 测试 | ctest 29 项（PC），含 8 组 supervisor 进程级用例 + 软狗后端用例 | `tests/` |
 
 ## 3. 架构决策记录（ADR）
 
@@ -33,6 +33,7 @@
 | ADR-004 | 配置错误静默进入运行期 | 启动时集中校验，分三级：FATAL 不可降级 / FATAL 可降级 / WARN | 配错应在启动时暴露；但阈值越界不该让设备起不来 | 多一个模块与一套测试 | 已落地 |
 | ADR-005 | 重复启动会抢应用与看门狗 | `flock` 单实例 + `--daemon` 双 fork + pidfile | init 脚本可能被手工重复执行；两个 supervisor 会互相 kill | 需要可写的 `/var/run` | 已落地 |
 | ADR-006 | `--daemon` 后 stdio 指向 /dev/null，应用日志丢失 | supervisor `--app-log` 把子进程 stdout/stderr 接到文件；应用侧行缓冲 | 日志是排障第一现场；外部 `stdbuf` 在 Buildroot 不一定有 | 多一个参数 | 已落地 |
+| ADR-007 | 板子没有 `/dev/watchdog`，硬狗这层能力为空 | 加 `backend_file` 软狗：应用写心跳文件，supervisor 按 mtime 判卡死并重启；后端自动降级 linux→file→null | 至少覆盖「进程活着但主循环卡死」；有真狗时自动优先真狗 | 覆盖不了内核 panic / 整机死机 / 断电；需 supervisor 配合 | 已落地，PC 已验证 |
 
 ## 4. 模块清单与进度
 
@@ -48,6 +49,8 @@
 | `deploy/safe_supervisor.service` | 模板 | systemd 备用；未实测 |
 | `README.md` | 已完成 | 新增「生产运行」：进程模型 / 文件位置 / 命令 / 退出码 / 配置校验 / 排障表 / 上板清单 |
 | `tests/test_supervisor.sh` | 已完成 | 8 组进程级用例，随 ctest 跑（cc 缺失时 skip） |
+| `app/hal/watchdog/backend_file.c` | 已完成 | 软狗：写心跳文件；`tests/test_watchdog_file.c` 覆盖创建/kick/stop/降级 |
+| `supervisor --heartbeat` | 已完成 | 每秒查 mtime，超时重启；`test_supervisor.sh` 用例 9/10 覆盖误杀与不误杀 |
 
 ## 5. 接口约定
 
@@ -88,17 +91,18 @@ last_exit=exit:<code> | signal:<NAME>(<num>) | running | safe-state | supervisor
 
 | 风险 | 影响 | 现状 / 缓解 |
 |---|---|---|
-| 板子未接入 | 真狗、安全态、S05 均未实测 | 先按 README「上板自检清单」逐步验证；未验证前不要把 S05 切生产 |
-| `/dev/watchdog` 驱动差异 | `WDIOC_SETTIMEOUT` 可能被向上取整或拒绝 | 代码已容忍失败（沿用驱动默认），需在目标板 `dmesg` 确认实际超时 |
+| 板子未接入 | 软狗已在 PC 端到端验证；S05、安全态、真狗路径未上板 | 先按 README「上板自检清单」逐步验证；未验证前不要把 S05 切生产 |
+| 板子没有 `/dev/watchdog` | 只有软狗：内核 panic / 整机死机 / 断电无法复位 | 软狗覆盖主循环卡死；要整机级复位需开 SoC WDOG（`CONFIG_IMX2_WDT`）或加外置芯片 |
 | 安全态接管狗未实测 | 若驱动不允许二次 open，设备仍会复位 | `watchdog_takeover` 失败会明确记日志；这是无狗可接管时的最后手段 |
 | `safe_state.sh` 的 GPIO 未接 | 安全态只留痕、未真正保持锁闭 | 真锁接入后按注释补 sysfs 写值，并在板上 `echo` 验证引脚编号 |
 | systemd 模板未实测 | 参数组合可能与 systemd 生命周期冲突 | 已写 `RestartPreventExitStatus=2 3` 且不加 `--daemon`；上 systemd 板子前先手工跑 |
 | 日志轮转只保留一份历史 | 长时间崩溃循环会覆盖更早现场 | 崩溃循环本身会进安全态，日志量有限；需要长期留档时接 syslog |
+| 启动初始化期间收到 SIGTERM，退出可能很慢（PC 实测一次 81s，稳态 0.1~0.9s） | supervisor grace 5s 后会 SIGKILL，属可接受兜底；但真狗场景会跳过 magic close | 长初始化应在阶段之间检查退出标志（后续优化）；stop 尽量在应用稳定后执行 |
 | 配置校验只覆盖 `app_config_t` | `pin_min_len/pin_max_len` 由 store 自行钳制 | store 已有钳制逻辑；两处范围需同步维护 |
 
 ## 7. 待办
 
-1. 上板自检 6 步（README）：supervisor 手工跑 → 崩溃重启 → 安全态 → `/dev/watchdog` → `kill -STOP` 复位 → S05 断电重上电。
+1. 上板自检 6 步（README）：supervisor 手工跑 → 崩溃重启 → 安全态 → 确认后端=file（软狗）→ `kill -STOP` 验证心跳超时重启 → S05 断电重上电。
 2. S05 接线：确认板上现网 `S05lvgl` 的调用方式，替换为 `S05safe`（保留回滚脚本）。
 3. 真锁 GPIO：`safe_state.sh` 补拉低动作；`hal/actuator` 接 GPIO 后端。
 4. 72h 长跑：看门狗不误触发、fd/内存无增长、日志轮转生效。

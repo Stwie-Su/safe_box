@@ -72,6 +72,10 @@ safe_add_test(test_crypto)
 # 纯函数测试，不读环境变量、不启动 store；路径项用 mkdtemp 造临时目录。
 safe_add_test(test_config_validate)
 
+# 软狗后端（无 /dev/watchdog 时的降级方案）：心跳文件创建 / kick 更新 mtime /
+# stop 留标记 / 不可写时降级 null。
+safe_add_test(test_watchdog_file)
+
 # 分层检查：core 不碰 LVGL/平台头，hal 头文件不带平台实现，ui 不碰底层协议
 find_program(SAFE_BASH bash)
 if(SAFE_BASH)

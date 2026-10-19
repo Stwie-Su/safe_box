@@ -32,6 +32,7 @@ ExecStart=/usr/share/lvgl/safe_supervisor \
     --watchdog /dev/watchdog \
     --log /var/log/safe_supervisor.log --log-max 1048576 \
     --app-log /var/log/lvglsim.log \
+    --heartbeat /var/run/safe_heartbeat --heartbeat-timeout 5 --heartbeat-startup 20 \
     --status /var/run/safe_supervisor.status \
     --pidfile /var/run/safe_supervisor.pid
 

@@ -147,6 +147,33 @@ echo "== 用例 8：日志轮转 =="
     --watchdog none --pidfile "$TMP/s8.pid" --log "$TMP/s8.log" --log-max 200 -- crash >/dev/null 2>&1
 check "应生成轮转文件 .1" "[ -f '$TMP/s8.log.1' ]"
 
+echo "== 用例 9：软狗（心跳超时判定卡死）=="
+"$TMP/sup" --app "$TMP/app.sh" --max-restarts 0 --window 5 --restart-delay 20 \
+    --grace 1 --watchdog none \
+    --heartbeat "$TMP/no_such_heartbeat" --heartbeat-timeout 1 --heartbeat-startup 1 \
+    --status "$TMP/s9.status" --pidfile "$TMP/s9.pid" \
+    --log "$TMP/s9.log" -- hang "$TMP/s9.term" >/dev/null 2>&1
+rc=$?
+check "退出码应为 2（实际 $rc）" "[ $rc -eq 2 ]"
+check "日志应出现心跳超时" "grep -q '心跳超时' '$TMP/s9.log'"
+check "状态应为 safe" "grep -q '^state=safe' '$TMP/s9.status'"
+
+echo "== 用例 10：软狗不误杀会写心跳的应用 =="
+cat > "$TMP/hb_app.sh" <<'APP'
+#!/bin/sh
+while :; do date +%s%3N > "$1"; sleep 0.2; done
+APP
+chmod +x "$TMP/hb_app.sh"
+"$TMP/sup" --app "$TMP/hb_app.sh" --watchdog none \
+    --heartbeat "$TMP/hb_ok" --heartbeat-timeout 1 --heartbeat-startup 2 \
+    --pidfile "$TMP/s10.pid" --log "$TMP/s10.log" -- "$TMP/hb_ok" >/dev/null 2>&1 &
+SUP_PID=$!
+sleep 2.5
+check "持续写心跳时不应判定超时" "! grep -q '心跳超时' '$TMP/s10.log'"
+check "supervisor 应仍在运行" "kill -0 $SUP_PID 2>/dev/null"
+kill -TERM "$SUP_PID" 2>/dev/null
+wait "$SUP_PID" 2>/dev/null
+
 if [ "$fails" -ne 0 ]; then
     echo "[FAIL] test_supervisor（$fails 项未过）"
     exit 1

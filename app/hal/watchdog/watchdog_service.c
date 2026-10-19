@@ -2,9 +2,14 @@
  * @file watchdog_service.c
  * 看门狗分发层：选后端、降级、幂等守卫、喂狗节流、转发。
  *
- * 后端选择：环境变量 SAFE_WATCHDOG_BACKEND（linux / null），默认 linux；
- * /dev/watchdog 打不开（PC、无狗设备、权限不足）时自动降级 null——保证系统在任何环境下都能起来，
- * 与 camera / time / face 模块一致的降级策略。
+ * 后端选择：
+ *   - 显式指定 SAFE_WATCHDOG_BACKEND（linux / file / null）时只试该后端，失败降级 null；
+ *   - 未指定时按 **linux → file → null** 自动降级：
+ *       linux = /dev/watchdog 真狗（能复位整机）
+ *       file  = 软件狗（写心跳文件，由 supervisor --heartbeat 检查）
+ *       null  = 占位（PC / 无权限写 /var/run）
+ *   ★ 软狗不是硬件狗的等价替代：它只能让 supervisor 发现「进程卡死并重启」，
+ *     不能在内核 panic / 整机死机时复位设备。边界见 backend_file.c 头注释。
  *
  * 【为什么要节流】
  *   主循环 20ms 一拍，若每拍都真写一次 /dev/watchdog，等于每秒 50 次系统调用，纯浪费；
@@ -21,6 +26,7 @@
 #include "hal/hal_time.h"
 
 extern const hal_watchdog_backend_t hal_watchdog_backend_linux;
+extern const hal_watchdog_backend_t hal_watchdog_backend_file;
 extern const hal_watchdog_backend_t hal_watchdog_backend_none;
 
 static const hal_watchdog_backend_t * s_backend = &hal_watchdog_backend_none;
@@ -38,12 +44,32 @@ static const hal_watchdog_backend_t * find_backend(const char * name)
 {
     const hal_watchdog_backend_t * table[] = {
         &hal_watchdog_backend_linux,
+        &hal_watchdog_backend_file,
         &hal_watchdog_backend_none,
     };
     for(size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
         if(table[i] != NULL && (name == NULL || strcmp(table[i]->name, name) == 0)) return table[i];
     }
     return NULL;
+}
+
+/* 依次尝试自动降级链；返回实际生效的后端（none 兜底）。 */
+static const hal_watchdog_backend_t * pick_backend(uint32_t timeout_ms)
+{
+    const hal_watchdog_backend_t * chain[] = {
+        &hal_watchdog_backend_linux,
+        &hal_watchdog_backend_file,
+        &hal_watchdog_backend_none,
+    };
+
+    for(size_t i = 0; i < sizeof(chain) / sizeof(chain[0]); i++) {
+        safe_err_t e = chain[i]->init(timeout_ms);
+        if(e == SAFE_OK) return chain[i];
+        if(chain[i] != &hal_watchdog_backend_none) {
+            printf("[WATCHDOG] 后端 %s 不可用(%d)，尝试下一个\n", chain[i]->name, e);
+        }
+    }
+    return &hal_watchdog_backend_none;   /* 理论上不可达：null 的 init 恒成功 */
 }
 
 safe_err_t hal_watchdog_init(uint32_t timeout_ms)
@@ -57,14 +83,28 @@ safe_err_t hal_watchdog_init(uint32_t timeout_ms)
     }
 
     const char * want = getenv("SAFE_WATCHDOG_BACKEND");
-    const hal_watchdog_backend_t * b = find_backend((want != NULL && *want != '\0') ? want : "linux");
-    if(b == NULL) b = &hal_watchdog_backend_none;
+    const hal_watchdog_backend_t * b = NULL;
+    safe_err_t e = SAFE_OK;
 
-    safe_err_t e = b->init(timeout_ms);
-    if(e != SAFE_OK && b != &hal_watchdog_backend_none) {
-        printf("[WATCHDOG] 后端 %s 初始化失败(%d)，降级 null（不喂真狗）\n", b->name, e);
-        b = &hal_watchdog_backend_none;
-        e = b->init(timeout_ms);
+    if(want != NULL && *want != '\0') {
+        b = find_backend(want);
+        if(b == NULL) {
+            printf("[WATCHDOG] 未知后端 %s，降级 null\n", want);
+            b = &hal_watchdog_backend_none;
+            e = b->init(timeout_ms);
+        }
+        else {
+            e = b->init(timeout_ms);
+            if(e != SAFE_OK && b != &hal_watchdog_backend_none) {
+                printf("[WATCHDOG] 指定后端 %s 初始化失败(%d)，降级 null\n", b->name, e);
+                b = &hal_watchdog_backend_none;
+                e = b->init(timeout_ms);
+            }
+        }
+    }
+    else {
+        b = pick_backend(timeout_ms);
+        e = SAFE_OK;
     }
 
     s_backend = b;
