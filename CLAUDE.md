@@ -118,10 +118,11 @@ app/
 └── platform/       platform_sdl / fbdev / null、perf_probe、debug_hooks
 ports/lv_port/      LVGL 官方 Linux 移植层
 third_party/        aes、sha256、stb
-tests/              CTest（17 项：store 缓存/崩溃/P0、mqtt codec/fsm/inflight、rpc、
+tests/              CTest（28 项：store 缓存/崩溃/P0、mqtt codec/fsm/inflight、rpc、supervisor、
                     fm225_proto/enroll、auth_fsm、cred_reconcile、totp、auth_verify、
                     event_bus + check_layers、check_main_thread_store）
 tools/              自检 / 实验 / 字体再生成脚本
+deploy/             上板部署件（S05safe / safe_state.sh / systemd 单元模板）
 configs/            pc / board / board_3d 三套 defconfig
 cmake/              特性与版本模块 + 交叉编译工具链
 data/               PC 运行时数据（不入库）
