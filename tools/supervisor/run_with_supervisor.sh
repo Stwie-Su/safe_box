@@ -64,7 +64,8 @@ insmod /lib/modules/4.9.88/extra/ch341.ko 2>/dev/null
 
 # ---- 看门狗 ----
 # 板上没有 /dev/watchdog（无外置狗芯片 / 内核没开 SoC WDOG）时走软狗：
-#   应用主循环写心跳文件 → supervisor 检查 mtime，超时判定卡死并重启。
+#   应用主循环把单调时钟值写进心跳文件 → supervisor 读数值比较，超时判定卡死并重启。
+#   （用单调时钟而不是文件时间：这台设备有 RTC 校时和远程 sync_time，拨时钟会绕过判定。）
 # 不显式设 SAFE_WATCHDOG_BACKEND，让 HAL 自动降级：linux → file → null。
 # 以后接了真狗，什么都不用改（linux 能打开就优先用真狗）。
 export SAFE_WATCHDOG_FILE="${SAFE_WATCHDOG_FILE:-/var/run/safe_heartbeat}"
@@ -117,5 +118,5 @@ exec "$SUP" --app "$APP" --daemon \
     --app-log "${SAFE_APP_LOG:-/var/log/lvglsim.log}" \
     --heartbeat "${SAFE_WATCHDOG_FILE:-/var/run/safe_heartbeat}" \
     --heartbeat-timeout "${SAFE_HB_TIMEOUT:-5}" \
-    --heartbeat-startup "${SAFE_HB_STARTUP:-20}" \
+    --heartbeat-startup "${SAFE_HB_STARTUP:-30}" \
     --status "$STATUS" --pidfile "$PIDFILE"

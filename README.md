@@ -72,12 +72,18 @@ BusyBox init
 软狗怎么工作：
 
 ```
-应用主循环每拍 hal_watchdog_kick()（默认 1s 节流）→ 写 /var/run/safe_heartbeat
-supervisor 每秒看该文件 mtime
-  ├─ 超过 --heartbeat-timeout（默认 5s）没更新 → SIGTERM → 宽限后 SIGKILL → 按异常重启
-  ├─ 文件是 stopped → 应用正常退出，不重启
-  └─ 文件还没出现 → --heartbeat-startup（默认 20s）内不判死，避免初始化慢被误杀
+应用主循环每拍 hal_watchdog_kick()（默认 1s 节流）
+  → 把单调时钟毫秒值写进 /var/run/safe_heartbeat
+supervisor 每秒读这个值，与自己的单调时钟比
+  ├─ 超过 --heartbeat-timeout（默认 5s）没推进 → SIGTERM → 宽限后 SIGKILL → 按异常重启
+  ├─ 内容是 stopped → 应用正常退出，不重启
+  ├─ 文件不存在（真狗场景 / 还没启动起来）→ 只提示，不判死
+  └─ 启动宽限 --heartbeat-startup（默认 30s）内即使过期也再等等，避免初始化慢被误杀
 ```
+
+★ 为什么写单调时钟而不是文件修改时间：这台设备有 DS3231 校时，还有一条远程 `sync_time`
+能把系统时钟拨到任意点。用墙上时钟判定的话，把时钟往未来一拨，心跳就"永远不过期"，
+软狗被一条远程指令绕过。单调时钟不受校时影响，两边同一基准，比较才有效。
 
 **能力边界要说清楚**：软狗只能覆盖「进程活着但主循环卡死」，覆盖不了内核死机与整机断电。
 要补上那一层只有两条路：开 i.MX6ULL 内置 WDOG（内核 `CONFIG_IMX2_WDT` + 设备树使能），

@@ -9,9 +9,14 @@
  *   「应用周期写心跳 + 守护进程检查心跳是否过期」补上这一段。
  *
  * 【协议】
- *   应用：本后端每次 kick 往文件写一行毫秒时间戳（内容给人看）；
- *   守护：supervisor --heartbeat 指向同一路径，按**文件 mtime**判定是否过期
- *         （用 mtime 而不是内容，避免应用时钟被 NTP/RTC 调整时误判）。
+ *   应用：本后端每次 kick 往文件写一行**单调时钟**毫秒值（CLOCK_MONOTONIC）；
+ *   守护：supervisor --heartbeat 指向同一路径，读该数值并与自己的单调时钟比较。
+ *
+ * ★ 为什么写单调时钟而不是墙上时间 / 用文件 mtime 判：
+ *     这台设备有 DS3231 RTC 校时，还有一条远程 sync_time 指令能把系统时钟拨到任意点。
+ *     用墙上时钟做超时判定的话，把时钟往未来一拨，软狗就永远判不出卡死
+ *     （心跳时间比"现在"还新），等于被一条远程指令绕过。
+ *     单调时钟不受校时影响，两边是同一内核的同一基准，比较才有意义。
  *
  * 【能力边界（必须写清楚，别把它当硬件狗）】
  *   覆盖：主循环卡死、死锁、线程饿死、业务代码死循环 —— 心跳停 → supervisor 重启。
@@ -20,8 +25,9 @@
  *   因此：有真狗时优先用 linux 后端；软狗是「没有真狗时的降级方案」，不是等价替代。
  *
  * 【为什么不用 fsync】
- *   supervisor 读的是内核 inode 的 mtime，write 返回时已更新，不需要落盘；
- *   每 20ms~1s fsync 一次会白白磨损 flash，且拖慢主循环。
+ *   supervisor 与本机同一文件系统，pwrite 返回后读侧已经能看到新内容；
+ *   每 1s fsync 一次会白白磨损 flash，且拖慢主循环。
+ *   （心跳这种"丢了也就晚一拍"的数据，不值得为它付出 fsync 的代价。）
  */
 #include "watchdog_backend.h"
 
@@ -64,7 +70,7 @@ static safe_err_t file_kick(void)
     if(s_fd < 0) return SAFE_ERR_STATE;
 
     struct timespec ts;
-    if(clock_gettime(CLOCK_REALTIME, &ts) != 0) return SAFE_ERR_FAIL;
+    if(clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return SAFE_ERR_FAIL;
 
     long long ms = (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000L;
     char buf[32];

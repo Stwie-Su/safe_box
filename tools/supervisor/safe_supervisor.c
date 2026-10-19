@@ -77,7 +77,7 @@
 #define DEFAULT_LOG_MAX           (1024 * 1024)
 #define DEFAULT_PIDFILE           "/var/run/safe_supervisor.pid"
 #define DEFAULT_HB_TIMEOUT_SEC    5
-#define DEFAULT_HB_STARTUP_SEC    15
+#define DEFAULT_HB_STARTUP_SEC    30
 #define MAX_TRACKED               64
 #define POLL_MS                   100
 #define BACKOFF_MAX_FACTOR        8
@@ -115,52 +115,45 @@ static long long monotonic_ms(void)
     return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000L;
 }
 
-/* 墙上时钟（毫秒）：与文件 mtime 同源，算「心跳多久没更新」。 */
-static long long wall_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000L;
-}
-
-/* 心跳文件里是否已经写了 stopped（应用正常退出时留下）。
- * 正常退出不该被当成卡死再拉起来。读失败按「没有标记」处理。 */
-static int hb_is_stopped(void)
-{
-    if(g_hb_path == NULL) return 0;
-    int fd = open(g_hb_path, O_RDONLY);
-    if(fd < 0) return 0;
-
-    char buf[16] = {0};
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    return (n >= 7 && strncmp(buf, "stopped", 7) == 0) ? 1 : 0;
-}
-
-/* 软狗判定：
+/* 软狗判定：读心跳文件里的**单调时钟**毫秒值，与自己的单调时钟比较。
  *   1  = 心跳过期（应用卡死）
  *   0  = 正常
- *  -1  = 文件还没出现，但仍在启动宽限内（应用初始化中）
- * age_ms 回填「距上次心跳/启动的毫秒数」，便于日志说明。 */
+ *  -1  = 没有可判定的心跳 → **不判死**
+ *        （文件不存在：应用可能走真狗后端 / 还在启动；内容是 stopped；内容不可解析）
+ *
+ * ★ 为什么不用文件 mtime：mtime 是墙上时钟。这台设备有 RTC 校时，还有远程
+ *   sync_time 能把时钟拨到任意点——把时钟往未来一拨，软狗就永远判不出卡死。
+ *   单调时钟不受校时影响，两边同一基准，比较才有意义。
+ *
+ * ★ 为什么"没有心跳"不判死：以后接了真狗，应用根本不写这个文件；
+ *   若按「启动宽限到了就判死」，真狗场景下 supervisor 会反复杀掉正常的应用。
+ * age_ms 回填「心跳距今多少毫秒」，便于日志说明。 */
 static int hb_check(long long child_started_ms, long long * age_ms)
 {
     if(g_hb_path == NULL) return 0;
 
-    struct stat st;
-    if(stat(g_hb_path, &st) == 0) {
-        long long m = (long long)st.st_mtim.tv_sec * 1000LL + st.st_mtim.tv_nsec / 1000000L;
-        long long age = wall_ms() - m;
-        if(age_ms) *age_ms = age;
-        if(age > (long long)g_hb_timeout_s * 1000LL) {
-            if(hb_is_stopped()) return 0;
-            return 1;
-        }
-        return 0;
-    }
+    int fd = open(g_hb_path, O_RDONLY);
+    if(fd < 0) return -1;
 
-    long long age = monotonic_ms() - child_started_ms;
+    char buf[32] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+
+    if(n <= 0) return -1;
+    if(strncmp(buf, "stopped", 7) == 0) return -1;
+
+    char * end = NULL;
+    long long beat = strtoll(buf, &end, 10);
+    if(end == buf || beat <= 0) return -1;
+
+    long long now = monotonic_ms();
+    long long age = now - beat;
     if(age_ms) *age_ms = age;
-    return (age > (long long)g_hb_startup_s * 1000LL) ? 1 : -1;
+    if(age <= (long long)g_hb_timeout_s * 1000LL) return 0;
+
+    /* 过期了，但还在启动宽限内（应用初始化期间不更新心跳）→ 再等等 */
+    if(now - child_started_ms <= (long long)g_hb_startup_s * 1000LL) return 0;
+    return 1;
 }
 
 /* ------------------------------------------------------------------
@@ -348,7 +341,9 @@ static void enter_safe_state(const char * safe_cmd, const char * wd_dev, const c
     status_write("safe", "safe-state");
 
     /* 先接管狗再执行钩子：钩子若卡住，至少不会在 15s 后被整机复位。 */
-    int wd = watchdog_takeover(wd_dev, 15);
+    /* 安全态的狗要「松」一点：这里的目标是保持设备活着、锁闭、日志可查，
+     * 不是尽快复位。超时给 30s，避免安全动作钩子本身慢一点就被复位打断。 */
+    int wd = watchdog_takeover(wd_dev, 30);
 
     if(safe_cmd != NULL && *safe_cmd != '\0') {
         if(access(safe_cmd, X_OK) == 0) {
@@ -565,6 +560,11 @@ int main(int argc, char ** argv)
 
     int rc = 0;
     while(!g_stop) {
+        /* 每次拉起子进程前清掉上一次的心跳文件，两个原因：
+         *   ① 残留的 stopped 会让新进程在启动期被判成「正常退出」，卡死检测直接失效；
+         *   ② 残留的旧数值会让「距上次心跳」算成很久以前，一启动就被误杀。 */
+        if(g_hb_path != NULL) unlink(g_hb_path);
+
         pid_t pid = fork();
         if(pid < 0) {
             log_line("fork 失败: %s", strerror(errno));
@@ -606,6 +606,7 @@ int main(int argc, char ** argv)
          *   hb_hit/hb_killed —— 已 TERM / 已 KILL，防止每个轮询都重复发信号 */
         long long child_started_ms = monotonic_ms();
         long long last_check_ms = 0;
+        long long last_warn_ms = 0;
         long long hb_hit_ms = 0;
         int hb_hit = 0;
         int hb_killed = 0;
@@ -638,8 +639,12 @@ int main(int argc, char ** argv)
                     hb_hit = 1;
                     hb_hit_ms = nowm;
                 }
-                else if(hs == -1) {
-                    log_line("心跳文件尚未出现（启动宽限 %ds 内，继续等待）", g_hb_startup_s);
+                else if(hs == -1 && nowm - last_warn_ms >= 10000) {
+                    /* 没有可判定的心跳：应用走真狗后端 / 还在初始化 / 文件不可读。
+                     * 只提示不判死（判死会在真狗场景下反复误杀），且限频避免刷屏。 */
+                    last_warn_ms = nowm;
+                    log_line("未检测到心跳文件（应用可能使用真狗后端，或仍在初始化宽限 %ds 内）",
+                             g_hb_startup_s);
                 }
             }
             if(hb_hit && !hb_killed && nowm - hb_hit_ms >= (long long)grace * 1000LL) {

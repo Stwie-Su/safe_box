@@ -26,6 +26,19 @@ static void sleep_ms(int ms)
     nanosleep(&ts, NULL);
 }
 
+/* 读心跳文件里的数值（单调时钟毫秒）；读不到返回 -1。 */
+static long long read_beat(const char * path)
+{
+    FILE * f = fopen(path, "r");
+    if(f == NULL) return -1;
+    char buf[32] = {0};
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if(n == 0) return -1;
+    if(strncmp(buf, "stopped", 7) == 0) return -2;   /* 正常退出标记 */
+    return strtoll(buf, NULL, 10);
+}
+
 int main(void)
 {
     char path[] = "/tmp/safe_hb_test_XXXXXX";
@@ -45,16 +58,22 @@ int main(void)
     CHECK(stat(path, &st) == 0);
     CHECK(hal_watchdog_kick_count() >= 1);
 
-    /* ---- 2. kick 真的更新了 mtime（软狗判定就靠它）---- */
-    struct timespec old[2] = { { 1000, 0 }, { 1000, 0 } };
-    CHECK(utimensat(AT_FDCWD, path, old, 0) == 0);
-    CHECK(stat(path, &st) == 0);
-    CHECK(st.st_mtime == 1000);               /* 先确认已改到过去 */
+    /* ---- 2. kick 推进心跳数值（软狗判定就靠它）----
+     * 判据必须是「内容里的单调时钟值」，不是文件 mtime：
+     * 这台设备有 RTC 校时和远程 sync_time，墙上时钟会被拨动。 */
+    long long before = read_beat(path);
+    CHECK(before > 0);
 
-    sleep_ms(5);
+    sleep_ms(50);
     CHECK(hal_watchdog_kick() == SAFE_OK);
-    CHECK(stat(path, &st) == 0);
-    CHECK(st.st_mtime > 1000);                /* 心跳把时间拉回现在 */
+    long long after = read_beat(path);
+    CHECK(after > before);                    /* 心跳值向前推进 */
+
+    struct timespec ts_now;
+    clock_gettime(CLOCK_MONOTONIC, &ts_now);
+    long long now = (long long)ts_now.tv_sec * 1000LL + ts_now.tv_nsec / 1000000L;
+    CHECK(after <= now);                      /* 不能写未来时间 */
+    CHECK(now - after < 1000);                /* 且与本机单调时钟同源 */
 
     /* ---- 3. stop 留 stopped 标记：正常退出不能被当成卡死 ---- */
     CHECK(hal_watchdog_stop() == SAFE_OK);

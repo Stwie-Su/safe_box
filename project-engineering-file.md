@@ -33,6 +33,7 @@
 | ADR-004 | 配置错误静默进入运行期 | 启动时集中校验，分三级：FATAL 不可降级 / FATAL 可降级 / WARN | 配错应在启动时暴露；但阈值越界不该让设备起不来 | 多一个模块与一套测试 | 已落地 |
 | ADR-005 | 重复启动会抢应用与看门狗 | `flock` 单实例 + `--daemon` 双 fork + pidfile | init 脚本可能被手工重复执行；两个 supervisor 会互相 kill | 需要可写的 `/var/run` | 已落地 |
 | ADR-006 | `--daemon` 后 stdio 指向 /dev/null，应用日志丢失 | supervisor `--app-log` 把子进程 stdout/stderr 接到文件；应用侧行缓冲 | 日志是排障第一现场；外部 `stdbuf` 在 Buildroot 不一定有 | 多一个参数 | 已落地 |
+| ADR-008 | 软狗怎么判定才不会被绕过 / 不会误杀 | 心跳值写 **CLOCK_MONOTONIC**（不写墙上时间、不看文件 mtime）；supervisor 读内容与自身单调时钟比较；每次拉起子进程前 `unlink` 心跳文件；文件不存在或不可解析时**只提示不判死** | 设备有 RTC 校时与远程 `sync_time`，拨时钟会让「墙上时间判定」失效；真狗场景应用根本不写文件，判死就是误杀 | 启动期（默认 30s 宽限内）不判死，等于这段时间没有卡死检测 | 已落地 |
 | ADR-007 | 板子没有 `/dev/watchdog`，硬狗这层能力为空 | 加 `backend_file` 软狗：应用写心跳文件，supervisor 按 mtime 判卡死并重启；后端自动降级 linux→file→null | 至少覆盖「进程活着但主循环卡死」；有真狗时自动优先真狗 | 覆盖不了内核 panic / 整机死机 / 断电；需 supervisor 配合 | 已落地，PC 已验证 |
 
 ## 4. 模块清单与进度
