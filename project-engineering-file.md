@@ -107,8 +107,8 @@ last_exit=exit:<code> | signal:<NAME>(<num>) | running | safe-state | supervisor
 0. ~~实测板端启动耗时~~ 已完成（2026-10-20）：开机 → 应用启动 6.3s，应用初始化 ≈3s，进主循环 ≈9.5s。
 1. ~~上板自检 6 步~~ 已完成：自启 / 崩溃重启 / 软狗 / 安全态 / 优雅停机 / 单实例逐项实测，记录见 README「板上验收记录」。
 2. ~~S05 接线~~ 已完成：`S05safe` 已在板子上，`S05lvgl` 移至 `/root/rollback_20261019/`（**不能只改名**，`S??*` 仍会匹配，见 D49）。
-3. 真锁 GPIO：`safe_state.sh` 补拉低动作；`hal/actuator` 接 GPIO 后端。
-4. 72h 长跑：看门狗不误触发、fd/内存无增长、日志轮转生效。
+3. ~~真锁 GPIO~~ 已完成：`hal/actuator/backend_gpio.c`（sysfs，自动降级 mock）+ `safe_state.sh` 真拉低；板上 pin115 已导出为 out/0。**待硬件**：接锁后验证机械动作与行程。
+4. 72h 长跑：观测已装（`tools/soak_monitor.sh` → `/var/log/soak.log`，5 分钟一行），数据待攒满后判读。
 5. 若上 systemd 板子：实测 unit 文件，补 `WatchdogSec` 与 `sd_notify`（可选）。
-6. OTA 回滚与 supervisor 的联调：`ota_watchdog.sh` 已改为优先 `S05safe restart`，但**回滚流程本身尚未在板上完整跑一遍**（造一个坏版本 → 触发 45s 超时 → 确认新二进制生效且进程只剩一个）。
+6. ~~OTA 回滚联调~~ 已完成：造坏版本 → 45s 超时 → `rollback done` → md5 恢复、单进程、界面完整。
 7. 清理板上的历史遗留：`lvglsim.old` / `lvglsim.bak_*` / `run_page.sh`（不存在的 `S06lvglpage` 仍在 init.d 里每次启动报错）。
