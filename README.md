@@ -133,6 +133,12 @@ supervisor 每秒读这个值，与自己的单调时钟比
    再 `/etc/init.d/S05lvgl start`——那会被判成一次崩溃，而且 supervisor 会立刻把
    旧二进制再拉起来，刚回滚的版本反而没生效。`tools/ota_watchdog.sh` 已改为优先
    `/etc/init.d/S05safe restart`。
+3. **还要停掉出厂 HMI demo `/etc/init.d/S99myirhmi2`**。它的互斥条件是
+   `[ -f /etc/init.d/S05lvgl ]`——换了启动入口名之后这个判断翻转，出厂 demo `mxapp2`
+   会被拉起来，与我们的应用**同时写 `/dev/fb0`、同时读触摸 event1**：画面互相覆盖、
+   没有任何报错，表现是"左侧导航栏整块消失、卡片背后多条深色带"。该脚本同时负责
+   给 psplash 发 `QUIT`，所以停掉它以后要在 `safe_boot.sh` 里自己发，否则开机画面会一直占着 fb0。
+   应用启动时会扫 `/proc` 报告 fb0 的其他写者，日志里能直接看到判定（D52）。
 
 换板子/换内核后怎么确认：
 

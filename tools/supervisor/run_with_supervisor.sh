@@ -93,6 +93,13 @@ fi
 
 printf '\033[9;0]' > /dev/tty1 2>/dev/null
 
+# 关掉开机画面。psplash 由 /etc/init.d/rcS 在最早拉起，原本由厂家 demo 脚本
+# （S99myirhmi2）里的 psplash-write QUIT 收尾。我们不再启动那个 demo，
+# 就得自己发 QUIT —— 否则 psplash 一直活着占着 /dev/fb0（另一个抢屏写者）。
+if pidof psplash >/dev/null 2>&1; then
+    /usr/bin/psplash-write "QUIT" 2>/dev/null
+fi
+
 # ---- OTA 健康标记 + 回滚看门狗（只在整机启动时写一次）----
 date +%s > /usr/share/lvgl/.ota_pending
 if ! kill -0 "$(cat /var/run/ota_wd.pid 2>/dev/null)" 2>/dev/null; then
