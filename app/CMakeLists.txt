@@ -10,6 +10,11 @@ add_executable(lvglsim
     main.c
     app.c)
 
+# 版本头由构建阶段生成（cmake/SafeVersion.cmake），core/rpc.c 与 main.c 都包含它：
+# 必须显式声明依赖，否则可能先编译、后生成头文件，拿到的是上一次的内容。
+add_dependencies(safe_core version_header)
+add_dependencies(lvglsim version_header)
+
 target_include_directories(lvglsim PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_BINARY_DIR}/generated/app)
