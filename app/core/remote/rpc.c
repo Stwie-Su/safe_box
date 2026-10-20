@@ -93,6 +93,10 @@ static char *build_status(int code, const char *msg, const char *req_id, int use
     cJSON_AddNumberToObject(j, "user_count", user_count);
     cJSON_AddStringToObject(j, "time_src", hal_time_source() == TIME_SRC_RTC ? "rtc" : "sys");
     cJSON_AddNumberToObject(j, "mqtt_online", mqtt_is_connected() ? 1 : 0);
+    /* 与 LWT 的 {"online":0,...} 同名同义（D37）：retained 被顶掉之后，
+     * 订阅方仍按 online 读取，不会因为换了一份载荷就取不到字段。
+     * 两个字段值恒等（设备在线 == MQTT 已连）；保留 mqtt_online 是为了不破坏既有消费者。 */
+    cJSON_AddNumberToObject(j, "online", mqtt_is_connected() ? 1 : 0);
     cJSON_AddStringToObject(j, "fw", SAFE_VERSION_STRING);
     /* FR-23：模组健康纳入远程上报（ok / fail / unknown）。用 cJSON 拼串，不经过定长
      * 缓冲，天然规避 -Wformat-truncation。 */
@@ -114,6 +118,26 @@ void rpc_publish_status_now(void)
     store_cache_user_count(&user_count, NULL);
     char *s = build_status(0, NULL, NULL, user_count);
     if (s) { mqtt_publish("safe/status", s, 0, 0); free(s); }
+}
+
+/* D37：把「在线」写进 broker 的 retained 存储。
+ *
+ * 为什么必须单独发一条 retained：
+ *   LWT 是 retain=1 的 {"online":0,...}，断线时被 broker 存下来。重连后如果只发
+ *   **非 retained** 的周期状态（rpc_publish_status_now 的 qos0/retain0），
+ *   broker 里那条 retained 永远不会被覆盖 —— 新订阅者一上来读到的仍是「离线」，
+ *   只能等设备下一次 5s 周期上报「碰巧」纠正，而那份不是 retained，纠正不了存量。
+ *   所以要在连接建立的**那一刻**发一条 retain=1 的，把遗嘱顶掉。
+ *
+ * 为什么用 qos1：这条消息的价值全在"broker 必须存下来"，丢一次就等于没发；
+ *   LWT 本身就是 qos1，对称处理。
+ */
+void rpc_publish_status_retained(void)
+{
+    int user_count = 0;
+    store_cache_user_count(&user_count, NULL);
+    char *s = build_status(0, NULL, NULL, user_count);
+    if (s) { mqtt_publish("safe/status", s, 1, 1); free(s); }
 }
 
 void rpc_publish_event(const char *evt, const char *user, const char *detail, int res)

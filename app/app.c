@@ -155,6 +155,17 @@ void app_tick_fast(void)
     worker_poll();
     event_bus_pump();
     rpc_poll();
+
+    /* D37：连接建立的**那一拍**，立刻把 retained 状态刷成 online:1。
+     * 只用上升沿触发：mqtt_is_connected() 每 20ms 都会被读，每拍都发等于刷屏。
+     * 放在主线程而不是 MQTT 线程：这里要读 store 缓存快照并序列化 JSON，
+     * 这两件事都归主线程（QA-20 不变式），别把 JSON 构造塞进网络线程。 */
+    {
+        static int was_online = 0;
+        int online = mqtt_is_connected() ? 1 : 0;
+        if(online && !was_online) rpc_publish_status_retained();
+        was_online = online;
+    }
     /* hal_face_tick 保留在主线程作后端驱动（b3 取简，理由见 face_thread.c 头注释）；
      * 相机采集与格式转换已移入 face 线程，主线程不再做帧转换。
      * now_ms 必须与后端内部的 hal_time_ms() 同源（见 face_backend.h 接口约定）：此前传

@@ -38,6 +38,10 @@ void rpc_poll(void);
 /* 周期上报状态（5s 定时器调用）。 */
 void rpc_publish_status_now(void);
 
+/* 发一条 qos1 + retain=1 的状态（D37）：连接建立时用来覆盖 LWT 留下的 online:0。
+ * 与 rpc_publish_status_now 的区别只在 retain 标志，语义见 rpc.c 里的说明。 */
+void rpc_publish_status_retained(void);
+
 /* 事件上报：由 auth_fsm 的 event_cb 调用，转发到 safe/log（含 UNLOCK/DENY/LOCKOUT）。 */
 void rpc_publish_event(const char *evt, const char *user, const char *detail, int res);
 
