@@ -2,20 +2,47 @@
  * @file actuator_service.c
  * 执行器分发层：NFR-7 的 500ms 上限在这里强制截断，后端不必重复防御。
  *
- * 阶段 3 接 GPIO 时：实现 actuator_gpio.c 并把默认后端换掉，
- * auth_fsm 与 UI 调用的接口不变。
+ * 后端选择（SAFE_ACTUATOR_BACKEND）：
+ *   gpio  = 真实继电器（sysfs /sys/class/gpio）
+ *   mock  = 只打日志，PC 与未接线阶段用
+ *   不指定 = **优先 gpio，不可用则回退 mock**（PC 上 /sys/class/gpio 不存在；
+ *            板上引脚若被设备树里其它驱动占用，export 也会失败）。
+ * 与相机 / 时间 / 看门狗同构：运行期选择 + 失败降级，业务层一行都不用改。
  */
 
 #include "actuator_backend.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 extern const hal_actuator_backend_t hal_actuator_backend_mock;
+extern const hal_actuator_backend_t hal_actuator_backend_gpio;
 
 static const hal_actuator_backend_t * s_backend = &hal_actuator_backend_mock;
 static bool s_high;
 
 safe_err_t hal_actuator_init(void)
 {
+    const char * want = getenv("SAFE_ACTUATOR_BACKEND");
+
     s_high = false;
+
+    if(want != NULL && strcmp(want, "mock") == 0) {
+        s_backend = &hal_actuator_backend_mock;
+        return s_backend->init();
+    }
+    if(want != NULL && strcmp(want, "gpio") == 0) {
+        /* 显式指定就认账：失败如实返回，不悄悄换成 mock 让人以为锁能动 */
+        s_backend = &hal_actuator_backend_gpio;
+        return s_backend->init();
+    }
+
+    s_backend = &hal_actuator_backend_gpio;
+    if(s_backend->init() == SAFE_OK) return SAFE_OK;
+
+    printf("[ACTUATOR] gpio 不可用，回退 mock（PC 或引脚被占用）\n");
+    s_backend = &hal_actuator_backend_mock;
     return s_backend->init();
 }
 

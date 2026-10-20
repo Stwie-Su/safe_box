@@ -75,6 +75,9 @@ safe_add_test(test_config_validate)
 # 软狗后端（无 /dev/watchdog 时的降级方案）：心跳文件创建 / kick 更新 mtime /
 # stop 留标记 / 不可写时降级 null。
 safe_add_test(test_watchdog_file)
+# 执行器 GPIO 后端：方向 / 初始低电平 / 脉冲到点拉低 / 强制拉低 / 降级链。
+# 用临时目录造一棵假 sysfs 树（SAFE_GPIO_ROOT），真机没接锁也能验时序。
+safe_add_test(test_actuator_gpio)
 
 # 分层检查：core 不碰 LVGL/平台头，hal 头文件不带平台实现，ui 不碰底层协议
 find_program(SAFE_BASH bash)

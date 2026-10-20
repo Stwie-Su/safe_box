@@ -18,6 +18,9 @@ set(SAFE_HAL_SRC
     time/backend_rtc.c
     actuator/actuator_service.c
     actuator/backend_mock.c
+    # 真实继电器（sysfs GPIO）。与 mock 同接口，SAFE_ACTUATOR_BACKEND 运行期切换，
+    # 未指定时优先 gpio、失败回退 mock；PC 与板子编同一份代码。
+    actuator/backend_gpio.c
     storage/storage_service.c
     camera/camera_service.c
     camera/backend_none.c

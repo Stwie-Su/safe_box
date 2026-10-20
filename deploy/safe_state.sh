@@ -20,14 +20,25 @@
 logger -t safe "SAFE-STATE: 反复崩溃，保持锁闭等待人工介入" 2>/dev/null
 echo "$(date '+%Y-%m-%d %H:%M:%S') SAFE-STATE 保持锁闭" >> /var/log/safe_state.log 2>/dev/null
 
-# 保持锁闭：把执行器输出拉到「不开锁」电平。
-# ★ 真锁接入后按实际 GPIO 编号修改；当前板上没有该节点，失败不影响流程。
-#   GPIO4_19 对应 Linux 全局编号 = (4 - 1) * 32 + 19 = 115（i.MX6ULL 常见算法，
-#   以实际 /sys/class/gpio 导出结果为准；不要照抄，先在板子上 echo 验证）。
-# if [ -d /sys/class/gpio/gpio115 ]; then
-#     echo low > /sys/class/gpio/gpio115/direction 2>/dev/null
-#     echo 0   > /sys/class/gpio/gpio115/value     2>/dev/null
-# fi
+# 保持锁闭：把执行器输出拉到「不开锁」电平（低 = 锁闭，见 hal_actuator.h）。
+# 引脚与 sysfs 根目录跟应用共用同一组环境变量，避免两处各写一个编号：
+#   应用侧 hal_actuator（backend_gpio.c）读的也是 SAFE_GPIO_ROOT / SAFE_ACTUATOR_GPIO。
+# GPIO4_19 全局编号 = (4-1)*32 + 19 = 115（i.MX6ULL 常见算法）——以板上实际
+# 导出结果为准，换接线只改环境变量，不改脚本。
+GPIO_ROOT=${SAFE_GPIO_ROOT:-/sys/class/gpio}
+GPIO_PIN=${SAFE_ACTUATOR_GPIO:-115}
+GPIO_VAL="$GPIO_ROOT/gpio$GPIO_PIN/value"
+if [ -w "$GPIO_VAL" ]; then
+    if echo 0 > "$GPIO_VAL" 2>/dev/null; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') SAFE-STATE 已拉低 GPIO$GPIO_PIN（保持锁闭）" >> /var/log/safe_state.log 2>/dev/null
+        logger -t safe "SAFE-STATE: GPIO$GPIO_PIN 已拉低" 2>/dev/null
+    else
+        echo "$(date '+%Y-%m-%d %H:%M:%S') SAFE-STATE 拉低 GPIO$GPIO_PIN 失败" >> /var/log/safe_state.log 2>/dev/null
+    fi
+else
+    # 引脚还没导出（真锁未接入 / 被其它驱动占用）：只记录，不影响流程
+    echo "$(date '+%Y-%m-%d %H:%M:%S') SAFE-STATE 未找到 $GPIO_VAL（真锁未接入？）" >> /var/log/safe_state.log 2>/dev/null
+fi
 
 # 安全态下无人工介入不应自动恢复：不重启应用、不清理日志。
 exit 0
