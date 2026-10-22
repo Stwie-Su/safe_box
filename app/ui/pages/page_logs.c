@@ -26,7 +26,7 @@
  *   - 主题切换：全工程 theme_change_cb 槽位（THEME_CB_MAX=4）已被 topbar / rail /
  *     monitor / face 占满，本页无法再注册；改为在轮询里比较 theme_idx()，变化即
  *     刷新本地颜色并强制重建列表（页面隐藏时也在跑，切回时已是新配色）；
- *   - 颜色 100% 走 theme_color(TH_*) / st_* 样式，零硬编码 hex（CLAUDE.md §8）。
+ *   - 颜色 100% 走 theme_color(TH_*) / st_* 样式，零硬编码 hex（README「代码约定与安全红线」）。
  */
 #include "page_logs.h"
 #include "ui/ui.h"

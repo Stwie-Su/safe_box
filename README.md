@@ -12,6 +12,15 @@ IPC、串口二进制协议状态机、socket 网络编程、掉电安全持久�
 - 人脸识别模组：FM225（海凌科 HLK，UART 串口协议，识别在模组端完成）
 - 构建：Buildroot 交叉编译 + PC（SDL2）验证优先
 
+### 硬件接入对照
+
+| 硬件 | 状态 | 改动位置 | 业务代码 |
+|---|---|---|---|
+| FM225 人脸模组 | ✅ 已接入 | `app/hal/face/backend_fm225.c` + `fm225_proto.c`（UART 帧解析）+ `-DSAFE_FACE_BACKEND=fm225` | 不动 |
+| 摄像头预览 | ✅ 已接入 | `app/hal/camera/backend_v4l2.c`（UVC 自动扫描 + MJPG，旋转 `SAFE_CAMERA_ROT`） | 不动 |
+| DS3231 RTC | ✅ 已可用 | `app/hal/time/backend_rtc.c`（`SAFE_RTC_DEV=/dev/rtc0`） | 不动 |
+| 电磁锁 / 继电器 | ✅ 后端已接 | `app/hal/actuator/backend_gpio.c`（sysfs，板端 pin115）+ `safe_state.sh` 安全态真拉低；待接锁验证机械动作 | 不动 |
+
 ## 功能
 
 - 三角色用户模型（主管理员 / 普通用户 / 临时用户-限量限时）
@@ -21,18 +30,104 @@ IPC、串口二进制协议状态机、socket 网络编程、掉电安全持久�
 - 远程指令权限分级：自研 MQTT 3.1.1 客户端（协议编解码 / 在途队列 / 状态机，mbedTLS 双向 TLS）+ rpc_guard 凭据鉴权与去重
 - 五套可切换主题（石墨黑 / 月白 / 蓝白 / 松石青 / 浅蓝，默认浅蓝）
 - 相机预览（UVC）、模组健康与降级、启动对账
+- 生产化守护链路：supervisor（崩溃重启 / 限速 / 安全态）+ 软狗 + 硬件看门狗 + OTA 回滚
+
+## 开发纪律（规约驱动，硬约束）
+
+全部文档在 `docs/`，改动顺序是硬约束：**需求规约 → 技术路线规约 → 代码**。先改代码再补文档，是本项目反复吃亏的根源。
+
+1. 动手前先读《技术路线规约》相关节；冲突以规约为准（规约错了先改规约）。
+2. 一次只做一件事，做完验证再开下一件；不跳步、不凭记忆猜当前状态（结论必须落在文档或 commit 里）。
+3. 接口签名变更**先回改技术路线规约 §5，再改代码**。
+
+### Bug 台账维护（强制）
+
+修完任何缺陷——**包括自己这次引入的回归**——立即在 `docs/bug与优化/Bug台账_全量.md` 加一行四列（现象 / 根因 / 解法 / 教训），编号照领不遮掩；**没写进去 = 没复盘**。新增前先看台账头部标注的「下一个可用编号」并跑撞号自检（本项目撞号撞过两次）。根因有深度、值得展开讲的，再补进同目录 Bug案例集正文。
+
+### 收尾三查
+
+ctest 全绿**证明不了**可复现：① 核对构建引用的 `.c` 都在 `git ls-files`；② `git status --short` 确认无孤儿未跟踪文件（本项目反复踩过）；③ 涉及板端时 `cmake --build build_board` 过一遍。
 
 ## 构建
 
 ```bash
-# PC 验证（SDL2 后端）
+# PC 验证（SDL2 后端；build_pc.sh 即以下命令的便捷包装）
 ./build_pc.sh
+# 等价完整命令：
+cmake -B build_pc -DLV_PORT_DEFCONFIG=configs/pc.defconfig .
+cmake --build build_pc -j$(nproc)
+ctest --test-dir build_pc --output-on-failure        # 30 项
 
-# 交叉编译（板子，完整命令与环境变量见 CLAUDE.md §5）
+# PC + MQTT over TLS（build_tls = pc.defconfig + 双开关）
+cmake -B build_tls -DLV_PORT_DEFCONFIG=configs/pc.defconfig \
+  -DSAFE_FEATURE_MQTT=ON -DSAFE_FEATURE_MQTT_TLS=ON .
+cmake --build build_tls -j$(nproc)
+
+# 无桌面登录时（DISPLAY=:0 不可用）
+Xvfb :99 -screen 0 1280x800x24 & DISPLAY=:99 ./build_pc/bin/lvglsim
+
+# 跑单个测试
+ctest --test-dir build_pc -R test_fm225_proto --output-on-failure
+
+# FM225 真模组启动器（单实例守卫 + by-id 稳定串口 + 相机自动扫描）
+./run_fm225.sh
+
+# 开发板（交叉编译，产物 build_board/bin/lvglsim）
+BR=~/100ask_imx6ull-sdk/Buildroot_2020.02.x
+export PATH=~/tools/cmake-3.22.1-linux-x86_64/bin:$BR/output/host/bin:$PATH
 cmake -B build_board -DLV_PORT_DEFCONFIG=configs/board.defconfig \
-  -DCMAKE_TOOLCHAIN_FILE=cmake/user_cross_compile_setup.cmake .
+  -DCMAKE_TOOLCHAIN_FILE=cmake/user_cross_compile_setup.cmake \
+  -DPython3_EXECUTABLE=/usr/bin/python3 .
 cmake --build build_board -j$(nproc)
 ```
+
+⚠ `-DPython3_EXECUTABLE` **必须指向宿主机 `/usr/bin/python3`**：Buildroot host 的 python3 stdlib 路径坏死，CMake `find_package(Python3)` 用 `-c` 探测解释器必失败（实测 2026-10-02，换宿主机 python3 后一次通过）。
+
+配置差异全由 defconfig 决定，源码不出现平台判断。可选特性（`cmake/SafeFeatures.cmake`，缺依赖自动降级、不会让构建失败）：`SAFE_FEATURE_MQTT`（PC 自动探测）/ `SAFE_FEATURE_MQTT_TLS` / `SAFE_FACE_BACKEND=fake|fm225|none` / `SAFE_BUILD_TESTS`（PC ON、交叉 OFF）/ `SAFE_DATA_DIR`（PC `data/`，板子 `/var/lib/safe`）。
+
+调试环境变量（以 `grep -r 'getenv("SAFE_' app` 为准）：`SAFE_DATA_DIR`、`SAFE_TEST_PAGE`（HOME/LOGS/SETTINGS/USERS/NETWORK/SYSTEM/KEYPAD/FACE）、`SAFE_TEST_THEME`、`SAFE_TEST_DLG`（add_user|auth|change_pwd）、`SAFE_TEST_SHOT` / `SAFE_TEST_SHOT_MS`、`SAFE_TEST_UNLOCK=1`、`SAFE_TEST_TRANS_MS` / `SAFE_TEST_TRANS_PAGE`、`SAFE_TEST_FACE`、`SAFE_ICON_CHECK`、`SAFE_PERF_LOG=1`、`SAFE_MQTT_HOST|PORT`、`SAFE_MQTT_OFF=1`、`SAFE_FACE_BACKEND` / `SAFE_FACE_DEV` / `SAFE_FM225_DEV`（真模组串口，建议 by-id 路径）、`SAFE_FACE_PREVIEW_SCALE`、`SAFE_CAMERA_BACKEND` / `SAFE_CAMERA_DEV` / `SAFE_CAMERA_ROT`、`SAFE_TIME_BACKEND` / `SAFE_RTC_DEV`、`SAFE_NET_BACKEND` / `SAFE_WPA_CTRL`、`SAFE_WATCHDOG_BACKEND` / `SAFE_WATCHDOG_TIMEOUT_MS`、`SAFE_CONFIG_STRICT`。
+
+辅助脚本：`tests/test_supervisor.sh`（supervisor 进程级行为，ctest 自动跑）、`deploy/S05safe`（开机自启）、`tools/fm225_selftest.py`（不启主程序的串口链路 30 秒自检）、`tools/crash_consistency_test.sh`（store 崩溃一致性长跑）、`tools/mqtt_lab.py`（MQTT 本地实验）、`tools/cam_probe.c`（相机能力探测）、`tools/check_layers.sh` / `tools/check_main_thread_store.sh`（分层与线程纪律门禁）。
+
+## 代码约定与安全红线
+
+分层规则（违反会被 `ctest -R check_layers` 拦下）：
+
+1. `app/core/**` 禁 `lvgl.h`、`<linux/...>`、`SDL2`、`cJSON`（`remote/` 除外）。
+2. `app/hal/*.h` 只放类型与声明，不带平台头文件。
+3. `app/ui/**` 只做渲染与事件绑定；判定下沉 core，硬件动作下沉 hal。
+4. `app/main.c` 只做引导；周期任务由 `app.c` 暴露纯 C 节拍函数，main 用 `lv_timer` 挂载。
+
+代码约定：
+
+- **颜色**一律来自 `THEMES[]` + `st_xxx` 样式，页面不写死 hex；切主题用 `theme_switch()`。
+- **存储**业务只调 `user_*` / `net_*` / `log_*`，底层 JSON，将来换 SQLite 只改实现。
+- **字体**只写 `app_font(14/16/20/28)`；PC 走 FreeType、板子走嵌入位图。
+- **线程**：LVGL API 只在主线程；阻塞任务走 `worker_post`，结果在 `worker_poll()` 回调；跨线程事件 `event_bus_post()`，主线程 `event_bus_pump()` 派发。
+- **错误码**模块间统一 `safe_err_t`；认证域保留 `auth_result_t`（映射 RPC 错误码）。
+- **图标**统一 `app/ui/icons.h`；子对象带 `UID_MAGIC` tag，主题切换 `lv_obj_tree_walk` 一次性染色；斜线 / × 用 `lv_line`，不用旋转矩形。
+- **开锁判定**：`is_unlocked_now() = hal_actuator_state() || auth_fsm_state() == FSM_UNLOCKED`。不能只用 actuator_state——脉冲 500ms 后拉低会误判回「已上锁」。
+- **LVGL label** 创建后立刻 `lv_label_set_text(x, "")`，否则默认占位「Text」会露出。
+
+安全红线：
+
+- PIN 只存 PBKDF2-SHA256 哈希 + 随机盐，不存明文、不做可逆加密。
+- 敏感操作（增删用户、通道开关、改阈值、远程开锁）执行前需管理员 TOTP 二次确认。
+- TOTP 一码一用（`last_otp_counter` 递增防重放），±1 窗口容忍。
+- 执行器脉冲上限 500ms 由 `hal_actuator_pulse()` 强制截断。
+- 删除用户后必须仍保留 ≥1 个启用管理员（`user_del` 内已校验）。
+- 临时用户到期 / 次数用尽直接删除记录（含人脸凭据）（FR-9）。
+
+## 已知坑（踩过换来的）
+
+- **PC 通过 ≠ 板端通过**：PC 截图是 2× 缩放，会掩盖绝对像素 bug（D25 教训）。
+- VM 桌面未登录时 `DISPLAY=:0` 不可用，SDL 初始化会在 LVGL 内部崩溃（非代码 bug）→ 用 `Xvfb :99` + `DISPLAY=:99`。
+- LVGL 内部宏（如 `LV_USE_SDL`）不保证传播到应用层 → 用构建系统显式定义的 `SAFE_PLATFORM_PC` / `SAFE_HAVE_SNAPSHOT`。
+- `store_set_dir()` 会规范化尾斜杠；拼路径仍以 `store_dir()` 为唯一来源。
+- 板子息屏：内核 `consoleblank` 是只读参数，应用层用 `KDSETMODE KD_GRAPHICS` + `FBIOBLANK` 轮询保活（`platform_fbdev.c`，别删）。
+- 板子单核 A7：视频预览锁 320×240，MQTT 周期上报 5s，`SAFE_PERF_LOG=1` 查主循环耗时。
+- 改密键盘弹不出：`lv_keyboard` 必须 `lv_keyboard_set_textarea()` 绑定，且建在顶层图层。
+- 交叉配置的 Python3 必须用宿主机的（原因见「构建」节警告框）。
 
 ## 生产运行（上板部署）
 
@@ -177,7 +272,7 @@ tail -f /var/log/lvglsim.log          # 应用日志（行缓冲，崩溃不丢�
 ```
 
 支持 systemd 的系统用 `deploy/safe_supervisor.service`。两处关键差异写在单元文件注释里：
-不要加 `--daemon`（systemd 自己管后台），并且要 `RestartPreventExitStatus=2 3`
+不要加 `--daemon`（systemd 自己管后台），并且要 `RestartPreventExitCodes=2 3`
 （安全态与「已有实例」不能触发 systemd 重启，否则安全态会被绕过）。
 
 ### 退出码
@@ -239,7 +334,7 @@ tail -f /var/log/lvglsim.log          # 应用日志（行缓冲，崩溃不丢�
 
 FM225 的识别在模组端完成，板子通过 UART 收发指令帧。本项目 `app/hal/face/` 下的协议
 状态机与 `tools/` 下的自检/模拟脚本为**自行逆向的成果**。海凌科官方手册与官方调试工具为
-厂商私有资料，**未包含在本仓库**，请向厂商获取（本地开发环境置于 `资料/`，该目录不入库）。
+厂商私有资料，**未包含在本仓库**，请向厂商获取（本地开发环境置于 `~/桌面/中间产物/06_资料/`，不入库）。
 
 ## 许可证
 
@@ -253,14 +348,17 @@ lv_port_linux/
 ├─ app/            产品源码（分层：ui / core / hal / platform）
 │  ├─ ui/          页面与组件（pages/ 走 file(GLOB)，新增文件自动纳入构建）
 │  ├─ core/        业务核心（auth / store / remote / support）
-│  ├─ hal/         硬件抽象（camera / face / net / time / storage / actuator）
+│  ├─ hal/         硬件抽象（camera / face / net / time / storage / actuator / watchdog）
 │  └─ platform/    PC(SDL) 与板端(FBDEV) 双平台后端
-├─ configs/        Kconfig 双平台 defconfig（pc / board）
+├─ configs/        Kconfig 双平台 defconfig（pc / board / board_3d）
 ├─ cmake/          工具链与平台 CMake 片段
 ├─ deploy/         上板部署件：S05safe / safe_state.sh / systemd 单元模板
+├─ docs/           全部文档（规约驱动）
+│  ├─ 规约/        需求规约（what）/ 技术路线规约（how）/ 技术路线对比（为什么这么选）
+│  ├─ bug与优化/   Bug案例集（面试版方法论）+ Bug台账（全量，活文档，每修必加）
+│  └─ 存档/        案例原稿、Bug 整理等只读历史，不再更新
 ├─ tests/          ctest 用例（纯逻辑 + 进程级行为，可确定性验证）
-├─ tools/          构建/部署/排查脚本（含 OTA、证书、抓屏、服务发现）
-├─ 规约/           需求规约 / 技术路线规约 / Bug案例集 + 归档/（全量 Bug 台账）
+├─ tools/          构建/部署/排查脚本（含 OTA、证书、抓屏、服务发现、supervisor）
 ├─ lvgl/           LVGL 子模块（63M，**不要 grep**）
 ├─ ports/          LVGL 官方移植层头文件（platform/CMakeLists 引用）
 ├─ third_party/    第三方源码：stb_image / aes / sha256（camera 与 crypto 使用）
@@ -268,11 +366,4 @@ lv_port_linux/
 └─ build_board/    交叉构建产物（gitignore）
 ```
 
-**构建**：`./build_pc.sh`（PC/SDL）；
-交叉构建 `cmake -B build_board --toolchain cmake/arm-linux.cmake -DPython3_EXECUTABLE=/usr/bin/python3 && cmake --build build_board -j4`。
-**测试**：`ctest --test-dir build_pc`（29 项，含进程级 supervisor 行为测试与软狗测试）。
-**文档入口**：面向人看 README；面向 agent 看 `CLAUDE.md`（含目录禁区与省上下文纪律）；
-需求/设计看 `规约/需求规约.md` + `规约/技术路线规约.md`；排错先看 `规约/Bug案例集.md`（定位方法论），
-缺陷清单查 `规约/归档/Bug台账_全量.md`。
-
-厂商资料（PDF）不入库，已移至 `~/桌面/中间产物/06_资料/`。
+**文档入口**：需求 / 设计看 `docs/规约/需求规约.md` + `docs/规约/技术路线规约.md`（改动顺序硬约束：需求 → 技术路线 → 代码）；选型依据看 `docs/规约/技术路线对比.md`；排错先看 `docs/bug与优化/Bug案例集.md`（定位方法论），缺陷清单查 `docs/bug与优化/Bug台账_全量.md`（修完必加一行）；`docs/存档/` 只读不改写。

@@ -6,7 +6,7 @@
  *  - 横幅挂在 ui.c 的常驻 overlay 上（跨页存活）——LOCKOUT 时 FSM 会强制切回
  *    主页，若各页面自订订阅会丢事件，故集中到本模块；
  *  - 只经 event_bus 订阅（EV_FACE_EVENT / EV_AUTH_RESULT），不 include core 内部头；
- *  - 颜色一律来自 theme_color()，无写死 hex（CLAUDE.md §8 色彩铁律）；
+ *  - 颜色一律来自 theme_color()，无写死 hex（README 色彩铁律）；
  *  - 动效参数全部取自 ui_anim.h（A7 单核预算：横幅 ~64px 高小条，单段 ≤250ms）。
  */
 #pragma once

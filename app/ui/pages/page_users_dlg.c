@@ -1389,7 +1389,7 @@ static const char * face_err_hint(bool enroll, safe_err_t e)
     }
 }
 
-/* face_id 写回 users.json —— 文件 IO 下沉 worker 线程，主线程不阻塞（CLAUDE.md §8） */
+/* face_id 写回 users.json —— 文件 IO 下沉 worker 线程，主线程不阻塞（README「代码约定与安全红线」） */
 static void face_set_worker(void * p)
 {
     user_op_job_t * a = (user_op_job_t *)p;

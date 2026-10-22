@@ -31,7 +31,6 @@ build_board_test/
 # 本地工具/插件产物（不随源码入库）
 .claude/
 __pycache__/
-docs/
 
 # 开源前补漏：构建产物/凭据/IDE
 build_asan/

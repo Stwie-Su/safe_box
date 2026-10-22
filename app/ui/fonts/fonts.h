@@ -1,6 +1,6 @@
 /**
  * @file fonts.h
- * 字体统一入口（DESIGN.md §4 / CLAUDE.md）。
+ * 字体统一入口（README「代码约定」）。
  *
  * 设计要点：
  *  - PC 阶段用 FreeType 从系统 Noto CJK 动态渲染，避免嵌入位图字体缺字；
