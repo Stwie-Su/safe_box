@@ -108,6 +108,7 @@ cmake --build build_board -j$(nproc)
 - **图标**统一 `app/ui/icons.h`；子对象带 `UID_MAGIC` tag，主题切换 `lv_obj_tree_walk` 一次性染色；斜线 / × 用 `lv_line`，不用旋转矩形。
 - **开锁判定**：`is_unlocked_now() = hal_actuator_state() || auth_fsm_state() == FSM_UNLOCKED`。不能只用 actuator_state——脉冲 500ms 后拉低会误判回「已上锁」。
 - **LVGL label** 创建后立刻 `lv_label_set_text(x, "")`，否则默认占位「Text」会露出。
+- **注释用大白话**：术语首次出现就地解释，目标是没参与本项目的人也能读懂（用词对照见 `docs/规约/HAL分层统一方案.md` §8）。
 
 安全红线：
 
