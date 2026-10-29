@@ -60,7 +60,7 @@ extern "C" {
 #define FM225_MR_FAILED4_MAXUSER      0x09u
 #define FM225_MR_FAILED4_FACEENROLLED 0x0Au
 #define FM225_MR_FAILED4_LIVENESS     0x0Cu
-#define FM225_MR_FAILED4_TIMEOUT      0x0Du
+#define FM225_MR_FAILED4_TIMEOUT      0x0D
 
 /* 通知类型 */
 #define FM225_NID_READY       0x00u
