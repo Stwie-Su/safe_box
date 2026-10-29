@@ -1,9 +1,11 @@
 /**
  * @file face_backend.h
- * 人脸后端接口（内部头文件，业务层不要包含）。
+ * 人脸后端的函数表（内部头，业务层不要包含；对外用 hal_face.h）。
  *
- * 每个后端实现同一张函数表，由构建选项 SAFE_FACE_BACKEND 决定编哪一个。
- * 后端完成异步作业后，调用 hal_face_emit() 把结果抛回服务层。
+ * 每个后端（假后端 / FM225 / 空后端）都要实现这张表里的函数，
+ * 服务层拿到表之后统一调用，不知道底下具体是谁。
+ *
+ * 标了「可选」的成员可以是 NULL，服务层会当成「这个后端不支持」处理。
  */
 #pragma once
 
@@ -23,81 +25,51 @@ typedef struct face_backend {
     safe_err_t (*start)(void);
     safe_err_t (*stop)(void);
 
-    /* 主线程周期驱动。now_ms 必须与 hal_time_ms() 同源（单调毫秒）——后端内部
-     * 一律用 hal_time_ms() 记时刻；跨时钟基会让「now_ms - 记录时刻」无符号回绕、
-     * 超时判定恒真（D1）。这是接口约定，不许改。 */
+    /* 主线程每 20ms 调一次。now_ms 必须来自 hal_time_ms()，
+     * 用别的时钟算超时会算出错误结果。 */
     void (*tick)(uint32_t now_ms);
 
-    /* 异步录入：返回 SAFE_OK 表示已受理，结果由 hal_face_emit(FACE_EV_ENROLL_DONE) 上报。
-     * user_name（v1.4）：本地用户名，后端应写入模组侧模板名（FM225 的 ENROLL 载荷
-     * 带 user_name[32] 字段），使 VERIFY 应答能带回该名供 FR-21 核对。后端可以忽略
-     * 该参数（不支持写名的后端），此时模组返回用户名为空、核对自动跳过。 */
+    /* 录入（异步）：返回成功只表示「受理了」，结果通过事件上报。
+     * user_name 会写进模组模板，方便以后核对；不支持写名的后端可以忽略。 */
     safe_err_t (*enroll)(const char * user_name);
     safe_err_t (*delete_tpl)(int32_t face_id);
-    /* 清空模组侧**全部**人脸模板（FM225 的 DELETE_ALL 0x21）。
-     * 用途：模组被外部工具单独写过之后，本地与模组会长期不一致（编号空间被两方
-     * 共用，见 preview/uid 相关记录）—— 这条命令是唯一的「拖回一致」手段。
-     * 应答经 hal_face_emit(FACE_EV_DELETE_DONE) 上报，且该事件的 face_id
-     * 恒为 **-1**（没有具体模板号），调用方据此与单条删除区分。
-     * 可为 NULL（后端不支持 → SAFE_ERR_UNSUP）。 */
+    /* 清空模组里所有人脸。用于「本地和模组对不上」时重新拉齐。
+     * 完成事件里 face_id 固定 -1。可为 NULL（不支持）。 */
     safe_err_t (*delete_all)(void);
 
-    /* 单次识别（FR-27 拍板：识别由界面按钮触发，不再自动循环）。受理后结果经
-     * hal_face_emit(FACE_EV_DETECT) 上报，会话结束即静默（低功耗）。
-     * 忙返回 SAFE_ERR_BUSY；可为 NULL（视为不支持，SAFE_ERR_UNSUP）。 */
+    /* 触发一次识别，结果通过事件上报。忙返回 SAFE_ERR_BUSY。可为 NULL。 */
     safe_err_t (*verify_once)(void);
 
-    /* 模组侧已注册用户清单（FR-21 防线 3「启动对账」用）。语义同 hal_face.h 的
-     * hal_face_module_users：>=0 = 清单数量；-1 = 该后端无此概念；-2 = 尚未取得。
-     * 可为 NULL（视为 -1）。 */
+    /* 模组里的用户清单：>=0 条数，-1 没这个概念，-2 还没取到。可为 NULL。 */
     int32_t (*module_users)(int32_t * ids, int32_t cap);
 
-    /* 模组健康只读三态（FR-23）。语义见 hal_face.h 的 face_module_health_t。
-     * 可为 NULL —— 视为 FACE_MOD_UNKNOWN（该后端没有模组级健康监测，如 fake / none）。 */
+    /* 模组健康状态。可为 NULL（当成「不知道」）。 */
     face_module_health_t (*module_health)(void);
 
-    /* 模组实时人脸状态（FR-19 引导，NOTE NID_FACE_STATE 的 state 字段）。
-     * 语义见 hal_face.h 的 hal_face_face_state()。
-     * 可为 NULL（视为 -1 未知，如 fake / none）。 */
+    /* 模组实时状态：人脸在不在画面里、姿态、人脸框。都可为 NULL。 */
     int32_t (*face_state)(void);
-    /* 姿态快照（五向录入引导的数据源）：yaw/pitch/roll，任一输出参数可为 NULL。
-     * 返回 0 = 取到；< 0 = 该后端无姿态概念。**可选接口**，可为 NULL。
-     * 语义：NOTE NID_FACE_STATE 的 8 个 int16 中的第 6/7/8 个（小端，实测）。 */
     int32_t (*face_pose)(int16_t * yaw, int16_t * pitch, int16_t * roll);
-    /* 人脸框（NOTE v[1..4] = left/top/right/bottom）。**可选**，NULL 视为不支持。
-     * 可用于在预览上画框、或提示「太远（框太小）/ 太近（框太大）」。 */
     int32_t (*face_box)(int16_t * l, int16_t * t, int16_t * r, int16_t * b);
-    /* 当前录入模式是否为五向。**可选接口**，NULL 视为单帧。 */
+
+    /* 录入模式：是不是五向、已完成哪些方向、下一个录哪个、怎么切换。都可为 NULL。 */
     bool (*enroll_five_way)(void);
-    /* 五向录入进度查询（**可选**，NULL 视为 0）：
-     *   enroll_dir_mask → 已完成的方向掩码（正0x01|右0x02|左0x04|下0x08|上0x10）；
-     *   enroll_next_dir → **下一个待采集的方向**（单一位）；0 = 已采齐 / 非五向。
-     * 供 UI 在视频上方显示「第 N/5 步：请向右转」这类引导。 */
     uint8_t (*enroll_dir_mask)(void);
     uint8_t (*enroll_next_dir)(void);
-    /* 运行时切换录入模式（单帧/五向）。**可选**接口，NULL = 不支持。
-     * 上层在启动时按持久化策略调用一次，之后用户可在界面里切换。 */
     void (*set_enroll_five_way)(bool five_way);
 
-    /* 注入模拟结果，仅 FACE_CAP_INJECT 后端需要实现 */
+    /* 注入假结果，只有假后端需要实现。 */
     safe_err_t (*inject)(int32_t face_id, face_reason_t reason);
 } face_backend_t;
 
-/* 各后端工厂：未编入构建时返回 NULL。
- * ★ fake 此前**只有定义没有声明**，且 backend_fake.c 漏编（见 app/hal/CMakeLists.txt），
- *   于是 face_backend_fake() 全工程零引用、查找表里也补不了 fake ——
- *   SAFE_FACE_BACKEND=fake 与 RPC inject_face 这条调试/验证通道形同虚设。
- *   这里补齐声明（配合 CMakeLists 补编入）。 */
+/* 各后端的实例。没编进构建的返回 NULL。 */
 const face_backend_t * face_backend_fake(void);
 const face_backend_t * face_backend_fm225(void);
 const face_backend_t * face_backend_none(void);
 
-/* 后端向服务层上报结果（只有后端实现可以调用）。
- * 事件经 event_bus(EV_FACE_EVENT) 广播（步骤 3a）；FACE_EV_ERROR 的
- * const char* 描述由 emit 拷进 ev_face_event_t.msg[64] 定长数组，无跨线程悬空。 */
+/* 后端把结果交给服务层（只有后端实现会调）。
+ * 内部会广播成 EV_FACE_EVENT 事件，主线程收到后再更新界面。 */
 void hal_face_emit(face_event_t ev, const void * payload);
 
 #ifdef __cplusplus
 }
 #endif
-

@@ -1,13 +1,12 @@
 /**
  * @file ui_feedback.h
- * UI 层反馈中枢：把总线事件翻译成「顶部横幅 + 人脸扫描框染色」（spec §1 + §3 后半）。
+ * 界面反馈：收到事件后弹顶部提示条、给人脸扫描框换颜色。
  *
- * 设计要点：
- *  - 横幅挂在 ui.c 的常驻 overlay 上（跨页存活）——LOCKOUT 时 FSM 会强制切回
- *    主页，若各页面自订订阅会丢事件，故集中到本模块；
- *  - 只经 event_bus 订阅（EV_FACE_EVENT / EV_AUTH_RESULT），不 include core 内部头；
- *  - 颜色一律来自 theme_color()，无写死 hex（README 色彩铁律）；
- *  - 动效参数全部取自 ui_anim.h（A7 单核预算：横幅 ~64px 高小条，单段 ≤250ms）。
+ * 为什么单独一个文件：提示条要跨页面存在。比如锁定倒计时时状态机会强制切回主页，
+ * 如果各页面自己管提示，切页就把提示丢了。集中在这里就不会丢。
+ *
+ * 它只订阅事件总线（人脸结果、开锁结果），不直接调业务代码。
+ * 颜色全部来自主题，动画参数全部来自 ui_anim.h。
  */
 #pragma once
 
@@ -19,42 +18,29 @@
 extern "C" {
 #endif
 
-/* 横幅档位 → 主题色（spec §1：BANNER_INFO=accent / OK / WARN / DANGER） */
+/* 提示条档位：决定颜色（提示 / 成功 / 警告 / 危险）。 */
 typedef enum {
-    UI_BANNER_INFO   = 0,   /* 提示：accent */
-    UI_BANNER_OK     = 1,   /* 成功：TH_OK */
-    UI_BANNER_WARN   = 2,   /* 警示：TH_WARN */
-    UI_BANNER_DANGER = 3,   /* 危险：TH_DANGER */
+    UI_BANNER_INFO   = 0,
+    UI_BANNER_OK     = 1,
+    UI_BANNER_WARN   = 2,
+    UI_BANNER_DANGER = 3,
     UI_BANNER_LEVEL_COUNT
 } ui_banner_level_t;
 
-/**
- * @brief 初始化反馈中枢并在 host 上建好常驻横幅（默认隐藏）。
- *
- * 触发时机：ui_init() 末尾、所有页面实例化之后（页面已建好，扫描框可染色）。
- * @param host  横幅宿主容器（ui.c 的 overlay：位于顶栏之下、内容区之上的浮层）
- */
+/* 初始化，并在 host 上建好提示条（默认隐藏）。
+ * 在 ui_init() 最后调，那时页面都建好了，扫描框才能跟着染色。
+ * host 是覆盖在内容区上方的那层容器。 */
 void ui_feedback_init(lv_obj_t * host);
 
-/**
- * @brief 显示一条瞬时横幅：淡入 → 停留 hold_ms → 淡出 → 隐藏。
- *
- * 新横幅到达时删掉旧动画、直接替换（不排队、不叠加）。
- * @param text     文案（NULL 视为空串）
- * @param level    档位（决定主题色）
- * @param hold_ms  停留时长（建议 ≤ UI_ANIM_BANNER_HOLD_MS）
- */
+/* 弹一条提示：淡入 → 停留 hold_ms → 淡出。
+ * 新提示会直接替换掉旧的（不排队、不叠加）。 */
 void ui_banner(const char * text, ui_banner_level_t level, uint32_t hold_ms);
 
-/**
- * @brief 显示一条常驻横幅（只淡入，不自动淡出），供 LOCKOUT 倒计时每秒刷新文案。
- *        必须由 ui_banner_hide() 结束。
- */
+/* 弹一条不会自动消失的提示（锁定倒计时用它，每秒刷新文案）。
+ * 必须自己调 ui_banner_hide() 结束。 */
 void ui_banner_sticky(const char * text, ui_banner_level_t level);
 
-/**
- * @brief 结束当前横幅（淡出后隐藏）。对瞬时横幅也安全（会先删掉它的动画）。
- */
+/* 收起提示条。瞬时提示也可以安全调用。 */
 void ui_banner_hide(void);
 
 #ifdef __cplusplus

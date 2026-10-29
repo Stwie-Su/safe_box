@@ -1,12 +1,12 @@
 /**
  * @file theme.h
- * 主题系统（DESIGN.md §6）：四套色板 + 全局复用样式 + 一键切换。
+ * 主题（配色）：五套颜色，一键切换，所有控件跟着变。
  *
- * 实现要点：
- *  - 颜色集中：THEMES[4]，页面控件只引用 lv_style_t，绝不写死 hex；
- *  - 切主题 theme_switch(idx) 更新样式内容后 lv_obj_report_style_change(NULL) 全局刷新，
- *    页面无需重建即可换肤；
- *  - 加主题只需在 THEMES[] 增一行。
+ * 规矩：颜色的十六进制值只写在这个文件里，页面代码一律用「颜色角色」
+ * （背景 / 面板 / 正文 / 强调 / 危险……）或者直接用下面这些样式。
+ * 这样换主题时不用改任何页面，以后加主题也只要在这里加一组颜色。
+ *
+ * 切换时刷新的是样式内容，不是重建控件，所以换肤是瞬间的。
  */
 #pragma once
 #include "lvgl.h"
@@ -17,20 +17,20 @@ extern "C" {
 
 #define THEME_COUNT 5
 
-/* 颜色角色（DESIGN.md §6.1 色板列） */
+/* 颜色角色：页面里说「我要正文色」，而不是写死 #333333。 */
 typedef enum {
     TH_BG,          /* 页面背景 */
-    TH_PANEL,       /* 面板 */
-    TH_PANEL2,      /* 次面板 */
+    TH_PANEL,       /* 卡片 / 面板 */
+    TH_PANEL2,      /* 次一级面板（输入区、列表项） */
     TH_TEXT,        /* 正文 */
     TH_TEXT_MUT,    /* 次要文字 */
-    TH_TEXT_PLACEHOLDER, /* 输入框占位/提示文字 */
-    TH_BORDER,      /* 描边 */
-    TH_ACCENT,      /* 强调 */
-    TH_ACCENT_INK,  /* 强调上文字 */
+    TH_TEXT_PLACEHOLDER, /* 输入框提示文字 */
+    TH_BORDER,      /* 边框 / 分隔线 */
+    TH_ACCENT,      /* 强调色（主按钮、选中态） */
+    TH_ACCENT_INK,  /* 强调色上的文字 */
     TH_OK,          /* 成功 */
-    TH_WARN,        /* 警示 */
-    TH_DANGER,      /* 危险 */
+    TH_WARN,        /* 警告 */
+    TH_DANGER,      /* 危险 / 失败 */
     TH_ROLE_MAX
 } theme_role_t;
 
@@ -39,64 +39,58 @@ typedef struct {
 } app_theme_colors_t;
 
 typedef struct {
-    const char * name;      /* 显示名：石墨黑 / 月白 / 蓝白 / 松石青 */
+    const char * name;      /* 显示名，例如「石墨黑」 */
     app_theme_colors_t pal;
 } app_theme_t;
 
-/* 四套主题（DESIGN.md §6.1，顺序即枚举） */
+/* 五套主题，顺序就是主题编号。 */
 extern const app_theme_t THEMES[THEME_COUNT];
 
-/* ---- 全局复用样式（DESIGN.md §6.2） ---- */
+/* ---- 全局样式：页面直接拿来用，不要自己再写颜色 ---- */
 extern lv_style_t st_screen;        /* 屏幕背景 */
-extern lv_style_t st_panel;         /* 卡片面板 */
-extern lv_style_t st_panel2;        /* 次面板（输入区/列表项） */
+extern lv_style_t st_panel;         /* 卡片 */
+extern lv_style_t st_panel2;        /* 次面板 */
 extern lv_style_t st_text;          /* 正文 */
 extern lv_style_t st_text_mut;      /* 次要文字 */
-extern lv_style_t st_text_placeholder; /* 输入框占位/提示文字 */
-extern lv_style_t st_border;        /* 描边/分隔 */
-extern lv_style_t st_accent_btn;    /* 强调按钮 */
-extern lv_style_t st_accent_btn_pr; /* 强调按钮按下 */
+extern lv_style_t st_text_placeholder; /* 输入框提示 */
+extern lv_style_t st_border;        /* 描边 / 分隔 */
+extern lv_style_t st_accent_btn;    /* 主按钮 */
+extern lv_style_t st_accent_btn_pr; /* 主按钮按下 */
 extern lv_style_t st_ghost_btn;     /* 次要按钮 */
 extern lv_style_t st_danger_btn;    /* 危险按钮 */
 extern lv_style_t st_ok_text;       /* 成功色文字 */
-extern lv_style_t st_warn_text;     /* 警示色文字 */
+extern lv_style_t st_warn_text;     /* 警告色文字 */
 extern lv_style_t st_danger_text;   /* 危险色文字 */
-extern lv_style_t st_tab_btn;       /* 底部 Tab（未选中） */
-extern lv_style_t st_tab_btn_checked; /* 底部 Tab（选中） */
-extern lv_style_t st_btn_press;     /* 全局按压态（theme 钩子自动挂到所有 lv_button） */
-extern lv_style_t st_tab_hl;        /* 页签高亮渐变载体（只带 transition，无颜色） */
+extern lv_style_t st_tab_btn;       /* 底部页签（未选中） */
+extern lv_style_t st_tab_btn_checked; /* 底部页签（选中） */
+extern lv_style_t st_btn_press;     /* 按钮按下效果，自动挂到所有按钮上 */
+extern lv_style_t st_tab_hl;        /* 页签高亮的渐变载体 */
 
-/* 初始化样式并应用默认主题（月白）。app_start 调用一次。 */
+/* 初始化样式，套用默认主题。开机调一次（ui_init 里）。 */
 void theme_init(void);
 
-/* 切换到第 idx 套主题（0..THEME_COUNT-1）：更新样式 + 全局重绘 + 通知所有注册回调 */
+/* 切到第 idx 套主题：更新样式、整屏重绘、通知所有注册过的回调。 */
 void theme_switch(int idx);
 
-/* 注册主题切换回调（用于刷新那些用 lv_obj_set_style_*_color() 设本地颜色覆盖的控件）。
- * 同一个回调重复注册会被忽略；切换主题时按注册顺序调用，最多 4 个。 */
+/* 主题切换回调：给那些自己设过颜色（没走样式）的控件用，
+ * 它们要在切主题时手动刷新一下。最多注册 4 个。 */
 typedef void (*theme_change_cb_t)(int idx);
-/* 注册主题切换回调。**返回 false = 槽位已满、本次注册未生效**（调用方应据此
- * 发现自己的刷新不会被触发，而不是以为注册成功了）。 */
+
+/* 注册回调。**返回 false 表示槽位满了、这次没注册上**，
+ * 调用方要据此知道自己的刷新不会被触发。 */
 bool theme_register_change_cb(theme_change_cb_t cb);
 
-/* 当前主题索引 / 名称 */
+/* 当前是第几套 / 第几套叫什么名字。 */
 int theme_idx(void);
 const char * theme_name(int idx);
 
-/* 便捷取色（canvas 绘制等特殊场景；普通控件请用样式） */
+/* 按角色取颜色。只有画布这类必须直接给颜色的地方才用，普通控件请用样式。 */
 lv_color_t theme_color(theme_role_t role);
 
-/**
- * @brief 安装全局按压手感主题钩子（UI 现代化 spec §3 前半）。
- *
- * 用 LVGL 的 theme apply 回调给【每一个】lv_button 挂上 st_btn_press
- * （LV_STATE_PRESSED），后续动态创建的按钮也自动生效——调用方无需逐个接线。
- * theme_init() 末尾自动调用一次；重复调用幂等。
- */
+/* 给所有按钮装上「按下缩小 + 变色」的效果（包括以后动态创建的按钮）。
+ * theme_init 里会自动调一次，重复调没关系。 */
 void theme_press_install(void);
 
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif
-
-

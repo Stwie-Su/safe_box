@@ -1,10 +1,12 @@
 /**
  * @file cred_reconcile.h
- * FR-21 防线 3「启动对账」：孤儿凭据标失效（需求 §5）。
+ * 开机对账：检查「本地记着的人脸」在模组里还在不在。
  *
- * 模组用户清单首次取得后（hal_face_module_users() 返回 >= 0）跑一次，
- * 把「本地有、模组无」的绑定凭据标记失效（face_enable=false，不删用户），
- * 且不用于放行；PIN / 动态码认证通道不受影响。
+ * 为什么需要：模组可能被人整个清空、或者换了模组，而本地 users.json 还记着
+ * 「这个用户绑了 3 号人脸」。这时如果不检查，就会出现「本地以为有脸、实际刷不出来」。
+ *
+ * 做法：模组的用户清单第一次拿到后，把「本地有、模组没有」的绑定向标成失效
+ * （face_enable=false，不删用户），PIN 和动态码照常能用。
  */
 #pragma once
 
@@ -14,23 +16,18 @@
 extern "C" {
 #endif
 
-/* 纯比对 + 落盘：把模组侧清单（mod_ids / mod_count）与本地 users.json 比对，
- * 本地 face_id >= 0 且不在清单里的用户 → face_enable=false + 审计日志（"ALARM"）。
- *   - face_id == -1（未绑定人脸）不是孤儿，不许动；
- *   - 已失效（face_enable == false）的用户不重复动作（幂等）；
- *   - mod_count < 0（-1 无此概念 / -2 尚未取得）直接返回 0，不误杀全部凭据。
- * 返回被标失效的用户数（>= 0）。
- *
- * ⚠️ 本函数会同步读写 users.json —— 生产路径【必须】在 worker 线程调用
- *   （由 cred_reconcile_tick() 经 worker_post 派发，守「认证路径零同步落盘」纪律）；
- *   仅单元测试在主线程直接调用。 */
+/* 比对并落盘，返回标失效的用户数。
+ * 这条会读写 users.json，所以必须在 worker 线程跑（cred_reconcile_tick 已经帮你安排了）；
+ * 只有单元测试会在主线程直接调。
+ *   - face_id == -1 表示没绑人脸，不算孤儿；
+ *   - 已经失效的不重复处理；
+ *   - mod_count < 0（模组不提供清单 / 还没拿到）时直接返回 0，避免把所有人都判失效。 */
 int cred_reconcile_apply(const int32_t * mod_ids, int32_t mod_count);
 
-/* 主线程 20ms tick 驱动：模组清单首次取得后触发一次后台对账，且只触发一次（幂等）。
- * 清单未取得（-2）或无此概念（-1）时不触发。文件 IO 经 worker_post 下沉后台线程。 */
+/* 主线程每 20ms 调一次。清单拿到后触发一次对账，只触发一次。 */
 void cred_reconcile_tick(void);
 
-/* 测试用：清除「已对账」标志，使下次 tick 可再次触发。 */
+/* 测试用：清掉「已经对过账」的标志，让下次 tick 能再来一遍。 */
 void cred_reconcile_reset(void);
 
 #ifdef __cplusplus

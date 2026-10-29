@@ -1,10 +1,10 @@
 /**
  * @file page_face.h
- * 人脸识别全屏页：从主页"人脸识别"卡片进入，展示扫描动效 + 实时视频预览。
+ * 人脸识别页（全屏）：扫描动效 + 实时预览画面。
  *
- * UI 现代化（spec §3 后半）新增「扫描框状态染色」：
- * 四角扫描框 + 扫描光带按识别结果染色（IDLE=accent / OK=绿 / FAIL=红），
- * 由反馈中枢 ui_feedback 在收到 EV_FACE_EVENT 时调用 page_face_set_scan_state() 驱动。
+ * 从主页的「人脸识别」卡片进入。扫描框会根据识别结果变色：
+ * 待机是强调色，认出来变绿，没认出来变红（600ms 后自己变回待机）。
+ * 颜色由反馈模块（ui_feedback）在收到人脸事件时调这里的函数改。
  */
 #pragma once
 
@@ -14,27 +14,21 @@
 extern "C" {
 #endif
 
-/* 扫描框状态（spec §3：枚举 + 查表，避免 if-else 嵌套） */
+/* 扫描框状态。 */
 typedef enum {
-    PAGE_FACE_SCAN_IDLE = 0,   /* 待机：accent（扫描中） */
-    PAGE_FACE_SCAN_OK,         /* 匹配成功：TH_OK 绿 */
-    PAGE_FACE_SCAN_FAIL,       /* 未匹配 / 活体失败：TH_DANGER 红（600ms 后自动回 IDLE） */
+    PAGE_FACE_SCAN_IDLE = 0,   /* 待机（扫描中） */
+    PAGE_FACE_SCAN_OK,         /* 认出来了：绿 */
+    PAGE_FACE_SCAN_FAIL,       /* 没认出来：红，600ms 后自动回待机 */
     PAGE_FACE_SCAN_COUNT
 } page_face_scan_t;
 
-/**
- * @brief 设置扫描框（8 个角 + 光带）状态色。
- *
- * 性能预算（A7 单核）：只改 9 个对象的 bg_color 一个样式属性，无动画对象、
- * 无堆分配；FAIL 态用一次性 lv_timer（UI_ANIM_SCAN_FAIL_MS）自动回 IDLE。
- */
+/* 改扫描框颜色。只改几个控件的颜色，不新建对象、不分配内存。 */
 void page_face_set_scan_state(page_face_scan_t st);
 
-/**
- * @brief 读取当前扫描框状态（主题切换重染色与自测用）。
- */
+/* 读当前扫描框状态（切主题重刷时用）。 */
 page_face_scan_t page_face_scan_state(void);
 
+/* 建页面，返回根容器。开机时调一次。 */
 lv_obj_t * page_face_create(lv_obj_t * parent);
 
 #ifdef __cplusplus

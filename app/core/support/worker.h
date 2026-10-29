@@ -1,17 +1,16 @@
 /**
  * @file worker.h
- * 通用异步后台 worker（DESIGN.md §9 多线程设计）。
+ * 后台工作线程：把费时的活（算 PIN 哈希、读写文件、扫 WiFi）挪出主线程。
  *
- * 模型：
- *  - 主线程（LVGL 线程）：所有 LVGL API 只能在这里调用；
- *  - 后台工作线程 ×1：执行阻塞任务（PBKDF2、文件 I/O、网络扫描等）；
- *  - 结果泵：主线程定时调用 worker_poll()，把已完成作业的 done 回调派发回主线程。
+ * 为什么需要：主线程在跑 LVGL，一旦被阻塞，界面就卡住不动。所以约定：
+ *   - 主线程（LVGL 线程）：只有它能碰界面控件；
+ *   - 后台 worker 线程（1 条）：干活，**绝对不能碰 LVGL**；
+ *   - 结果怎么回来：主线程定时调 worker_poll()，在那里执行 done 回调。
  *
- * 约定：
- *  - worker_post 的 arg 必须为堆上分配；提交后主线程不得再读写它；
- *    由 done 回调负责释放（或传 NULL 表示无需回调、框架释放）。
- *  - fn 在【worker 线程】执行，里面绝不能调用任何 LVGL API；
- *  - done 在【主线程】worker_poll() 里执行，可以安全操作 LVGL 控件。
+ * 三条使用规则：
+ *   1) 传给 worker_post 的 arg 必须是堆上分配的，提交后主线程不能再读写它；
+ *   2) done 回调里自己 free(arg)；done 传 NULL 表示不需要回调、由框架释放；
+ *   3) fn 在后台线程执行，里面不能调任何界面函数。
  */
 #pragma once
 
@@ -19,21 +18,20 @@
 extern "C" {
 #endif
 
-typedef void (*worker_fn_t)(void * arg);    /* 在后台线程执行 */
-typedef void (*worker_done_t)(void * arg);  /* 在主线程 worker_poll() 执行 */
+typedef void (*worker_fn_t)(void * arg);    /* 后台线程里执行 */
+typedef void (*worker_done_t)(void * arg);  /* 主线程 worker_poll() 里执行 */
 
-/* 启动后台线程（app_start 早期调用一次） */
+/* 启动后台线程。开机时调一次（app_main 里）。 */
 void worker_init(void);
 
-/* 提交一个作业：fn(arg) 在后台执行，完成后 done(arg) 在主线程执行。
- * done 可为 NULL（纯 fire-and-forget，框架在后台完成后释放 arg）。 */
+/* 提交一个作业：fn(arg) 在后台跑，跑完 done(arg) 回到主线程执行。
+ * done 可以为 NULL（不需要通知主线程，框架负责释放 arg）。 */
 void worker_post(worker_fn_t fn, void * arg, worker_done_t done);
 
-/* 主线程轮询：把已完成的作业逐个派发（done 回调）。应在 LVGL 定时器里周期性调用。 */
+/* 主线程每 20ms 调一次：把已经做完的作业的 done 回调派发出去。 */
 void worker_poll(void);
 
-/* 退出清理（规约 §5.7 / §3.2）：置内部退出标志、唤醒 worker、pthread_join。
- * 由 app_shutdown 调用，保证不丢在途作业。幂等。 */
+/* 退出：置停止标志、唤醒线程、等它结束（不丢在途作业）。可重复调用。 */
 void worker_shutdown(void);
 
 #ifdef __cplusplus

@@ -1,19 +1,18 @@
 /**
  * @file mqtt_client.h
- * MQTT 客户端封装（需求 FR-5 / M6）：R9 起改为**自研**实现（单线程 poll +
- * 非阻塞连接 + 自研状态机），不再依赖第三方 MQTT 库。
+ * 自己写的 MQTT 客户端：连 broker、收发消息、断线自动重连。
  *
- * 为什么要自研（R9 的核心收益）：板子上没有可用的 ARM 版第三方 MQTT 库，
- * 交叉编译时会退化成空实现 → **板上远程通道永久断线**。自研后板子与 PC 编同一份
- * 代码，且进程内线程数比原方案净减 1（原方案内部占 2 条线程）。
+ * 为什么不直接用现成库：板子上没有能用的 ARM 版库，交叉编译会退化成空实现，
+ * 结果就是「电脑上能连、板子上永远断线」。自己写之后两边跑同一份代码。
  *
- * 设计要点：
- *   - 独立网络线程（应用第 4 条自建线程）跑单 poll() 循环，上层无感；
- *   - 断线自动重连（指数退避 + 抖动，封顶 30s），上层无感；
- *   - 收到的指令先入线程安全队列，由主线程 rpc_poll() 取走处理（线程安全：
- *     MQTT 线程不得直接操作 LVGL 对象，见需求 3.3）。
+ * 结构：
+ *   - 一条网络线程负责连接、收发、重连，别的线程不用管；
+ *   - 收到的消息先放队列，主线程 rpc_poll() 再取走处理
+ *     （网络线程不能碰界面，所以必须绕这一道）；
+ *   - 断线自动重连，重试间隔从 0.5 秒开始翻倍，最多 30 秒。
  *
- * ★ 对外接口：既有 8 个函数的签名一个字都不能改（rpc.c / ui.c 依赖），只新增。
+ * 调用顺序（app_main 里）：mqtt_set_credentials / mqtt_set_tls / mqtt_set_will
+ *   → mqtt_start() → 之后随时 mqtt_publish()；退出时 mqtt_stop()。
  */
 #pragma once
 #include <stdbool.h>
@@ -24,95 +23,79 @@
 extern "C" {
 #endif
 
-/* 收到 safe/cmd 等消息时的回调（payload 为以 '\0' 结尾的 JSON 字符串）
- * 注意：回调在 **net 线程**执行，只能做线程安全的事。rpc.c 传 NULL（走队列）。 */
+/* 收到消息时的回调（payload 是以 '\0' 结尾的 JSON 字符串）。
+ * 注意：它在**网络线程**执行，不要在里面碰界面。rpc.c 传 NULL，改走队列。 */
 typedef void (*mqtt_msg_cb_t)(const char *topic, const char *payload);
 
-/* 启动 MQTT 客户端并后台连接。host 形如 "192.168.150.139"，port=1883。返回 0=OK。 */
+/* 启动并后台连接。host 形如 "192.168.150.139"，port 一般是 1883。返回 0 = 成功。 */
 int  mqtt_start(const char *host, int port, const char *client_id, mqtt_msg_cb_t cb);
 
-/* 停止并释放（进程退出时调用）。
- * 置停止标志 → 写 self-pipe 唤醒 → join（**带 1000ms 超时**，超时则 detach，
- * 绝不用 pthread_cancel —— 那会让线程停在半写状态、套接字里留半个报文）。
- * 顺带修掉 QA-04（原实现没有停止标志，进程退出时网络线程不会被回收）。 */
+/* 停止并回收网络线程（进程退出时调）。等 1 秒还没退出就放手不管，
+ * 不用 pthread_cancel —— 那会让线程停在写了一半的状态。 */
 void mqtt_stop(void);
 
-/* 发布一条消息；qos∈{0,1}，retained=是否保留。返回 0=已入队。未启动返回 -1。
- * 注意：入队即返回，不等待对端确认；QoS1 的确认与重传由 net 线程负责。 */
+/* 发一条消息。qos 取 0 或 1；retained = broker 是否替我们保存最后一条。
+ * 返回 0 = 已放进发送队列（不代表对方收到了）。没启动返回 -1。 */
 int  mqtt_publish(const char *topic, const char *payload, int qos, int retained);
 
-/* 当前是否已连接（供顶栏指示灯 / 状态查询） */
+/* 现在连上了没有（顶栏指示灯用）。 */
 bool mqtt_is_connected(void);
 
-/* 设置 MQTT 连接凭据（username/password）。二者留空 = 匿名连接（默认，保持兼容）。
- * 需在 mqtt_start 之前调用；重复调用以最后一次为准。 */
+/* 设置连接用的用户名 / 密码，**必须在 mqtt_start 之前**调。
+ * 两个都留空 = 匿名连接。只要填了一个，就认为要求鉴权，敏感指令只允许这种连接执行。 */
 void mqtt_set_credentials(const char *username, const char *password);
 
-/* 是否已配置连接凭据（username 或 password **任一非空**）。配置后视为「要求鉴权」
- * 模式：仅鉴权连接可执行敏感远程指令（判据落在 rpc.c 的 channel_authorized）。 */
+/* 有没有配置连接凭据。 */
 bool mqtt_credentials_configured(void);
 
-/* 当前连接是否以鉴权身份建立（已配置凭据且已连上 broker）。 */
+/* 当前连接是不是带凭据连上的。 */
 bool mqtt_is_authenticated(void);
 
-/* ---------------- R9 T06 新增：MQTT over TLS ---------------- */
-
-/* 设置 TLS。需在 mqtt_start 之前调用，重复调用以最后一次为准。
- *   enable=false（默认）→ 明文 TCP，保持既有验证路径；
- *   ca_file 为空 = 不校验对端；cert/key 仅双向 TLS 需要。
- * ★ 若 enable=true 而构建未开 SAFE_FEATURE_MQTT_TLS，连接将**失败**而非退回明文。 */
+/* 设置 TLS，**必须在 mqtt_start 之前**调。
+ * enable=false（默认）走明文；ca_file 为空表示不校验对端证书；
+ * cert/key 只在双向 TLS 时需要。
+ * ★ 开了 TLS 但编译时没编进 mbedTLS，连接会直接失败，不会偷退回明文。 */
 void mqtt_set_tls(bool enable, const char *ca_file, const char *cert_file,
                   const char *key_file, bool verify_peer);
 
-/* 当前连接是否建立在 TLS 之上（已启用 TLS 且已连上）。 */
+/* 当前连接是否走 TLS。 */
 bool mqtt_is_tls(void);
 
-/* 主线程取走一条入队消息（rpc_poll 调用）。返回 1 表示取到。 */
+/* 主线程取一条已收到的消息（rpc_poll 调）。返回 1 = 取到了。 */
 int  mqtt_take(char *topic, size_t tcap, char *payload, size_t pcap);
 
-/* ---------------- R9 T04 新增（规约 §5.10.1 已预留） ---------------- */
-
-/* 设置遗嘱（LWT）。需在 mqtt_start 之前调用；不调用则用默认
- * 「safe/status + {"online":0,...}，QoS1 + retain」。
- * topic 为 NULL 或空串 = 不发遗嘱。 */
+/* 设置「遗嘱」：设备意外掉线时 broker 替我们发这条消息。
+ * 必须在 mqtt_start 之前调；不调就用默认的「safe/status 里 online=0」。
+ * topic 传 NULL 或空串 = 不发遗嘱。 */
 void mqtt_set_will(const char *topic, const char *payload, int qos, bool retain);
 
-/* 当前连接状态的可读字符串："idle" / "connecting" / "connected" / "retry"。 */
+/* 连接状态的可读名字："idle" / "connecting" / "connected" / "retry"。 */
 const char * mqtt_state_str(void);
 
-/* 运行统计（供诊断与验收；任何指针都可传 NULL 表示不关心）。 */
+/* 运行统计：连上几次、重连几次、丢了几条、队列满几次。指针可以传 NULL 表示不关心。 */
 void mqtt_stats(uint32_t *connects, uint32_t *reconnects, uint32_t *dropped, uint32_t *queue_full);
 
-/* 下行队列积压条数（供背压诊断。满时新到的下行**不入队也不回 PUBACK**，
- * 让 broker 重投 —— 安全设备绝不静默丢指令）。 */
+/* 下行队列里还积压几条。队列满时新消息不入队、也不回 PUBACK，
+ * 让 broker 重发 —— 宁可慢，也不能悄悄丢掉一条指令。 */
 size_t mqtt_queued(void);
 
-/* ---------------- 可观测性补齐（C2 / C4） ---------------- */
-
-/* mqtt_stats() 未覆盖的那几个计数器。任何指针都可传 NULL 表示不关心。
- * 为什么单独开一个而不是改 mqtt_stats() 签名：既有 8 个函数的签名一个字都不能改
- * （rpc.c / ui.c 依赖），只新增 —— 这是本头文件顶部写死的对外接口。
- *
- * granted_qos 出口是 int：-1 = 尚未收到过合法 SUBACK，0/1/2 = broker 授予的 QoS。
- * ★ 用 -1 而不是 0xFF：出口是给"人"和 UI 看的，0 本身是合法 QoS，不能兼作"未定"。
- *
- * ★ 预期消费者见 mqtt_client.c 里 mqtt_stats_ex() 下面那段注释 —— 这一组 getter
- *   目前还没有调用者，接线方案写在那儿（诊断页 / safe/diag 主题 / 变化日志）。 */
+/* 更细的统计（超时、重传、异常报文等）。任何指针都可传 NULL。
+ * granted_qos：-1 = 还没收到过合法的 SUBACK，0/1/2 = broker 实际给的 QoS
+ * （broker 有权把 QoS1 降到 0，这里能看出来）。 */
 void mqtt_stats_ex(uint32_t *ping_timeout, uint32_t *retransmit, uint32_t *qos0_fallback,
                    uint32_t *rx_publish, uint32_t *reject_oversize, uint32_t *reject_malformed,
                    uint32_t *suback_reject, uint32_t *suback_timeout, int *granted_qos);
 
-/* 上行队列积压条数（与 mqtt_queued() 的下行成对，用于区分哪个方向在丢）。 */
+/* 上行队列积压条数。 */
 size_t mqtt_tx_queued(void);
 
-/* 当前 inflight（QoS1 未确认报文）条数。 */
+/* 当前有多少条 QoS1 消息在等确认。 */
 size_t mqtt_inflight_count_now(void);
 
-/* 当前退避时长（ms）；不在退避中则为 0。
- * ★ 退避曲线的最小可用暴露 —— 有了它才谈得上"实测退避序列"。 */
+/* 当前重连等待时间（毫秒），没在等待则为 0。 */
 uint32_t mqtt_backoff_ms(void);
 
-/* 当前连续重连次数（状态机 retry_count 的镜像）。 */
+/* 连续重连了几次。 */
 uint8_t mqtt_retry_count(void);
 
 #ifdef __cplusplus

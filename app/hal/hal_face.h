@@ -1,17 +1,15 @@
 /**
  * @file hal_face.h
- * 人脸识别模块接口（业务层唯一可见的人脸头文件）。
+ * 人脸模块的统一接口：业务层只看这个文件，不关心底下是哪种硬件。
  *
- * 设计约束：
- *  1. 本头文件不出现任何平台头文件，业务层包含它不会被污染；
- *  2. 异步事件驱动，业务层不轮询硬件；
- *  3. 后端可替换：模拟后端与 FM225 后端实现同一张函数表，
- *     由构建选项 SAFE_FACE_BACKEND 决定编哪个，业务代码零改动；
- *  4. 业务层只认 {face_id, reason} 这一个数据接口约定，不关心数据从哪来。
- *     FM225 模组不输出置信度分数，识别结果只按失败原因分流（需求 v1.6 FR-19）。
+ * 底下可以换：假后端（测试用）、FM225 真模组、空后端（没有硬件）。
+ * 换后端只改构建选项，调用方的代码一行都不用动。
  *
- * FM225 到货后只需补 app/hal/face/backend_fm225.c 里的 UART 解析，
- * 本文件与所有调用方都不用改。
+ * 结果不是「分数」，而是「原因」：匹配成功 / 没认出来 / 活体不过 / 超时 / 出错。
+ * FM225 模组本来就不输出相似度，所以只按原因分流。
+ *
+ * 工作方式：调用后立刻返回，结果通过事件总线（EV_FACE_EVENT）广播出来，
+ * 界面和状态机各自订阅。不要在这里轮询硬件。
  */
 #pragma once
 
@@ -24,40 +22,33 @@
 extern "C" {
 #endif
 
-/* ---------------- 数据接口约定 ---------------- */
-
-/* 识别结果按失败原因分流（FM225 无分数；auth_fsm 依赖本类型） */
+/* 识别结果的原因。 */
 typedef enum {
-    FACE_RES_OK = 0,        /* 匹配成功 */
-    FACE_RES_NO_MATCH,      /* 未匹配：计入失败，连续达阈值转动态码 */
-    FACE_RES_LIVENESS_FAIL, /* 活体失败：拒绝 + 防伪告警 */
-    FACE_RES_TIMEOUT,       /* 超时 / 无人脸：不计数 */
-    FACE_RES_ERROR,         /* 模组/链路异常：不计数 */
+    FACE_RES_OK = 0,        /* 认出来了 */
+    FACE_RES_NO_MATCH,      /* 没认出来：计入失败次数，攒够转输动态码 */
+    FACE_RES_LIVENESS_FAIL, /* 活体检测不过（可能是照片）：拒绝并告警 */
+    FACE_RES_TIMEOUT,       /* 超时 / 画面里没人：不计数 */
+    FACE_RES_ERROR,         /* 模组或线路异常：不计数 */
 } face_reason_t;
 
 typedef struct {
-    int32_t       face_id;  /* -1 = 未识别到已注册人脸 */
-    face_reason_t reason;   /* 结果原因码（取代旧 score 字段） */
-    uint32_t      seq;      /* 帧序号，用于去重与调试 */
-    uint32_t      timestamp;/* hal_time() 时间戳（Unix 秒，不是进程起算秒，见 D12） */
-    /* 模组返回的用户名（v1.4 新增，FR-21 防线 1 的数据源）。
-     * FM225 的 VERIFY 成功应答按手册 P34 s_msg_reply_verify_data 携带 user_name[32]；
-     * 业务层用它核对「这张脸是不是它声称的那个人」。空串 = 模组未提供该名字
-     * （历史模板未写名 / 非 FM225 后端）——调用方必须跳过核对，不得据此判凭据失效。 */
+    int32_t       face_id;  /* 模组里的模板号；-1 = 没认出已注册的人 */
+    face_reason_t reason;   /* 结果原因 */
+    uint32_t      seq;      /* 第几次结果，去重和排查用 */
+    uint32_t      timestamp;/* 结果产生的时间（Unix 秒） */
+    /* 模组报回来的用户名，用来核对「这张脸是不是它说的那个人」。
+     * 空串表示模组没给名字（老模板），这时跳过核对，不能因此判凭据失效。 */
     char          user_name[32];
 } face_result_t;
 
-/* 原因码的可读名（日志 / RPC status 用），非法值返回 "unknown"。
- * 实现在 face_service.c。 */
+/* 原因码转文字，打日志用。 */
 const char * face_reason_name(face_reason_t r);
 
 typedef struct {
     int32_t    face_id;    /* 成功 >= 0，失败 -1 */
     safe_err_t err;
-    /* 已完成的方向掩码（手册 V1.7 §MID_ENROLL REPLY 的 s_msg_reply_enroll_data）：
-     * 低 5 位从高到低 = 上(0x10) / 下(0x08) / 左(0x04) / 右(0x02) / 正(0x01)，
-     * 位为 1 表示该朝向已录入。0x1F = 五向全部完成。
-     * 单帧模式或未取到时填 0；调用方据此显示进度芯片。 */
+    /* 五向录入的进度：低 5 位分别代表 上/下/左/右/正，1 表示这个方向已经录了。
+     * 0x1F = 五个方向都完成。单帧模式或还没开始时是 0。 */
     uint8_t    face_dir_mask;
 } face_enroll_result_t;
 
@@ -66,152 +57,111 @@ typedef struct {
     safe_err_t err;
 } face_delete_result_t;
 
-/* ---------------- 事件 ---------------- */
-
-/* 人脸事件不再走本模块的自有订阅接口（v1.3 §5.18：全工程只留 worker + event_bus
- * 两套通知机制）。后端结果经 hal_face_emit() → event_bus(EV_FACE_EVENT) 广播，
- * payload 为 ev_face_event_t（core/event_bus.h，POD 按值拷贝）。
- * FACE_EV_ERROR 的描述文本放在该结构的 msg[64] 定长数组里。 */
+/* 人脸事件类型。具体内容放在 event_bus 的 ev_face_event_t 里。 */
 typedef enum {
-    FACE_EV_DETECT = 0,   /* 识别结果：ev_face_event_t.res */
-    FACE_EV_ENROLL_DONE,  /* 录入完成：ev_face_event_t.enroll */
-    FACE_EV_DELETE_DONE,  /* 删除完成：ev_face_event_t.del */
-    FACE_EV_ERROR,        /* 后端异常：ev_face_event_t.msg */
+    FACE_EV_DETECT = 0,   /* 识别结果 */
+    FACE_EV_ENROLL_DONE,  /* 录入完成 */
+    FACE_EV_DELETE_DONE,  /* 删除完成 */
+    FACE_EV_ERROR,        /* 后端出错 */
 } face_event_t;
 
-/* ---------------- 能力 ---------------- */
-
-#define FACE_CAP_DETECT    (1u << 0)   /* 能产出识别结果 */
-#define FACE_CAP_ENROLL    (1u << 1)   /* 支持录入 */
-#define FACE_CAP_DELETE    (1u << 2)   /* 支持删除 */
-#define FACE_CAP_INJECT    (1u << 3)   /* 支持注入模拟结果（仅 fake 后端） */
-#define FACE_CAP_LIVENESS  (1u << 4)   /* 带活体检测 */
+/* 后端能力位。 */
+#define FACE_CAP_DETECT    (1u << 0)   /* 能识别 */
+#define FACE_CAP_ENROLL    (1u << 1)   /* 能录入 */
+#define FACE_CAP_DELETE    (1u << 2)   /* 能删除 */
+#define FACE_CAP_INJECT    (1u << 3)   /* 能注入假结果（只有假后端） */
+#define FACE_CAP_LIVENESS  (1u << 4)   /* 有活体检测 */
 
 typedef struct {
     const char * name;             /* "fake" / "fm225" / "none" */
     uint32_t     caps;
-    int32_t      max_templates;    /* 模组可容纳的模板数，-1 = 不限 */
+    int32_t      max_templates;    /* 最多能存多少张脸，-1 = 不限 */
 } face_caps_t;
 
-/* ---------------- 生命周期 ---------------- */
-
-/* 初始化并绑定后端。backend_name 为 NULL 时用构建期默认后端。 */
+/* 初始化并选后端。backend_name 传 NULL 就用构建时的默认后端。开机调一次。 */
 safe_err_t hal_face_init(const char * backend_name);
 safe_err_t hal_face_deinit(void);
 
-/* 主线程周期驱动（20ms 级）。后端需要轮询硬件时在此处理。
- * now_ms 必须与 hal_time_ms() 同源（单调毫秒）——见 face_backend_t.tick 行为约定。 */
+/* 主线程每 20ms 调一次，让后端有机会轮询硬件。
+ * now_ms 必须来自 hal_time_ms() —— 两边用不同的时钟会让超时判断永远成立。 */
 void hal_face_tick(uint32_t now_ms);
 
-/* ---------------- 查询与控制 ---------------- */
-
+/* 查询能力 / 启动 / 停止 / 是否在跑。 */
 const face_caps_t * hal_face_caps(void);
-
 safe_err_t hal_face_start(void);
 safe_err_t hal_face_stop(void);
 bool       hal_face_running(void);
 
-/* Duty-cycle（FR-27 模组功耗管理）：人脸页是否前台。离开前台 = 停 UVC 采集流
- * + 终止/不再发起模组识别会话（红外补光与传感停工作降温）；回到前台恢复。
- * 由 page_face 在可见性边沿调用；face 线程 / fm225 后端经 hal_face_foreground()
- * 读取。跨线程语义与 face_thread 的退出标志相同：volatile 标量、无锁。 */
+/* 人脸页是不是当前显示的页面。不在前台就停采集、停识别，省电也降温。
+ * 由页面在切进来 / 切出去时调用（只有两个值，跨线程读也安全）。 */
 void hal_face_set_foreground(bool active);
 bool hal_face_foreground(void);
 
-/* 异步录入：立即返回，结果通过 FACE_EV_ENROLL_DONE 上报。
- * user_name（v1.4）：本地用户名，由后端写入模组侧模板，使 VERIFY 应答能把它带回来
- * 供 FR-21 凭据一致性核对（backend → face_result_t.user_name → auth_fsm）。
- * 传 NULL 或空串 = 不写名（核对会自动跳过）。 */
+/* 开始录入（异步）。user_name 是本地的用户名，会写进模组模板里，
+ * 以后识别时模组能把它带回来做核对；传 NULL 表示不写。 */
 safe_err_t hal_face_enroll_async(const char * user_name);
 
-/* 异步删除指定模板。 */
+/* 删除一张脸（异步）。 */
 safe_err_t hal_face_delete_async(int32_t face_id);
 
-/* 异步清空模组侧**全部**模板（DELETE_ALL）。
- * 结果经 FACE_EV_DELETE_DONE 上报，**face_id 恒为 -1**（无具体模板号）——
- * 调用方据此区分「全清完成」与「单条删除完成」。
- * 后端不支持 → SAFE_ERR_UNSUP；模组忙 → SAFE_ERR_BUSY。 */
+/* 清空模组里所有人脸（异步）。完成事件的 face_id 固定是 -1，
+ * 调用方靠这个区分「全清完了」和「删了一张」。 */
 safe_err_t hal_face_delete_all_async(void);
 
-/* 单次识别（FR-27 拍板 2026-09-15）：触发一次识别会话，结果/超时走既有事件链，
- * 会话结束即静默（模组红外与传感停工作）。识别不再自动循环；忙 = SAFE_ERR_BUSY，
- * 后端不支持 = SAFE_ERR_UNSUP。 */
+/* 触发一次识别（不是循环识别）。结果或超时走正常事件；忙返回 SAFE_ERR_BUSY。 */
 safe_err_t hal_face_verify_once(void);
 
-/* 模组实时人脸状态（FR-19 实时引导数据源，NOTE NID_FACE_STATE 的 state 字段）。
- * 语义（手册 §NOTE）：0=人脸正常 1=未检测到人脸 2=太靠上 3=太靠下 4=太靠左 5=太靠右；
- * -1 = 尚未收到任何状态帧（该后端无此概念或模组未上报）。
- * 后端在 face 线程持续更新，此处只读快照；无模组概念的后端恒返回 -1。 */
+/* 模组当前看到的人脸状态：0 正常，1 没看到人，2~5 分别是太靠上/下/左/右。
+ * -1 = 这个后端没有这个概念，或还没收到状态。 */
 int32_t hal_face_face_state(void);
 
-/* 人脸姿态快照（五向录入引导用）：yaw/pitch/roll，任一可为 NULL。
- * 返回 0 = 取到；< 0 = 后端无姿态概念或未上报。
- * 与 hal_face_face_state() 属于**同一帧的两个侧面**，调用方应成对读取。 */
+/* 人脸姿态（左右转头 / 抬头低头 / 歪头）和人脸框，五向录入引导用。
+ * 返回 0 = 取到；< 0 = 后端不支持。参数都可以传 NULL。 */
 int32_t hal_face_face_pose(int16_t * yaw, int16_t * pitch, int16_t * roll);
-/* 人脸框（left/top/right/bottom），与 face_state 同一次 NOTE 更新；不支持返回 -1。 */
 int32_t hal_face_face_box(int16_t * l, int16_t * t, int16_t * r, int16_t * b);
 
-/* 当前录入模式是否为五向（face_direction=0x1F）。false = 单帧。
- * 由后端 env SAFE_FACE_ENROLL_5WAY 决定，供录入页切换引导文案。 */
+/* 录入模式：true = 要录五个方向，false = 只录一张正脸。 */
 bool hal_face_enroll_five_way(void);
 
-/* 五向录入进度（供 UI 在视频上方显示分步引导）：
- *   hal_face_enroll_dir_mask() → 已完成的方向掩码（位：正1 右2 左4 下8 上16）；
- *   hal_face_enroll_next_dir() → 下一个待采集的方向（单一位）；0 = 已采齐 / 非五向。
- * 后端无此概念时返回 0。 */
+/* 五向录入进度：已完成哪些方向 / 下一个该录哪个（0 = 录完了）。 */
 uint8_t hal_face_enroll_dir_mask(void);
 uint8_t hal_face_enroll_next_dir(void);
 
-/* 运行时切换录入模式（单帧/五向）。上层在启动时按持久化策略调用一次；
- * 后端不支持时静默忽略（保持当前模式）。 */
+/* 切换录入模式。开机时按保存的设置调一次；后端不支持就忽略。 */
 void hal_face_set_enroll_five_way(bool five_way);
 
-/* 是否有录入会话在途（录入实时引导小字的显隐依据）。 */
+/* 现在是不是正在录入。 */
 bool hal_face_enrolling(void);
 
-/* 模组侧已注册用户清单（FR-21 防线 3「启动对账」用）。
- * 返回：>= 0 模组清单数量（**可以是 0**，0 与「没取到」必须区分开）；
- *       -1    该后端没有「模组清单」概念（fake / none）；
- *       -2    后端有该能力但清单尚未取得（模组未就绪 / 尚未应答）。
- * cap <= 0 时只查询数量（ids 可传 NULL）。
- * 上层用它核对「本地凭据 ↔ 模组存量」，孤儿凭据（本地有、模组无）应标失效且不用于放行。 */
+/* 模组里已经注册的人脸清单（开机对账用）。
+ * 返回 >= 0 = 清单条数（0 也是有效结果，和「没取到」不一样）；
+ *      -1 = 这个后端没有清单概念；
+ *      -2 = 有这个能力但还没取到。
+ * cap <= 0 时只问条数，ids 可以传 NULL。 */
 int32_t hal_face_module_users(int32_t * ids, int32_t cap);
 
-/* ---------------- 模组健康（FR-23） ---------------- */
-
-/* 模组健康三态（FR-23「模组健康与降级」）。与 hal_face_module_users 的三态风格一致，
- * 业务层（UI / RPC）只读，不得直接读后端全局变量：
- *   FACE_MOD_UNKNOWN = 未知：后端无模组级监测（fake / none），或尚未得出判定；
- *   FACE_MOD_OK      = 健康：近期收到过模组合法帧（NOTE READY / VERIFY 应答 / 清单应答）；
- *   FACE_MOD_FAIL    = 不健康：连续多轮无任何应答（约 15s），判定为模组无响应。
- * 不健康时上层应界面告警并自动降级为 PIN / 动态码认证（本接口只读，不改变模组状态）。 */
+/* 模组健康状况。 */
 typedef enum {
-    FACE_MOD_UNKNOWN = 0,
-    FACE_MOD_OK      = 1,
-    FACE_MOD_FAIL    = 2,
+    FACE_MOD_UNKNOWN = 0,   /* 不知道（后端没有这个监测，或还没判断出来） */
+    FACE_MOD_OK      = 1,   /* 正常：最近收到过模组的应答 */
+    FACE_MOD_FAIL    = 2,   /* 不正常：连续十几秒没有任何应答 */
 } face_module_health_t;
 
-/* 只读查询当前模组健康（FR-23）。返回上面三态之一。 */
+/* 查询健康状况（只读）。不健康时界面应该提示，并退回用 PIN / 动态码开锁。 */
 face_module_health_t hal_face_module_health(void);
 
-/* 健康三态的可读名（日志 / RPC status 用）："unknown" / "ok" / "fail"。
- * 实现在 face_service.c。非法值返回 "unknown"。 */
+/* 健康状态转文字："unknown" / "ok" / "fail"。 */
 const char * face_module_health_name(face_module_health_t h);
 
-/* 最近一次识别结果；没有任何结果时返回 NULL。 */
+/* 最近一次识别结果，还没有结果时返回 NULL。 */
 const face_result_t * hal_face_last_result(void);
 
-/* ---------------- 调试注入 ---------------- */
-
-/* 仅 FACE_CAP_INJECT 后端有效（当前为 fake），其它后端返回 SAFE_ERR_UNSUP。
- * 供调试页与 RPC inject_face 使用，真实硬件路径不会走到这里。 */
+/* 注入一条假结果，只有假后端支持（调试和远程测试用）。 */
 safe_err_t hal_face_inject(int32_t face_id, face_reason_t reason);
 
-/* 兼容层：旧同步轮询接口，内部取最近一次结果。
- * 迁移期保留，待 auth_fsm 完全改为事件驱动后删除。 */
+/* 老接口：同步取最近一次结果。保留给还没改成事件驱动的调用方，以后会删。 */
 int hal_face_poll_compat(face_result_t * out);
 
 #ifdef __cplusplus
 }
 #endif
-

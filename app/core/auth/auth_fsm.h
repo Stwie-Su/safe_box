@@ -1,25 +1,22 @@
 /**
  * @file auth_fsm.h
- * 人脸认证状态机（FR-2 按原因分流 / 核心）。
+ * 人脸 / 密码开锁的「大脑」：接收识别结果和按键，决定开不开锁。
  *
- * 这是人脸开锁链路的「大脑」：接收 hal_face 的识别结果（face_reason_t 原因码，
- * FM225 模组不输出分数），按原因分流 → UNLOCK / WAIT_OTP / DENY，
- * 并负责失败计数与设备级锁定。
+ * 处理流程：
+ *   人脸结果 → 按原因分流 → 开锁 / 转输动态码 / 拒绝 / 锁定
+ *   其中「未匹配」会累计次数：攒够几次转动态码，再攒够几次锁定。
  *
- * 分流规则（需求 v1.6 FR-19）：
- *   OK           → 开锁；
- *   NO_MATCH     → 计数，连续达 face_otp_after 转 WAIT_OTP，再达 max_failed 锁定；
- *   LIVENESS_FAIL→ 拒绝 + 防伪告警；
- *   TIMEOUT/ERROR→ 不计数。
- *
- * 与 UI 解耦：状态变化通过 auth_ui_hook 回调通知 UI 层（切页、弹窗、提示），
- * 不直接 #include LVGL（NFR-5：业务层不依赖 UI / 平台头文件）。
+ * 调用关系：
+ *   - 主线程每 100ms 调 auth_fsm_tick()，由它推进超时、检查人脸结果；
+ *   - 界面调 auth_fsm_submit_pin() / submit_otp() 提交输入；
+ *   - 状态一变就通过 ui_hook 通知界面切页，通过 event_cb 通知日志 / 远程上报。
+ *   本模块不包含 LVGL，界面层的东西一律通过回调出去。
  */
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
 
-#include "hal/hal_face.h"   /* face_reason_t（core→hal 为架构允许方向） */
+#include "hal/hal_face.h"   /* face_reason_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,71 +24,71 @@ extern "C" {
 
 typedef enum {
     FSM_IDLE = 0,     /* 待机 */
-    FSM_DETECTING,    /* 识别中（真实 FM225 轮询期间） */
-    FSM_UNLOCKED,     /* 已开锁（展示 3s） */
-    FSM_WAIT_OTP,     /* 等待动态码（弹动态密码页，60s 超时） */
-    FSM_DENY,         /* 拒绝（展示 2s） */
-    FSM_LOCKOUT,      /* 设备级锁定（倒计时 30s） */
-    FSM_VERIFYING,    /* PIN 后台校验中（v1.9 异步化：界面显示「校验中」，不阻塞主线程） */
+    FSM_DETECTING,    /* 识别中 */
+    FSM_UNLOCKED,     /* 已开锁（界面上展示 3 秒） */
+    FSM_WAIT_OTP,     /* 等用户输入动态码（60 秒超时） */
+    FSM_DENY,         /* 拒绝（展示 2 秒） */
+    FSM_LOCKOUT,      /* 锁定中（倒计时） */
+    FSM_VERIFYING,    /* PIN 正在后台校验，界面显示「校验中」 */
 } fsm_state_t;
 
-/* UI 通知回调：状态机进入某状态时调用（UI 据此切页/弹窗/提示） */
+/* 状态变化时通知界面（切页 / 弹窗 / 提示）。user 和 detail 可能为 NULL。 */
 typedef void (*auth_ui_hook_t)(fsm_state_t st, const char *user, const char *detail);
 
-/* 事件上报回调：开锁/拒绝/锁定时调用，由 main 接到 MQTT 发布（safe/log） */
+/* 开锁 / 拒绝 / 锁定时通知外部，用来写日志和上报远程通道。 */
 typedef void (*auth_event_cb_t)(const char *evt, const char *user, const char *detail, int res);
 
+/* 开机初始化一次（要排在 ui_init 之前，界面才能收到第一条状态）。 */
 void auth_fsm_init(void);
+
+/* 注册上面两个回调。ui_hook 在 ui_init 里设，event_cb 在 app_main 里设。 */
 void auth_fsm_set_ui_hook(auth_ui_hook_t hook);
 void auth_fsm_set_event_cb(auth_event_cb_t cb);
 
-void auth_fsm_tick(void);                         /* 主线程 100ms 调用：轮询 hal_face + 状态超时 */
+/* 主线程每 100ms 调一次：检查人脸结果、推进各种超时。 */
+void auth_fsm_tick(void);
 
+/* 查询当前状态 / 状态名 / 上一次人脸失败原因。 */
 fsm_state_t      auth_fsm_state(void);
 const char *     auth_fsm_state_name(fsm_state_t s);
-face_reason_t    auth_fsm_last_reason(void);       /* 取代旧 last_score（FM225 无分数） */
-const char *     auth_fsm_pending_user(void);
-int              auth_fsm_lock_remaining(void);    /* 0 = 无锁定 */
+face_reason_t    auth_fsm_last_reason(void);
 
-/* 设备级连续失败计数（只读查询，规约 §5.2）。
- * UI 现代化 ui1 新增：横幅「未匹配（n/face_otp_after）」需要展示当前连败数，
- * 而 fail_streak 原为 auth_fsm.c 内部静态、未暴露。本接口只读取，不修改状态；
- * 成功开锁与进入 LOCKOUT 时该计数由状态机自行清零。 */
+/* 当前正在验证的用户名（没人时返回 NULL）。 */
+const char *     auth_fsm_pending_user(void);
+
+/* 锁定还剩几秒（0 = 没锁）。 */
+int              auth_fsm_lock_remaining(void);
+
+/* 连续失败次数（界面显示「未匹配（2/3）」用）。 */
 int              auth_fsm_fail_streak(void);
 
-void auth_fsm_submit_face(int32_t face_id, face_reason_t reason);  /* 注入一次人脸结果（HAL→FSM） */
+/* 注入一次人脸识别结果（由人脸模块的轮询结果转过来）。 */
+void auth_fsm_submit_face(int32_t face_id, face_reason_t reason);
 
-/* v1.4（FR-21 防线 1）：带「模组返回用户名」的注入变体。
- * mod_name 为 NULL / 空串表示模组未提供名字（历史模板未写名、或非 FM225 后端）→ 跳过核对，
- * 不得据此判失效，否则会让所有历史凭据一夜之间全部失效。
- * 非空且与本地用户名不符 → 判凭据失效：拒绝开锁 + 防伪告警 + 本地人脸凭据标记失效
- * （PIN / 动态码通道不受影响）。 */
+/* 同上，额外带模组报回来的用户名，用来核对「这张脸是不是真的属于这个人」。
+ * mod_name 为空表示模组没给名字（老模板），这时跳过核对，不能判失效。 */
 void auth_fsm_submit_face_ex(int32_t face_id, face_reason_t reason, const char * mod_name);
-/* PIN 通道入口（主页键盘）。
- * v1.9 起**异步**：提交后立即进入 FSM_VERIFYING，PBKDF2 判定在 worker 线程执行，
- * 完成回调经 worker_poll() 回到主线程后才迁移到 UNLOCKED / DENY / LOCKOUT。
- * 校验期间再次提交会被忽略（单飞）；判定口径不变（走 auth_verify_pin
- * ——「连续子串」虚位匹配，受 virtual_pin_enable 开关控制）。 */
+
+/* 提交一个 PIN。**异步**：马上返回，真正的比对在后台线程做，
+ * 校验结果会通过状态迁移体现（所以调用后不要立刻读 auth_fsm_state 判断成败）。
+ * 校验期间重复提交会被忽略。 */
 void auth_fsm_submit_pin(const char * pin);
 
-/* 调 PIN 后台校验的「安全网」超时（秒，默认 120）：仅在后台迟迟不回调时兜底，正常路径不触发。
- * **非生产路径**：生产端从不调用此函数（保持默认 120s，远大于最坏 PBKDF2 耗时）；
- * 仅供单测构造确定性超时场景。0 = 下一次 auth_fsm_tick() 即判超时。 */
+/* 设置 PIN 校验的兜底超时（秒，默认 120）。只给测试用，正常路径不需要调。 */
 void auth_fsm_set_verify_timeout(uint32_t seconds);
 
-/* 动态码页提交。**2026-10-07 起异步**：与 submit_pin 同构，TOTP 校验下沉 worker
- * （auth_verify_totp 内部要读盘 + 回写防重放计数器，属规约 §3.1 禁止的主线程
- * 同步落盘）。提交后**仍停在 WAIT_OTP**（不新增状态），校验完成经 worker_poll()
- * 回到主线程后才迁移到 UNLOCKED / DENY / LOCKOUT。
- * ⚠ 调用方不得在调用后立刻读 auth_fsm_state() 判定结果 —— 那时作业还在途；
- *   结果一律等状态迁移（UI 走 auth_ui_hook，见 page_otp_on_fsm）。 */
+/* 提交一个动态码。同样异步，提交后仍停在 WAIT_OTP，等结果再迁移。 */
 void auth_fsm_submit_otp(const char * code);
+
+/* 取消动态码，回到待机。 */
 void auth_fsm_cancel_otp(void);
 
-void auth_fsm_note_unlock(const char * user);          /* 其它通道成功后统一走此处（脉冲+日志+UI） */
-void auth_fsm_note_failure(const char * detail);       /* 失败计数 + 设备级锁定判定 */
+/* 别的通道（远程 / 人脸）开锁成功后统一调这里：动作、日志、界面一次做完。 */
+void auth_fsm_note_unlock(const char * user);
+
+/* 记一次失败（累计次数，够了就锁定）。 */
+void auth_fsm_note_failure(const char * detail);
 
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif
-

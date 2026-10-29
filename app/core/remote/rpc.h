@@ -1,25 +1,17 @@
 /**
  * @file rpc.h
- * RPC 指令框架（需求 FR-5 / M7）：解析 safe/cmd 并分发到业务动作。
+ * 远程指令处理：解析 safe/cmd 里的 JSON，执行对应动作，再把结果发回去。
  *
- *  - 支持指令见需求 2.6：query_status / query_users / remote_unlock / add_user /
- *    del_user / set_face_enable / set_face_policy / sync_time / inject_face /
- *    submit_otp。
- *  - 敏感操作（远程开锁 / 增删用户 / 切换通道 / 改人脸策略）强制携带管理员 TOTP（FR-3）；
- *    缺 otp 回 2001，错误回 2002。
- *  - 回执统一发 safe/log（带 req_id）；query_status 额外发当前状态快照，
- *    query_users 返回分页的用户清单（id/name/role/enabled/face，绝不含凭据字段）。
- *  - 线程安全：MQTT 线程只负责把消息入队，rpc_poll() 在主线程消费（见 3.3）。
+ * 支持的指令：查状态、查用户、远程开锁、增删用户、开关人脸通道、改人脸策略、
+ * 校时、注入人脸、提交动态码。
+ * 敏感操作必须带管理员动态码，没带返回 2001，错了返回 2002。
  *
- * ---------------- 已知边界（刻意不做，不是遗漏） ----------------
- * ★ **没有 remote_edit_user / remote_set_pin**：远程只能增删用户、开关人脸通道，
- *   不能改既有用户的 PIN / 角色名。原因：这类操作的复杂度在**安全策略**而不在
- *   通道 —— 改管理员 PIN 会让「持有旧凭据的现场管理员」被远程锁死（设备到手、
- *   网络在别人手里，等于凭据易主）；改角色则是提权/降权操作，需要一套与 TOTP
- *   并行的授权模型（谁能改谁的什么）。在授权模型落地之前把口子开在通道上，
- *   只是让「远程改凭据」这件事看起来可用，实际是把风险从「做不了」变成
- *   「能做但没人审」。要改 PIN / 名字，请到设备上走本地流程（旧 PIN 校验 +
- *   管理员二次确认，见 page_users 的 change_pwd / auth 弹窗）。
+ * 线程：网络线程只负责把消息放进队列，真正的处理在主线程 rpc_poll() 里做
+ * （因为要改界面和用户表）。
+ *
+ * 刻意没做的两件事：远程改 PIN、远程改用户角色。
+ * 这两件事的风险在授权模型，不在通道：改管理员 PIN 会让拿着旧密码的现场管理员
+ * 直接被锁在外面。要改请到设备上走本地流程。
  */
 #pragma once
 #include <stdbool.h>
@@ -29,30 +21,28 @@
 extern "C" {
 #endif
 
-/* 启动 MQTT + 注册指令处理。host/port 指向本地 Broker。 */
+/* 启动远程通道并注册指令处理。开机调一次（配置里关掉时不调）。 */
 void rpc_init(const char *host, int port);
 
-/* 主线程定时调用：取走指令队列并分发。 */
+/* 主线程每 20ms 调一次：取指令队列并执行。 */
 void rpc_poll(void);
 
-/* 周期上报状态（5s 定时器调用）。 */
+/* 每 5 秒上报一次状态。 */
 void rpc_publish_status_now(void);
 
-/* 发一条 qos1 + retain=1 的状态（D37）：连接建立时用来覆盖 LWT 留下的 online:0。
- * 与 rpc_publish_status_now 的区别只在 retain 标志，语义见 rpc.c 里的说明。 */
+/* 连上 broker 的那一刻发一次「在线」状态（retain），用来盖掉上次掉线留下的「离线」。 */
 void rpc_publish_status_retained(void);
 
-/* 事件上报：由 auth_fsm 的 event_cb 调用，转发到 safe/log（含 UNLOCK/DENY/LOCKOUT）。 */
+/* 上报一条事件（开锁成功 / 拒绝 / 锁定）。由认证状态机的事件回调调。 */
 void rpc_publish_event(const char *evt, const char *user, const char *detail, int res);
 
-/* UI 轮询：是否有待处理的「本地动态码弹窗」请求（remote_unlock 无 otp）。 */
+/* 界面轮询：有没有待处理的「本地弹动态码」请求。有就取出 req_id 返回 true。 */
 bool rpc_take_local_otp(char *req_id, size_t cap);
 
-/* 业务层（auth_fsm）事件回调挂钩点 */
+/* 设置事件回调（认证模块用，可以把事件转给别处）。 */
 typedef void (*rpc_event_hook_t)(const char *evt, const char *user, const char *detail, int res);
 void rpc_set_event_hook(rpc_event_hook_t hook);
 
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif
-

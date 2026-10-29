@@ -1,6 +1,6 @@
 /**
  * @file actuator_backend.h
- * 执行器后端接口（内部头文件，业务层不要包含）。
+ * 锁后端的函数表（内部头，业务层用 hal_actuator.h）。
  */
 #pragma once
 
@@ -9,11 +9,11 @@
 typedef struct {
     const char * name;
     safe_err_t (*init)(void);
-    /* 拉高 ms 毫秒后自动拉低；时长上限已由分发层截断 */
+    /* 拉高 ms 毫秒后自动拉低。时长上限由上层截断过，这里不用再管。 */
     safe_err_t (*pulse)(uint32_t ms);
-    /* 立即拉低 */
+    /* 马上拉低 */
     safe_err_t (*release)(void);
 } hal_actuator_backend_t;
 
-/* 后端在脉冲结束/强制拉低时调用，用于同步分发层状态 */
+/* 后端在脉冲结束或强制拉低时调，让上层知道现在已经是低电平。 */
 void hal_actuator_notify_low(void);

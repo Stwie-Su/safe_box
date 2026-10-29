@@ -1,26 +1,17 @@
 /**
  * @file thread_util.h
- * 线程可观测性工具（服务于规约 §3.3 的「自创线程 ≤4」预算验收）。
+ * 给自建线程起名字，方便用 ps -L / top -H 看清谁是谁。
  *
- * ★ 为什么需要这个头
- *   本项目自创 4 条线程：face（相机采集+串口）/ worker（异步作业）/ mqtt-net（远程通道）/
- *   actuator-off（执行器延时关断，临时）。但进程内还混着**不属于我们**的线程：
- *   PC 端实测 22 条，其中 8 条是 Mesa 的 llvmpipe（软件渲染）、约 9 条是 SDL2 内部线程
- *   （这两类板子端 FBDEV 构建都没有）。不命名的话 top -H / ps -L 里它们全显示进程名
- *   lvglsim，根本分不清谁是谁 —— 「自创线程 ≤4」这条预算也就**无从验收**。
- *   故统一在这里命名，并把平台差异集中在一处。
+ * 为什么需要：进程运行起来后会同时存在好几条线程（我们自己的 + SDL2 / Mesa
+ * 等第三方库的），不命名的话全显示成进程名，排查问题时分不清。
  *
- * ★ 三条平台坑（都封在这个头里，调用方不必关心）
- *   1. glibc 的 pthread_setname_np 受 __USE_GNU 保护，需要 _GNU_SOURCE，
- *      且**必须在 <pthread.h> 之前定义** → 本头必须是 .c 文件的**第一个 include**
- *      （放在任何系统头之前）。
- *   2. 名字长度上限 15 字符（Linux TASK_COMM_LEN=16，含结尾 '\0'），
- *      超了会被内核**静默拒绝**（不报错、也不生效）→ 这里统一截断。
- *   3. 非 glibc（musl/uclibc）可能没有该接口 → 退化成空实现，保证双平台都能构建。
+ * 用法（每条线程的入口函数第一行）：
+ *   #include "platform/thread_util.h"   ← 必须是第一个 include
+ *   static void * worker_main(void * p) { safe_thread_setname("safe-worker"); ... }
  *
- * 用法（在线程入口函数开头自我命名）：
- *   #include "platform/thread_util.h"      // 必须是第一个 include
- *   static void * worker_main(void *p) { safe_thread_setname("safe-worker"); ... }
+ * 两个注意点：
+ *   1) 必须第一个 include：宏 _GNU_SOURCE 要在 <pthread.h> 之前定义；
+ *   2) 名字最长 15 个字符，超了内核会静默忽略，所以这里主动截断。
  */
 #ifndef SAFE_PLATFORM_THREAD_UTIL_H
 #define SAFE_PLATFORM_THREAD_UTIL_H
@@ -32,12 +23,12 @@
 #include <pthread.h>
 #include <stddef.h>
 
-/* 线程名长度上限：Linux TASK_COMM_LEN = 16，含结尾 '\0' → 实际可用 15。 */
+/* 线程名上限：Linux 的 TASK_COMM_LEN = 16，含结尾 '\0'，实际能用 15 个字符。 */
 #define SAFE_THREAD_NAME_MAX 15
 
 #if defined(__GLIBC__)
 
-/* 给**当前线程**命名。name 超过 15 字符会被截断（不截断内核会静默拒绝）。 */
+/* 给当前线程命名。超过 15 字符会被截断（不截断内核直接拒绝且不报错）。 */
 static inline void safe_thread_setname(const char *name)
 {
     char   buf[SAFE_THREAD_NAME_MAX + 1];
@@ -51,7 +42,7 @@ static inline void safe_thread_setname(const char *name)
     (void)pthread_setname_np(pthread_self(), buf);
 }
 
-#else  /* 非 glibc：没有该接口，退化为空实现，不阻断构建 */
+#else  /* 非 glibc 没有这个接口：空实现，保证两个平台都能编过 */
 
 static inline void safe_thread_setname(const char *name)
 {

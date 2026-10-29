@@ -1,13 +1,11 @@
 /**
  * @file lv_font_cn_decl.h
- * 自定义嵌入字体声明头（LVGL 官方自定义字体机制）。
+ * 声明工程自带的中文字体，让 LVGL 的默认字体配置也能引用到它们。
  *
- * 通过 lv_conf.h 中的 LV_FONT_USE_CUSTOM_INCLUDE / LV_FONT_CUSTOM_INCLUDE
- * 被 lv_conf_internal.h 引入，其内的 LV_FONT_CUSTOM_DECLARE 会被
- * lvgl/font/lv_font.h 展开为 extern 声明，从而让 LV_FONT_DEFAULT 等
- * 位置（如 lv_display.c 的主题默认字体）能正确引用本工程字体。
+ * 这个文件是被 lv_conf.h 里的自定义字体配置自动包含的，不是给业务代码用的，
+ * 所以不用在别处 include。
  *
- * 字体文件本体由 tools/fonts/gen_fonts.py 生成，勿手改。
+ * 字体文件本身是脚本生成的（tools/fonts/gen_fonts.py），不要手改。
  */
 #ifndef LV_FONT_CN_DECL_H
 #define LV_FONT_CN_DECL_H

@@ -1,25 +1,20 @@
 /**
  * @file store_cache.h
- * 【轻量版】只读用户表快照缓存（QA-20 不变式的配套设施）。
+ * 用户表的内存快照：主线程想「查个用户」时不用读盘。
  *
- * 背景：不变式升级为「users.json / safe.log 的**读与写**全部由 worker 线程独占」
- * 之后，主线程就不能再调 `user_load_all()` 了 —— 但 `build_status()` 想要
- * `user_count`、UI 想要按 id 找用户，为这种小查询每次投一个 worker 作业太重。
- * 于是给一份「worker 写、主线程只读」的快照缓存。
+ * 为什么需要：读写 users.json 只能由 worker 线程做，但界面经常要查
+ * 「这个 id 叫什么名字」「一共几个用户」。每次都投一个后台作业太重，
+ * 所以 worker 每次写完盘顺便更新一份内存快照，主线程直接读这份。
  *
- * 并发模型（**迷你版 RCU**）：
- *   两块定长 `safe_user_t[]` 双缓冲 + 一个 `volatile int active` 指示当前有效块。
- *   写侧（worker）永远只填 **inactive** 块，填完再切 `active`；
- *   读侧（主线程）先取 active、再 memcpy 一份出来用。
- *   → 读侧永不会读到「填了一半」的块，也不需要加锁、不会阻塞。
+ * 怎么保证读不到「改了一半」的数据：准备两块数组，worker 只写空闲的那块，
+ * 写完整块再切换「当前有效」标记；读的一方先看标记、再整块拷走。
+ * 单核 CPU + 只有一个 worker 线程的前提下，这样不加锁也不会读到半成品。
  *
- * ★ 诚实边界（面试要主动说）：`volatile` 不是 C11 的原子语义，严格讲不足以保证
- *   多核上的可见性顺序。本项目目标机是**单核** Cortex-A7，且写侧恒为唯一一个
- *   worker 线程（不变式保证），这个前提下它是充分的；若将来上多核，应把
- *   `active` 换成 `_Atomic int` 并给写侧加 release / 读侧加 acquire。
- *
- * 为什么**不做**全量缓存：只缓存「用户表」这一个高频只读对象，不缓存日志、
- * 不缓存策略（策略已由 `user_policy()` 的加锁快照解决）。范围越小越不容易腐化。
+ * ★ 代价要说清楚：快照是「上一次写盘之后」的状态，可能慢一拍。
+ *   所以凡是会改变安全结论的判断（失败次数、锁定时间、已用次数），
+ *   都不能基于快照做「读出来改一改写回去」，那些必须交给 async_store 的
+ *   astore_auth_side 整段在 worker 里做。这里只适合查「有没有这个人」
+ *   「通道开没开」「他是什么角色」这类慢一拍也不影响结论的信息。
  */
 #pragma once
 
@@ -32,48 +27,25 @@
 extern "C" {
 #endif
 
-/* 快照容量：与 users.json 的用户数上限对齐（静态分配，**不做堆分配**）。
- * 超出部分被截断（写侧静默丢弃尾部），读侧最多看到这么多条。 */
+/* 快照最多放多少个用户（静态数组，不占堆）。超出的部分会被丢掉。 */
 #define STORE_CACHE_USER_MAX 64
 
-/**
- * 写侧接口：**只能由 worker 线程调用**（通常在每次落盘成功后）。
- * list 可为 NULL（等价于发布一份「空表」）；count 会被钳到 [0, STORE_CACHE_USER_MAX]。
- */
+/* 写快照：**只能 worker 线程调**（一般在每次写盘成功后）。
+ * list 可以传 NULL（等于发布一份空表）；count 会被夹到 [0, STORE_CACHE_USER_MAX]。 */
 void store_cache_publish_users(const safe_user_t *list, int count);
 
-/**
- * 读侧接口：主线程 / 任何线程均可调用，不落盘、不阻塞、不投作业。
- * count 与 stamp 均可为 NULL（只想要其中一个时传 NULL 即可）。
- * stamp = 快照版本号，每次发布 +1；**stamp == 0 表示从未发布过**（此时 count 为 0，
- * 调用方应把它理解为「未知」而不是「确实没有用户」）。
- * 返回 0 = 成功（当前实现恒为 0，保留返回值以便将来区分错误）。
- */
+/* 读：有几个用户 / 快照版本号。两个出参都可以传 NULL。
+ * 版本号每次发布 +1；**0 表示还没发布过**（这时数量是 0，但意思是「还不知道」
+ * 而不是「确实没有用户」）。 */
 int store_cache_user_count(int *count, uint32_t *stamp);
 
-/**
- * 读侧接口：按 id 查快照。找到返回 0 并拷进 *out；未找到返回 -1。
- * out 为 NULL 时只做「是否存在」的判断。
- */
+/* 读：按 id 查。找到返回 0 并写进 *out；没找到返回 -1。out 传 NULL 只判断存在性。 */
 int store_cache_find_by_id(int id, safe_user_t *out);
 
-/**
- * 读侧接口：按用户名查快照（认证路径用）。语义与 store.h 的 user_find_by_name
- * 一致（0 = 找到），区别只是**不读盘**——数据来自 worker 发布的最新快照。
- *
- * ★ 用它的代价必须写清楚：快照是「上一次落盘后的状态」，可能滞后一帧
- *   （worker 一次写盘 ~毫秒级）。认证路径里凡**决定安全判定**的读写
- *   （failed_attempts / lock_until / last_otp_counter / used_count）一律
- *   **不能**基于快照做读改写 —— 那些必须整体下沉 worker（见 async_store 的
- *   astore_auth_side）。本接口只用于「用户是否存在 / 通道是否启用 /
- *   角色是什么 / 取用户名写审计」这类**不因滞后而改变安全结论**的查询。
- */
+/* 读：按用户名查（认证路径用）。0 = 找到。不读盘，数据来自最新快照。 */
 int store_cache_find_by_name(const char *name, safe_user_t *out);
 
-/**
- * 读侧接口：按人脸模板号查快照（face_id >= 0 且已绑定）。
- * 语义与 user_find_by_face 一致（0 = 找到），同样不读盘。
- */
+/* 读：按人脸模板号查。0 = 找到。同样不读盘。 */
 int store_cache_find_by_face(int face_id, safe_user_t *out);
 
 #ifdef __cplusplus
